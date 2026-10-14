@@ -2441,6 +2441,68 @@ def check(label, bundle, bundle_id):
 check("app", app, "live.discomarder.memosng")
 check("extension", appex, "live.discomarder.memosng.share")
 
+# The Settings app's pane as the BUILT app carries it (MEMNG-781): every key the app reads, in
+# order — the three keys that were there before are the positive control, so a reader that came
+# back empty fails on them first — and the Storage group as specified: each of its two rows of its
+# own control type and title, standing under Storage (a keyed row retyped to a group is no row of
+# Storage), the switch off by default, the groups in the order Uploads, Storage, About, and the
+# footer that promises the next launch.
+SETTINGS_KEYS = ["settings.appearance", "uploadOverMobileData", "settings.mediaCacheSize",
+                 "settings.clearMediaCacheOnLaunch", "settings.version"]
+STORAGE_ROWS = [("settings.mediaCacheSize", "PSTitleValueSpecifier", "Media cache"),
+                ("settings.clearMediaCacheOnLaunch", "PSToggleSwitchSpecifier",
+                 "Clear media cache on next launch")]
+STORAGE_FOOTER = "Cleared the next time the app opens; the switch then turns off again."
+try:
+    pane = load(os.path.join(app, "Settings.bundle", "Root.plist"))
+    rows = pane.get("PreferenceSpecifiers", [])
+    keys = [row.get("Key") for row in rows if row.get("Key")]
+    if keys == SETTINGS_KEYS:
+        print("--- ok: Settings.bundle keys = %s" % ", ".join(keys))
+    else:
+        fail("Settings.bundle keys are %r, expected %r" % (keys, SETTINGS_KEYS))
+    groups, owner, keyed = [], None, {}
+    for row in rows:
+        # The group a row stands under is the group BEFORE it: a row that is itself a group
+        # stands under the one it follows, and is judged by its type below.
+        if row.get("Key"):
+            keyed[row.get("Key")] = (row, owner)
+        if row.get("Type") == "PSGroupSpecifier":
+            owner = row
+            groups.append(row.get("Title"))
+    for key, kind, title in STORAGE_ROWS:
+        if key not in keyed:
+            fail("Settings.bundle has no %s row" % key)
+            continue
+        row, group = keyed[key]
+        found = (row.get("Type"), row.get("Title"), group.get("Title") if group else None)
+        if found == (kind, title, "Storage"):
+            print("--- ok: %s is a %s titled %r and stands under Storage" % (key, kind, title))
+        else:
+            fail("Settings.bundle %s is %r titled %r under %r, expected %s titled %r under Storage"
+                 % ((key,) + found + (kind, title)))
+    toggle = keyed.get("settings.clearMediaCacheOnLaunch", ({}, None))[0]
+    if toggle.get("DefaultValue") is False:
+        print("--- ok: settings.clearMediaCacheOnLaunch defaults to false")
+    else:
+        fail("Settings.bundle settings.clearMediaCacheOnLaunch defaults to %r, expected false"
+             % toggle.get("DefaultValue"))
+    order = [groups.index(name) if name in groups else -1 for name in ("Uploads", "Storage", "About")]
+    if -1 not in order and order[0] < order[1] < order[2]:
+        print("--- ok: Settings.bundle groups %s" % ", ".join(str(name) for name in groups))
+    else:
+        fail("Settings.bundle groups are %r, expected Uploads, Storage, About in that order"
+             % groups)
+    storage = [row for row in rows
+               if row.get("Type") == "PSGroupSpecifier" and row.get("Title") == "Storage"]
+    footers = [row.get("FooterText") for row in storage]
+    if footers == [STORAGE_FOOTER]:
+        print("--- ok: the Storage footer promises the next launch")
+    else:
+        fail("Settings.bundle Storage footers are %r, expected [%r]" % (footers, STORAGE_FOOTER))
+except Exception as error:
+    fail("could not read the built app's Settings.bundle/Root.plist: %s" % error)
+
 # An extension's CFBundleVersion must equal its host's or the host will not install.
 try:
     host_build = load(os.path.join(app, "Info.plist")).get("CFBundleVersion")

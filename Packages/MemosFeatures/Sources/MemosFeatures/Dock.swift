@@ -42,6 +42,9 @@ final class AppDock {
     /// Whether a scope pick's landing is unsettled: a pick swapped the Library's scroll view and
     /// no scroll view has moved since. Not observed: nothing is drawn from it.
     @ObservationIgnored private var landing = false
+    /// How many times each tab was pressed while it was already the one on screen (MEMNG-781):
+    /// what a tab's root watches to go back to its root. Observed, so a root sees each press.
+    private(set) var reselections: [MainTab: Int] = [:]
 
     init() {}
 
@@ -79,7 +82,10 @@ final class AppDock {
         let shown = showing
         switch event {
         // A press moves the selection to the tab pressed, the tab showing pressed again included.
-        case .pressedTab(let tab, _), .selected(let tab):
+        case .pressedTab(let tab, let from):
+            showing = tab
+            if tab == from { reselections[tab, default: 0] += 1 }
+        case .selected(let tab):
             showing = tab
         case .pressedLibraryIcon, .scrolled, .scrolledTab:
             break
@@ -471,5 +477,24 @@ private struct DockFeed: ViewModifier {
             if phase.isScrolling, !old.isScrolling { fence.fold.began() }
             fence.moving = phase.isScrolling
         }
+    }
+}
+
+extension View {
+    /// Runs `perform` whenever `tab` is pressed in the main bar while it is the tab on screen
+    /// (`AppDock.reselections`) — a tab's root going back to its root. Nothing without a dock.
+    func onTabReselected(_ tab: MainTab, perform: @escaping () -> Void) -> some View {
+        modifier(TabReselectWatch(tab: tab, perform: perform))
+    }
+}
+
+/// Watches the dock's count of presses on `tab` while it showed.
+private struct TabReselectWatch: ViewModifier {
+    let tab: MainTab
+    let perform: () -> Void
+    @Environment(AppDock.self) private var dock: AppDock?
+
+    func body(content: Content) -> some View {
+        content.onChange(of: dock?.reselections[tab] ?? 0) { perform() }
     }
 }

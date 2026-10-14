@@ -18,7 +18,8 @@ struct MediaLibraryView: View {
     @State private var library: MediaLibraryStore?
     /// The account the grid's rows were read as (MEMNG-591).
     @State private var gridAccount = GridAccount()
-    /// The tags the options menu offers, with picture counts for the kind on screen (MEMNG-513).
+    /// The tags under the kind on screen (MEMNG-513): read so a tag the kind no longer holds lets
+    /// the grid widen back (`loadTags`). The menu offers none since MEMNG-779 — Collections does.
     @State private var tags: LibraryTagStore?
     /// The year and day buckets the Years and Months views are drawn from (MEMNG-586).
     @State private var buckets: LibraryBucketStore?
@@ -34,6 +35,7 @@ struct MediaLibraryView: View {
     @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
     /// A year asked for from the Collections root, shown in Months (MEMNG-720).
     @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
+    @Environment(LibraryMonthJump.self) private var monthJump: LibraryMonthJump?
     /// The media a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The download a tile's menu starts, and the sheet it ends in.
@@ -48,9 +50,6 @@ struct MediaLibraryView: View {
     @State private var deleting = LibraryDeleteFlow()
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
     @State private var dockClaim = UUID()
-    /// The media cache's size, for the options menu's Clear item: read when the header appears,
-    /// and again by the item after it clears.
-    @State private var cacheUsage = MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 0)
     /// What the zoom transition matches the viewer to: the tile it grew out of.
     @Namespace private var mediaZoom
     /// Which direction this device reads the library in, across launches. Read once, when the
@@ -96,7 +95,7 @@ struct MediaLibraryView: View {
             }
             .background(Color(.systemGroupedBackground))
             // One header over All, Years and Months alike, and nothing over the grid below it:
-            // the kind, the sort and the tag are chosen in its options menu (page 3929 decision 5).
+            // the kind and the sort are chosen in its filter menu (page 3929 decision 5).
             .safeAreaBar(edge: .top) {
                 if let library { header(library) }
             }
@@ -119,7 +118,10 @@ struct MediaLibraryView: View {
                             delete: {
                                 deleting.claim(
                                     LibraryDeleteFlow.tap(selection, in: library?.items ?? []))
-                            }
+                            },
+                            // Narrows the grid to the chosen pictures and back (MEMNG-779).
+                            showSelected: { selection.toggleNarrowed() },
+                            narrowed: selection.narrowed
                         )
                         .sharingFiles(sharing)
                     }
@@ -227,6 +229,15 @@ struct MediaLibraryView: View {
         .onChange(of: YearJumpKey(year: yearJump?.pending, ready: library != nil), initial: true) {
             guard let yearJump, let library,
                 LibraryYearJumpRouting.apply(yearJump, to: library, scope: choice)
+            else { return }
+            Task { await load() }
+        }
+        // A month asked for from Collections: Months at that month's days, the same way.
+        .onChange(
+            of: MonthJumpKey(month: monthJump?.pending, ready: library != nil), initial: true
+        ) {
+            guard let monthJump, let library,
+                LibraryMonthJumpRouting.apply(monthJump, to: library, scope: choice)
             else { return }
             Task { await load() }
         }
@@ -401,11 +412,14 @@ struct MediaLibraryView: View {
     @ViewBuilder
     private func grid(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
-            items: library.items,
+            // While "Show Selected" is on, only the chosen pictures, in the grid's order — the
+            // months and days they fall in keep their headings (MEMNG-779).
+            items: selection.visible(in: library.items),
             errorText: library.lastError,
             loadingMore: library.isLoadingMore,
             zoom: mediaZoom,
-            wantsMore: { library.shouldLoadMore(after: $0) },
+            // An index into the narrowed list is no position in the store's: no paging from it.
+            wantsMore: { !selection.narrowed && library.shouldLoadMore(after: $0) },
             open: { open($0) },
             fetch: { file, rendition in await fetch(file, rendition) },
             loadMore: { await loadMore() },
@@ -461,7 +475,7 @@ struct MediaLibraryView: View {
         _ = await (list, counts)
     }
 
-    /// The title, the line naming what the grid holds, and the options menu that changes it.
+    /// The title, the line naming what the grid holds, and the filter menu that changes it.
     private func header(_ library: MediaLibraryStore) -> some View {
         LibraryHeader(
             subtitle: MediaLibraryPresentation.subtitle(
@@ -471,19 +485,13 @@ struct MediaLibraryView: View {
             ),
             select: choice.scope == .all ? { selection.begin() } : nil,
             selecting: selection.isActive,
-            allSelected: selection.coversAll(in: library.items),
-            toggleAll: { selection.toggleAll(in: library.items) },
             close: { selection.close() }
         ) {
-            LibraryOptionsMenuContent(
-                order: sortBinding(library),
+            LibraryFilterMenuContent(
                 filter: filterBinding(library),
-                tag: tagBinding(library),
-                tagRows: tagRows(library),
-                cache: $cacheUsage
+                order: sortBinding(library)
             )
         }
-        .onAppear { cacheUsage = MediaCacheClearing.usage() }
     }
 
     /// Choosing a kind resets the paging (`setFilter`) and reads the first page of the kind that
@@ -496,21 +504,6 @@ struct MediaLibraryView: View {
             set: { chosen in
                 guard chosen != library.filter else { return }
                 library.setFilter(chosen)
-                Task { await load() }
-            }
-        )
-    }
-
-    private func tagRows(_ library: MediaLibraryStore) -> [LibraryTagRow] {
-        MediaLibraryPresentation.tagRows(tags?.tags ?? [], selected: library.tag)
-    }
-
-    private func tagBinding(_ library: MediaLibraryStore) -> Binding<String?> {
-        Binding(
-            get: { library.tag },
-            set: { chosen in
-                guard chosen != library.tag else { return }
-                library.setTag(chosen)
                 Task { await load() }
             }
         )
@@ -624,6 +617,11 @@ struct MediaLibraryView: View {
 
     private struct YearJumpKey: Equatable {
         let year: String?
+        let ready: Bool
+    }
+
+    private struct MonthJumpKey: Equatable {
+        let month: String?
         let ready: Bool
     }
 

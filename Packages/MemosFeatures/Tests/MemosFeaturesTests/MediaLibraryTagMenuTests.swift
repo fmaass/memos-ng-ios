@@ -116,95 +116,208 @@ struct MediaLibraryTagMenuTests {
             #expect(line == expected, "\(filter) \(order) \(tag ?? "no tag")")
         }
     }
-
-    @Test("the sort rows say what they sort by")
-    func sortRowLabels() {
-        #expect(
-            MediaLibraryOrder.allCases.map(MediaLibraryPresentation.sortLabel(for:))
-                == ["Sort by Newest First", "Sort by Oldest First"]
-        )
-    }
 }
 
-/// The options menu's rows as the inline Pickers draw them (plan page 3929 decisions 5, 10 and
-/// 12): hosted in a window under a list, which draws an inline Picker's rows the way the menu does
-/// — every row, the chosen one marked selected — without a menu that has to be opened by touch.
+/// The round filter button's menu as Photos draws it (MEMNG-779, WPN-12 phase 1): the kinds under
+/// a "Filter" heading, a divider, and a nested "Sort By" menu whose label says the order in force.
+/// Hosted under a list, which draws an inline Picker's rows the way the menu does — every row, the
+/// chosen one marked selected — and a nested menu as the one row that opens it, without a menu
+/// that has to be opened by touch.
 @MainActor
-@Suite("Library options menu render")
-struct LibraryOptionsMenuRenderTests {
-    private struct Harness: View {
-        @State var order: MediaLibraryOrder
+@Suite("Library filter menu render")
+struct LibraryFilterMenuRenderTests {
+    private struct FilterHarness: View {
         @State var filter: MediaLibraryFilter
-        @State var tag: String?
-        let tags: [LibraryTag]
-        @State var cache = MediaCacheMaintenance.Usage(usedBytes: 0, capacityBytes: 0)
+        @State var order: MediaLibraryOrder
 
         var body: some View {
             List {
-                LibraryOptionsMenuContent(
-                    order: $order,
-                    filter: $filter,
-                    tag: $tag,
-                    tagRows: MediaLibraryPresentation.tagRows(tags, selected: tag),
-                    cache: $cache
-                )
+                LibraryFilterMenuContent(filter: $filter, order: $order)
             }
         }
     }
 
-    /// Every element the hosted hierarchy reads out, in reading order, with whether it is marked
-    /// selected.
-    private static func rows(in node: Any, into found: inout [(String, Bool)]) {
-        guard let object = node as? NSObject else { return }
-        if let label = object.accessibilityLabel, !label.isEmpty {
-            found.append((label, object.accessibilityTraits.contains(.selected)))
-        }
-        for child in object.accessibilityElements ?? [] { rows(in: child, into: &found) }
-        if let view = object as? UIView {
-            for subview in view.subviews { rows(in: subview, into: &found) }
+    /// The order a list row of the Sort By menu reads from: the store's, as the screen binds it.
+    /// The Sort By menu's label on its own: a list draws its two lines as two rows, so what the
+    /// label SHOWS is read, not what the menu tells VoiceOver.
+    private struct SortLabelHarness: View {
+        let store: MediaLibraryStore
+
+        var body: some View {
+            List {
+                SortByMenuLabel(order: store.order)
+            }
         }
     }
 
-    @Test("three groups in order, each with its chosen row ticked, under a non-default choice")
-    func threeGroupsAndTheirTicks() async {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
-        window.rootViewController = UIHostingController(
-            rootView: Harness(
-                order: .oldestFirst,
-                filter: .videos,
-                tag: "travel",
-                tags: [LibraryTag(name: "travel", count: 3), LibraryTag(name: "food", count: 1)]
-            )
-        )
-        window.makeKeyAndVisible()
-        defer {
-            window.isHidden = true
-            window.rootViewController = nil
-        }
+    private struct SortHarness: View {
+        let store: MediaLibraryStore
 
-        let expected = [
-            "Sort by Newest First", "Sort by Oldest First",
-            "All Items", "Photos", "Videos",
-            "All tags", "travel (3)", "food (1)",
-        ]
-        var found: [(String, Bool)] = []
+        var body: some View {
+            let order = Binding(get: { store.order }, set: { store.setOrder($0) })
+            List {
+                SortByMenu(order: order)
+                SortByMenuContent(order: order)
+            }
+        }
+    }
+
+    /// One element the hosted hierarchy reads out: its label and value, whether it is marked
+    /// selected, and where it stands.
+    private struct Row {
+        let label: String
+        let value: String
+        let selected: Bool
+        let frame: CGRect
+    }
+
+    /// Every labelled element the hosted hierarchy reads out, each label once (its first
+    /// appearance), top to bottom as drawn: a list's section heading is a view the walk reaches
+    /// after the rows under it, so the walk's own order is not the order on screen.
+    private static func rows(in window: UIWindow) -> [Row] {
+        var found: [Row] = []
+        var seen: Set<String> = []
+        func walk(_ node: Any) {
+            guard let object = node as? NSObject else { return }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { return }
+            if let label = object.accessibilityLabel, !label.isEmpty, seen.insert(label).inserted {
+                found.append(
+                    Row(
+                        label: label,
+                        value: object.accessibilityValue ?? "",
+                        selected: object.accessibilityTraits.contains(.selected),
+                        frame: object.accessibilityFrame))
+            }
+            for child in object.accessibilityElements ?? [] { walk(child) }
+            if let view = object as? UIView {
+                for subview in view.subviews { walk(subview) }
+            }
+        }
+        walk(window)
+        return found.enumerated().sorted {
+            ($0.element.frame.minY, $0.offset) < ($1.element.frame.minY, $1.offset)
+        }.map(\.element)
+    }
+
+    private static func host(_ view: some View) -> UIWindow {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        window.rootViewController = UIHostingController(rootView: view)
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    private static func settle(_ window: UIWindow, until ready: ([Row]) -> Bool) async -> [Row] {
+        var found: [Row] = []
         for _ in 0..<80 {
             window.setNeedsLayout()
             window.layoutIfNeeded()
             try? await Task.sleep(for: .milliseconds(25))
-            found = []
-            Self.rows(in: window, into: &found)
-            if Set(expected).isSubset(of: found.map(\.0)) { break }
+            found = rows(in: window)
+            if ready(found) { break }
+        }
+        return found
+    }
+
+    /// The nested menu's row reads "Sort By" and then the order in force.
+    private static func isSortBy(_ label: String) -> Bool { label.hasPrefix("Sort By") }
+
+    @Test("the filter menu lists Filter, its three kinds, a divider and Sort By, nothing else")
+    func filterMenuRows() async {
+        let window = Self.host(FilterHarness(filter: .all, order: .newestFirst))
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let found = await Self.settle(window) { rows in
+            rows.contains { Self.isSortBy($0.label) } && rows.contains { $0.label == "Videos" }
         }
 
-        // First appearance of each row, so the order read is the order drawn.
-        var seen: Set<String> = []
-        let drawn = found.filter { expected.contains($0.0) && seen.insert($0.0).inserted }
-        #expect(drawn.map(\.0) == expected, "the menu draws \(found.map(\.0))")
-        let ticked = Set(found.filter { $0.1 && expected.contains($0.0) }.map(\.0))
+        // Exactly these, in this order: no tag row, no "Clear media cache", no second sort group.
+        let drawn = found.map { Self.isSortBy($0.label) ? "Sort By" : $0.label }
         #expect(
-            ticked == ["Sort by Oldest First", "Videos", "travel (3)"],
-            "ticked: \(ticked)"
-        )
+            drawn == ["Filter", "All Items", "Photos", "Videos", "Sort By"],
+            "the menu draws \(found.map(\.label))")
+        let ticked = found.filter(\.selected).map(\.label)
+        #expect(ticked == ["All Items"], "ticked: \(ticked)")
+
+        // A kind other than the default ticks its own row and no other: a picker that drew its
+        // tick on All Items whatever the kind would pass the case above.
+        let kinds: [(MediaLibraryFilter, String)] = [(.videos, "Videos"), (.images, "Photos")]
+        for (kind, row) in kinds {
+            let other = Self.host(FilterHarness(filter: kind, order: .oldestFirst))
+            let under = await Self.settle(other) { rows in
+                rows.contains { $0.selected && $0.label == row }
+            }
+            let chosen = under.filter(\.selected).map(\.label)
+            other.isHidden = true
+            other.rootViewController = nil
+            #expect(chosen == [row], "under \(kind) the menu ticks \(chosen)")
+        }
+
+        // The divider between the kinds and Sort By: a list draws a Divider as nothing it reads
+        // out, so it is read from the menu's own body — the picker, the Divider, then the nested
+        // menu, in that order and nothing between.
+        let content = LibraryFilterMenuContent(
+            filter: .constant(.all), order: .constant(.newestFirst))
+        let parts =
+            Mirror(reflecting: content.body).descendant("value").map { tuple in
+                Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
+            } ?? []
+        #expect(parts.count == 3, "the menu's body is \(type(of: content.body))")
+        #expect(parts.count == 3 && parts[1] == "Divider", "no divider second: \(parts)")
+        #expect(parts.last == "SortByMenu", "the nested menu is not last: \(parts)")
+    }
+
+    @Test("Sort By ticks the store's order and its label says it, as the order changes")
+    func sortByFollowsTheStore() async {
+        let store = MediaLibraryStore(order: .newestFirst)
+        let window = Self.host(SortHarness(store: store))
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let options = ["Oldest First", "Newest First"]
+        // What VoiceOver reads for the nested menu's row: its label, then its value.
+        func label(_ rows: [Row]) -> String {
+            rows.first { Self.isSortBy($0.label) }.map { "\($0.label), \($0.value)" } ?? "none"
+        }
+
+        var found = await Self.settle(window) { rows in
+            rows.contains { Self.isSortBy($0.label) }
+                && rows.contains { $0.label == "Oldest First" }
+        }
+        #expect(
+            found.map(\.label).filter(options.contains) == options,
+            "the submenu's rows: \(found.map(\.label))")
+        #expect(
+            found.filter { $0.selected && options.contains($0.label) }.map(\.label)
+                == ["Newest First"], "ticked under Newest First: \(found.map(\.label))")
+        #expect(label(found).contains("Newest First"), "the label reads \(label(found))")
+
+        // What the label SHOWS: "Sort By", and under it the order in force.
+        let shown = Self.host(SortLabelHarness(store: store))
+        defer {
+            shown.isHidden = true
+            shown.rootViewController = nil
+        }
+        var lines = await Self.settle(shown) { $0.contains { $0.label == "Newest First" } }
+        #expect(
+            lines.map(\.label) == ["Sort By", "Newest First"],
+            "the label shows \(lines.map(\.label))")
+
+        store.setOrder(.oldestFirst)
+        found = await Self.settle(window) { rows in
+            label(rows).contains("Oldest First")
+                && rows.contains { $0.selected && $0.label == "Oldest First" }
+        }
+        #expect(
+            found.filter { $0.selected && options.contains($0.label) }.map(\.label)
+                == ["Oldest First"], "ticked under Oldest First: \(found.map(\.label))")
+        #expect(label(found).contains("Oldest First"), "the label reads \(label(found))")
+        #expect(!label(found).contains("Newest First"), "the label kept the old order")
+        lines = await Self.settle(shown) { $0.contains { $0.label == "Oldest First" } }
+        #expect(
+            lines.map(\.label) == ["Sort By", "Oldest First"],
+            "the label shows \(lines.map(\.label)) under Oldest First")
     }
 }

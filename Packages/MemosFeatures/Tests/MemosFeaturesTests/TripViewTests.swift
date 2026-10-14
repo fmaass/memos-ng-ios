@@ -90,80 +90,6 @@ struct TripManageTests {
         #expect(manage.question == nil)
     }
 
-    /// 2026-10-08T12:00:00Z, and seven days on.
-    private static let october8 = Date(timeIntervalSince1970: 1_791_460_800)
-    private static let october15 = october8.addingTimeInterval(7 * 24 * 60 * 60)
-
-    @Test("Pin pins the trip and the item turns to Unpin; Unpin unpins it and it offers Pin")
-    func pinThenUnpin() async {
-        let (store, made, _) = await three()
-        let manage = TripManage()
-        let now = Self.october8
-        let offered = TripManage.pinAction(of: made[1].uid, in: store, now: now)
-        #expect(offered == .pin)
-        #expect(offered.title == TripView.pinButton && offered.symbol == "pin")
-        manage.apply(offered, to: made[1].uid, in: store, lastTaken: nil, now: now)
-        #expect(store.pins.activePin(now: now)?.uid == made[1].uid)
-        #expect(store.pins.pinnedUntil(uid: made[1].uid) == Self.october15)
-
-        let then = TripManage.pinAction(of: made[1].uid, in: store, now: now)
-        #expect(then == .unpin)
-        #expect(then.title == TripView.unpinButton && then.symbol == "pin.slash")
-        #expect(TripManage.pinAction(of: made[0].uid, in: store, now: now) == .pin, "another trip")
-        manage.apply(then, to: made[1].uid, in: store, lastTaken: nil, now: now)
-        #expect(store.pins.activePin(now: now) == nil)
-        #expect(TripManage.pinAction(of: made[1].uid, in: store, now: now) == .pin)
-    }
-
-    @Test("Pin on another trip moves the pin there")
-    func pinMoves() async {
-        let (store, made, _) = await three()
-        let manage = TripManage()
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        manage.apply(.pin, to: made[2].uid, in: store, lastTaken: nil, now: Self.october8)
-        #expect(store.pins.activePin(now: Self.october8)?.uid == made[2].uid)
-        #expect(made.map { store.pins.pinnedUntil(uid: $0.uid) } == [nil, nil, Self.october15])
-    }
-
-    @Test("an expired pin offers Pin again, and Pin starts a new one from now")
-    func anExpiredPinOffersPin() async {
-        let (store, made, _) = await three()
-        let manage = TripManage()
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        #expect(
-            TripManage.pinAction(of: made[0].uid, in: store, now: Self.october15) == .pin,
-            "it ended exactly now")
-        #expect(
-            TripManage.pinAction(
-                of: made[0].uid, in: store, now: Self.october15.addingTimeInterval(-1)) == .unpin)
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october15)
-        #expect(
-            store.pins.pinnedUntil(uid: made[0].uid)
-                == Self.october15.addingTimeInterval(7 * 24 * 60 * 60))
-    }
-
-    @Test("the item does what it offered: two Pins pin once, two Unpins leave it unpinned")
-    func twoTapsAreNotAToggle() async {
-        let (store, made, _) = await three()
-        let manage = TripManage()
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        #expect(store.pins.activePin(now: Self.october8)?.uid == made[0].uid)
-        #expect(store.pins.pinnedUntil(uid: made[0].uid) == Self.october15)
-        manage.apply(.unpin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        manage.apply(.unpin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        #expect(store.pins.activePin(now: Self.october8) == nil)
-    }
-
-    @Test("Pin for a trip that has left the store writes nothing")
-    func pinAGoneTrip() async {
-        let (store, made, _) = await three()
-        let manage = TripManage()
-        manage.apply(.pin, to: made[0].uid, in: store, lastTaken: nil, now: Self.october8)
-        manage.apply(.pin, to: "gone", in: store, lastTaken: nil, now: Self.october8)
-        #expect(store.pins.activePin(now: Self.october8)?.uid == made[0].uid, "the pin stayed")
-    }
-
     @Test("the footer names the cap only when the drain stopped at it")
     func capNote() {
         #expect(
@@ -1056,6 +982,46 @@ struct TripScreenRenderTests {
         #expect(wire.transport.trips.rows.map(\.uid) == [other.uid], "the server kept the trip")
     }
 
+    /// A press on Collections while it shows takes its stack back to the root (MEMNG-781): through
+    /// the bar's own press binding and the dock, into the root's own stack. A press on another
+    /// tab, and the press that comes back to Collections from there, leave the trip pushed.
+    @Test("a press on the selected Collections tab pops the trip; a press elsewhere does not")
+    func reselectingCollectionsPopsToTheRoot() async {
+        let wire = TripWire()
+        let stores = stores()
+        _ = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let access = wire.access
+        let dock = AppDock()
+        let stack = TripStackLog()
+        let view = TrailHost(log: stack) { trail in
+            CollectionsRootView.stack(trail: trail) {
+                CollectionsScreen(
+                    trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
+                    access: { access }, openTag: { _ in }, trail: trail)
+            }
+        }
+        .environment(dock)
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            let listed = await screen.until { screen.element(labelled: "Portugal 2026") != nil }
+            #expect(listed, "the trip's card was not drawn")
+            #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
+            let pushed = await screen.until { stack.paths.last?.count == 1 }
+            #expect(pushed, "the trip was not pushed: \(stack.paths.map(\.count))")
+            // The bar's press binding over a selection that shows Collections.
+            let bar = MainTabs<EmptyView>.pressing(
+                selection: .constant(.collections), dock: dock)
+            bar.wrappedValue = .timeline
+            dock.send(.pressedTab(.collections, showing: .timeline))
+            let early = await screen.until(seconds: 1) { stack.paths.last?.isEmpty == true }
+            #expect(!early, "a press from another tab popped the stack")
+            bar.wrappedValue = .collections
+            let popped = await screen.until { stack.paths.last?.isEmpty == true }
+            #expect(popped, "the re-tap left the stack at \(stack.paths.map(\.count))")
+        }
+    }
+
     @Test("the root's drain and the trip's are one request chain")
     func theDrainsJoin() async {
         let wire = TripWire()
@@ -1261,6 +1227,18 @@ struct TripStack<Root: View>: View {
 
     var body: some View {
         NavigationStack(path: $trail) { root($trail) }
+            .onChange(of: trail, initial: true) { _, now in log.paths.append(now) }
+    }
+}
+
+/// A trail the test's root makes its own stack over, as the Collections tab owns its own.
+struct TrailHost<Root: View>: View {
+    var log = TripStackLog()
+    @ViewBuilder let root: (Binding<[TripRoute]>) -> Root
+    @State private var trail: [TripRoute] = []
+
+    var body: some View {
+        root($trail)
             .onChange(of: trail, initial: true) { _, now in log.paths.append(now) }
     }
 }

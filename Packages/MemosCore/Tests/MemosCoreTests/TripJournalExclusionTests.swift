@@ -6,7 +6,7 @@ import OpenAPIRuntime
 import Testing
 
 /// A span memo whose one picture the owner removed from the trip stays out of its journal
-/// (MEMNG-793), whatever drops the member drain meanwhile — a list, a pin, an unpin — until the
+/// (MEMNG-793), whatever drops the member drain meanwhile — a list refresh — until the
 /// server says otherwise: Add Back, or a drain asked for after the removal that lists the picture.
 @MainActor
 @Suite("Trip journal — a removed picture")
@@ -49,21 +49,6 @@ struct TripJournalExclusionTests {
         let after = try #require(trips.trips.first)
         #expect(store.state(for: after) == .notLoaded, "control: the list dropped the drain")
         #expect(store.journal(for: after).map(\.uid) == ["ours"], "the removed memo came back")
-    }
-
-    @Test("a pin and an unpin after a removal do not bring the span memo back")
-    func aPinKeepsTheRemovalOut() async throws {
-        let (_, trips, store) = try await removed()
-        let uid = try #require(trips.trips.first).uid
-
-        trips.pin(uid: uid, lastTaken: Wire.lisbon(20, 12), now: Wire.lisbon(15, 12))
-        let pinned = try #require(trips.trips.first)
-        #expect(store.state(for: pinned) == .notLoaded, "control: the pin dropped the drain")
-        #expect(store.journal(for: pinned).map(\.uid) == ["ours"], "back after the pin")
-
-        trips.unpin(uid: uid)
-        let unpinned = try #require(trips.trips.first)
-        #expect(store.journal(for: unpinned).map(\.uid) == ["ours"], "back after the unpin")
     }
 
     @Test("Add Back lists the memo again, and a list refresh after it keeps it")

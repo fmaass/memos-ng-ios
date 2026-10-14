@@ -214,7 +214,7 @@ extension MediaImageLoaderTests {
     /// reporting the dock — so the test can ask the dock which bar it says stands.
     private func chromeHost(
         opening tab: MainTab, days: ClosedRange<Int> = ChromeWire.days, mine: Bool = true,
-        witness: DockWitness? = nil
+        witness: DockWitness? = nil, height: CGFloat = 874
     ) async -> UIWindow {
         let transport = ChromeTransport(days: days, mine: mine)
         let session = SessionStore(
@@ -234,7 +234,7 @@ extension MediaImageLoaderTests {
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_chrome")
         #expect(session.state.user?.subject == "fabian", "precondition: signed in")
 
-        let frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        let frame = CGRect(x: 0, y: 0, width: 402, height: height)
         let scene = UIApplication.shared.connectedScenes.first { $0 is UIWindowScene }
         let window: UIWindow
         if let scene = scene as? UIWindowScene {
@@ -914,7 +914,7 @@ extension MediaImageLoaderTests {
     }
 
     /// MEMNG-684, the owner's first sentence: in select mode a tap on one of my own pictures
-    /// chooses it — "1 Item Selected" — and a second tap lets it go again. The fixture's pictures
+    /// chooses it — "Show Selected (1)" — and a second tap lets it go again. The fixture's pictures
     /// are all the signed-in account's (`mine`), across twelve day bands.
     ///
     /// The tap goes through the tile's own accessibility activation, which SwiftUI answers with
@@ -942,7 +942,7 @@ extension MediaImageLoaderTests {
 
             let select = Self.elements(labelled: "Select", in: window)
             #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 20)
@@ -952,11 +952,12 @@ extension MediaImageLoaderTests {
 
             let tile = Self.photoTile(near: centre, in: window)
             let took = tile?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             Self.shoot("684-tap-selected", window)
@@ -964,7 +965,7 @@ extension MediaImageLoaderTests {
                 "dimmed=\(dimmed) browsing=\(browsing) selecting=\(selecting) "
                 + "tile=\(tile != nil) activated=\(took) oneSelected=\(chosen) "
                 + "markedSelected=\(marked) counts="
-                + "\(Self.labels(in: window).filter { $0.hasSuffix("Selected") })"
+                + "\(Self.labels(in: window).filter { $0.contains("Select") })"
             print("MEMNG684 tap \(evidence)")
             Attachment.record(evidence, named: "684-tap-evidence")
             #expect(!dimmed, "my picture was dimmed in select mode: \(evidence)")
@@ -972,17 +973,18 @@ extension MediaImageLoaderTests {
             #expect(marked, "the chosen tile is not marked selected: \(evidence)")
 
             let again = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             #expect(again, "the second tap reached no tile")
             #expect(
-                !Self.elements(labelled: "0 Items Selected", in: window).isEmpty,
+                !Self.elements(labelled: "Select Items", in: window).isEmpty,
                 "the second tap kept the picture: \(Self.labels(in: window))")
 
             // Chosen again, then Close: nothing stays chosen and select mode's toolbar goes.
             _ = Self.photoTile(near: centre, in: window)?.accessibilityActivate()
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await closeSelect(window)
@@ -1016,7 +1018,7 @@ extension MediaImageLoaderTests {
 
             let select = Self.elements(labelled: "Select", in: window)
             #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "0 Items Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Select Items", in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 20)
@@ -1024,11 +1026,12 @@ extension MediaImageLoaderTests {
             let dimmed = zip(browsing, selecting).contains { abs($0 - $1) > 0.08 }
 
             let took = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "1 Item Selected", in: window).isEmpty {
+            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "1 Item Selected", in: window).isEmpty
+            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             let share = Self.elements(labelled: "Share", in: window).first
@@ -1049,6 +1052,154 @@ extension MediaImageLoaderTests {
             #expect(!deleteLive, "Delete is offered for a picture that is not mine: \(evidence)")
 
             await closeSelect(window)
+        }
+    }
+
+    /// The headings on screen, top to bottom, each once: what carries the header trait.
+    private static func headings(in window: UIWindow) -> [String] {
+        var found: [String: CGFloat] = [:]
+        var stack: [Any] = [window]
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            if object.accessibilityTraits.contains(.header), let label = object.accessibilityLabel,
+                !label.isEmpty, found[label] == nil
+            {
+                found[label] = object.accessibilityFrame.minY
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found.sorted { ($0.value, $0.key) < ($1.value, $1.key) }.map(\.key)
+    }
+
+    /// The September day a fixture tile was taken on: `shot-<day>-<index>`.
+    private static func day(ofTile uid: String) -> Int? {
+        let parts = uid.split(separator: "-")
+        return parts.count == 3 ? Int(parts[1]) : nil
+    }
+
+    /// The day a day heading names — "Tue 1 Sep" — or nil for any other heading.
+    private static func day(ofHeading label: String) -> Int? {
+        let parts = label.split(separator: " ")
+        return parts.count == 3 ? Int(parts[1]) : nil
+    }
+
+    /// Presses the tile showing `uid` through its own accessibility activation — the action a
+    /// finger's tap runs — once: the first node carrying its identifier that takes the press.
+    private static func pressTile(_ uid: String, in window: UIWindow) -> Bool {
+        let wanted = LibraryGrid.tileIdentifier(uid)
+        var stack: [Any] = [window]
+        var candidates: [NSObject] = []
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject else { continue }
+            if object.responds(to: Selector(("accessibilityIdentifier"))),
+                object.value(forKey: "accessibilityIdentifier") as? String == wanted
+            {
+                candidates.append(object)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return candidates.contains { $0.accessibilityActivate() }
+    }
+
+    /// MEMNG-779 (WPN-12 phase 1): select mode's centre is a button. With 3 of 20 pictures chosen
+    /// it reads "Show Selected (3)", and a press through the host narrows the grid to those 3 in
+    /// the grid's own order; a second press gives the 20 back; and leaving select mode while
+    /// narrowed shows the 20 too. A line of text in the button's place takes no press, and fails
+    /// here. The window is tall enough for the lazy grid to build all twenty tiles.
+    @Test("Show Selected (3) narrows the grid to the chosen three in order, and back to twenty")
+    func showSelectedNarrowsTheGrid() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library, days: 1...5, height: 2600)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window, pictures: 20)
+            var all = TripProbe.tiles(in: window)
+            for _ in 0..<200 where all.count < 20 {
+                await chromeSettle(window)
+                all = TripProbe.tiles(in: window)
+            }
+            guard all.count == 20 else {
+                Issue.record("the grid did not draw its twenty pictures: \(all)")
+                return
+            }
+
+            let select = Self.elements(labelled: "Select", in: window)
+            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.elements(labelled: "Share", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            let chosen = [all[15], all[2], all[9]]
+            for uid in chosen {
+                #expect(Self.pressTile(uid, in: window), "no tile \(uid) took the press")
+                await chromeSettle(window, turns: 5)
+            }
+            let button = "Show Selected (3)"
+            for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            @MainActor func press(_ label: String) -> Bool {
+                Self.elements(labelled: label, in: window).contains {
+                    $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
+                }
+            }
+            @MainActor func settled(on count: Int) async -> [String] {
+                var tiles = TripProbe.tiles(in: window)
+                for _ in 0..<200 where tiles.count != count {
+                    await chromeSettle(window)
+                    tiles = TripProbe.tiles(in: window)
+                }
+                await chromeSettle(window, turns: 10)
+                return TripProbe.tiles(in: window)
+            }
+            let whole = Self.headings(in: window)
+            let selectedLines = Self.labels(in: window).filter { $0.contains("Select") }
+
+            #expect(press(button), "no \(button) button took the press: \(selectedLines)")
+            let narrowed = await settled(on: 3)
+            #expect(
+                narrowed == all.filter(chosen.contains),
+                "narrowed to \(narrowed), wanted \(all.filter(chosen.contains))")
+            // The month and the days the three were taken on keep their headings; the days with
+            // none of them chosen lose theirs.
+            let days = Set(chosen.compactMap(Self.day(ofTile:)))
+            let kept = Self.headings(in: window)
+            #expect(
+                kept == whole.filter { Self.day(ofHeading: $0).map(days.contains) ?? true },
+                "headings narrowed: \(kept), whole grid: \(whole)")
+            #expect(
+                kept.compactMap(Self.day(ofHeading:)).count == days.count,
+                "not one heading per chosen day: \(kept)")
+            Self.shoot("779-narrowed", window)
+
+            // A tile of the narrowed grid resolves to ITS file: the tap lets that one go, and the
+            // other two stay (an index read against the whole list would find no row, or another).
+            guard narrowed.count == 3 else { return }
+            let middle = narrowed[1]
+            #expect(Self.pressTile(middle, in: window), "the narrowed tile \(middle) took no press")
+            let two = await settled(on: 2)
+            #expect(two == narrowed.filter { $0 != middle }, "after the tap: \(two)")
+            let button2 = "Show Selected (2)"
+            for _ in 0..<200 where Self.elements(labelled: button2, in: window).isEmpty {
+                await chromeSettle(window)
+            }
+
+            #expect(press(button2), "the second press found no \(button2) button")
+            let widened = await settled(on: 20)
+            #expect(widened == all, "the second press gave back \(widened.count) tiles")
+
+            // Narrowed again, then Close: leaving select mode shows the whole grid.
+            #expect(press(button2), "the third press found no \(button2) button")
+            _ = await settled(on: 2)
+            await closeSelect(window)
+            let closed = await settled(on: 20)
+            #expect(closed == all, "leaving select mode left \(closed.count) tiles")
         }
     }
 

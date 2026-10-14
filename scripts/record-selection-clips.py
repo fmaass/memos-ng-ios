@@ -1,0 +1,354 @@
+#!/usr/bin/python3
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-781, MEMNG-783) on the build host.
+
+Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
+xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
+shuts down or deletes a device):
+
+    record-selection-clips.py --udid <udid> --out <dir> [--timeout <s>] [--settings]
+
+Per scene the test writes `clip-ready` = `<scene> <nonce>` into the host app's tmp directory; this
+script starts `simctl io <udid> recordVideo` into `<out>/<scene>.mov`, answers `clip-recording`
+with the same nonce once the first frame is in, gives the scene's touches through `idb ui`
+(a SwiftUI Menu opens only on a real touch), stops the recording with SIGINT (which finalises the
+movie) and answers `clip-finished`. A ready file older than this script's start, or a nonce it
+already answered, is never taken. `--settings` records one more scene with no test behind it, once
+the tests are over: the Settings app's page for the app, scrolled to its Storage group.
+
+Exit: 0 every expected scene recorded at >= 2 s; 1 anything else; 2 usage.
+"""
+
+import argparse
+import glob
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+BUNDLE_ID = "live.discomarder.memosng"
+IDB = os.path.expanduser("~/Library/Python/3.9/bin/idb")
+SCENES = [
+    "779a-library-filter-menu",
+    "779b-library-select-show-selected",
+    "781a-collections-retap",
+    "783-collection-cards",
+]
+ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
+
+
+def log(message):
+    print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), message, flush=True)
+
+
+class Driver:
+    def __init__(self, udid, out):
+        self.udid = udid
+        self.out = out
+        self.step = 0
+        self.scene = ""
+
+    # --- idb ----------------------------------------------------------------------------------
+    def idb(self, *args):
+        command = [IDB, *args, "--udid", self.udid]
+        done = subprocess.run(command, env=ENV, capture_output=True, text=True, timeout=60)
+        if done.returncode != 0:
+            raise RuntimeError("idb %s exited %d: %s" % (args[:2], done.returncode, done.stderr[-400:]))
+        return done.stdout
+
+    def elements(self):
+        """Every accessibility element on screen; each describe is kept for the README's evidence."""
+        text = self.idb("ui", "describe-all", "--json")
+        self.step += 1
+        with open(os.path.join(self.out, "ax", "%s-%02d.json" % (self.scene, self.step)), "w") as f:
+            f.write(text)
+        found = json.loads(text) if text.strip().startswith("[") else []
+        return [e for e in found if isinstance(e, dict) and e.get("frame")]
+
+    @staticmethod
+    def centre(element):
+        frame = element["frame"]
+        return frame["x"] + frame["width"] / 2, frame["y"] + frame["height"] / 2
+
+    def find(self, label, prefix=False, lowest=False, attempts=10):
+        for _ in range(attempts):
+            hits = [
+                e for e in self.elements()
+                if ((e.get("AXLabel") or "").startswith(label) if prefix
+                    else e.get("AXLabel") == label)
+            ]
+            if hits:
+                hits.sort(key=lambda e: e["frame"]["y"])
+                return hits[-1] if lowest else hits[0]
+            time.sleep(0.5)
+        raise RuntimeError("no element labelled %r on screen (scene %s)" % (label, self.scene))
+
+    def tap_at(self, x, y, why):
+        log("tap %s at %.0f,%.0f" % (why, x, y))
+        self.idb("ui", "tap", "%.0f" % x, "%.0f" % y)
+
+    def tap(self, label, prefix=False, lowest=False):
+        x, y = self.centre(self.find(label, prefix=prefix, lowest=lowest))
+        self.tap_at(x, y, repr(label))
+
+    def swipe(self, x1, y1, x2, y2, duration=0.5):
+        log("swipe %.0f,%.0f -> %.0f,%.0f" % (x1, y1, x2, y2))
+        self.idb("ui", "swipe", "%.0f" % x1, "%.0f" % y1, "%.0f" % x2, "%.0f" % y2,
+                 "--duration", str(duration))
+
+    # --- scenes -------------------------------------------------------------------------------
+    def scene_779a(self):
+        # The order and the filter are kept between launches, so each pick is the value NOT
+        # current: the film shows a change whatever an earlier run left.
+        time.sleep(1.5)
+        heading = [e.get("AXLabel") for e in self.elements() if " \u00b7 " in (e.get("AXLabel") or "")]
+        kind = heading[0].split(" \u00b7 ")[0] if heading else "All Items"
+        self.tap("Filter")
+        time.sleep(2.5)
+        sort = self.find("Sort By", prefix=True).get("AXLabel") or ""
+        order = sort.split(", ", 1)[1] if ", " in sort else "Newest First"
+        self.tap("Sort By", prefix=True)
+        time.sleep(3)
+        self.tap("Oldest First" if order == "Newest First" else "Newest First")
+        time.sleep(2.5)
+        self.tap("Filter")
+        time.sleep(2.5)
+        self.tap("Photos" if kind == "All Items" else "All Items")
+        time.sleep(2.5)
+
+    def scene_779b(self):
+        time.sleep(1.5)
+        self.tap("Select")
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if len(tiles) < 3:
+            raise RuntimeError("fewer than three tiles on screen to select: %d" % len(tiles))
+        for tile in tiles[:3]:
+            x, y = self.centre(tile)
+            self.tap_at(x, y, "tile %r" % tile.get("AXLabel"))
+            time.sleep(1)
+        time.sleep(1.5)
+        self.tap("Show Selected", prefix=True)
+        time.sleep(3)
+        self.tap("Show Selected", prefix=True)
+        time.sleep(2.5)
+        self.tap("Close")
+        time.sleep(2)
+
+    def scene_781a(self):
+        time.sleep(2)
+        self.tap("Portugal")
+        time.sleep(3.5)
+        self.tap("Collections", lowest=True)
+        time.sleep(3.5)
+
+    def scene_783(self):
+        time.sleep(2.5)
+        for label, prefix in (("Portugal", False), ("#garden", False), ("Oct 2026", False),
+                              ("2026", False)):
+            row = self.find(label, prefix=prefix)
+            _, y = self.centre(row)
+            if y > 700:
+                self.swipe(200, 700, 200, 380, 0.6)
+                time.sleep(1.5)
+                _, y = self.centre(self.find(label, prefix=prefix))
+            self.swipe(370, y, 40, y, 0.7)
+            time.sleep(1.8)
+            self.swipe(40, y, 370, y, 0.7)
+            time.sleep(1.5)
+        time.sleep(1)
+        self.tap("Sep 2026")
+        time.sleep(4)
+
+    def scene_settings(self):
+        time.sleep(2)
+        for name in ("Apps",):
+            self.scroll_to(name)
+            self.tap(name)
+            time.sleep(2)
+        self.scroll_to("memos", prefix_any=True)
+        time.sleep(2.5)
+        self.scroll_to("Clear media cache on next launch")
+        time.sleep(2.5)
+        # The row's middle is its label, which does not flip a switch: the switch sits at the
+        # row's trailing edge.
+        for _ in range(2):
+            row = self.find("Clear media cache on next launch")
+            frame = row["frame"]
+            self.tap_at(frame["x"] + frame["width"] - 35, frame["y"] + frame["height"] / 2,
+                        "the Clear media cache switch")
+            time.sleep(2.5)
+
+    def scroll_to(self, label, prefix_any=False):
+        for _ in range(16):
+            hits = [
+                e for e in self.elements()
+                if (label.lower() in (e.get("AXLabel") or "").lower() if prefix_any
+                    else e.get("AXLabel") == label)
+                and 80 <= e["frame"]["y"] <= 760
+            ]
+            if hits:
+                if prefix_any:
+                    # A tap on a list still moving only stops it: let the swipe settle, look again.
+                    time.sleep(1.5)
+                    hits = [
+                        e for e in self.elements()
+                        if label.lower() in (e.get("AXLabel") or "").lower()
+                        and 80 <= e["frame"]["y"] <= 760
+                    ] or hits
+                    x, y = self.centre(hits[0])
+                    self.tap_at(x, y, repr(hits[0].get("AXLabel")))
+                return
+            # Short and slow, so the list barely coasts and no row passes unseen between looks.
+            self.swipe(200, 600, 200, 420, 1.0)
+            time.sleep(1)
+        raise RuntimeError("no %r after scrolling (scene %s)" % (label, self.scene))
+
+    # --- one recorded scene ----------------------------------------------------------------------
+    def record(self, scene, answer):
+        """Records `scene`; `answer(name)` writes a handshake file, or does nothing without a test."""
+        self.scene = scene
+        self.step = 0
+        movie = os.path.join(self.out, scene + ".mov")
+        rec_log = open(os.path.join(self.out, scene + ".recordVideo.log"), "w")
+
+        def default_sigint():
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+        recorder = subprocess.Popen(
+            ["xcrun", "simctl", "io", self.udid, "recordVideo", "--codec=h264", "--force", movie],
+            stdout=rec_log, stderr=subprocess.STDOUT, preexec_fn=default_sigint)
+        started = time.time()
+        while time.time() - started < 15:
+            with open(rec_log.name) as f:
+                if "Recording started" in f.read():
+                    break
+            if recorder.poll() is not None:
+                raise RuntimeError("recordVideo exited %s before it started" % recorder.returncode)
+            time.sleep(0.1)
+        log("recording %s since %.3f" % (scene, time.time()))
+        answer("clip-recording")
+        failure = None
+        try:
+            getattr(self, "scene_" + scene.split("-")[0])()
+        except Exception as error:  # the movie is still stopped and the test still answered
+            failure = error
+        recorder.send_signal(signal.SIGINT)
+        try:
+            recorder.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            recorder.kill()
+            failure = failure or RuntimeError("recordVideo outlived SIGINT by 15 s")
+        answer("clip-finished")
+        if failure:
+            raise RuntimeError("scene %s: %s" % (scene, failure))
+        duration = subprocess.run(
+            ["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", movie], capture_output=True, text=True).stdout.strip()
+        log("scene %s: %s lasts %s s" % (scene, movie, duration))
+        if not duration or float(duration) < 2.0:
+            raise RuntimeError("clip %s lasts %r s, under 2 s" % (movie, duration))
+        return duration
+
+
+def live_ready(udid, since):
+    """The tmp directory whose `clip-ready` was written after `since`, or None: an install made
+    after this script started can move the app to a new data container, so every container of the
+    device is looked in, never one read once at the start."""
+    root = os.path.expanduser(
+        "~/Library/Developer/CoreSimulator/Devices/%s/data/Containers/Data/Application" % udid)
+    newest = None
+    for path in glob.glob(os.path.join(root, "*", "tmp", "clip-ready")):
+        try:
+            stamp = os.path.getmtime(path)
+        except OSError:
+            continue
+        if stamp > since and (newest is None or stamp > newest[0]):
+            newest = (stamp, os.path.dirname(path))
+    return newest[1] if newest else None
+
+
+def put(directory, name, content):
+    staging = os.path.join(directory, ".%s.%d" % (name, os.getpid()))
+    with open(staging, "w") as f:
+        f.write(content + "\n")
+    os.replace(staging, os.path.join(directory, name))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--udid", required=True)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--timeout", type=int, default=2400)
+    parser.add_argument("--settings", action="store_true")
+    parser.add_argument("--only", default="", help="comma-separated scenes expected, default all")
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        sys.exit(2)
+    os.makedirs(os.path.join(args.out, "ax"), exist_ok=True)
+    # "-" expects no test scene at all: the Settings scene alone, after an earlier run.
+    expected = [] if args.only == "-" else ([s for s in args.only.split(",") if s] or SCENES)
+    started = time.time()
+    deadline = started + args.timeout
+    driver = Driver(args.udid, args.out)
+    durations = {}
+    answered = set()
+    while len(durations) < len(expected):
+        if time.time() > deadline:
+            log("RECORD FAIL: scenes %s not seen within %d s" % (
+                [s for s in expected if s not in durations], args.timeout))
+            sys.exit(1)
+        tmp = live_ready(args.udid, started)
+        fields = []
+        if tmp:
+            try:
+                with open(os.path.join(tmp, "clip-ready")) as f:
+                    fields = f.read().split()
+            except OSError:
+                fields = []
+        if len(fields) != 2 or fields[1] in answered:
+            time.sleep(0.25)
+            continue
+        log("clip-ready in %s" % tmp)
+        scene, nonce = fields
+        answered.add(nonce)
+        if scene not in expected:
+            log("RECORD FAIL: the test asked for an unknown scene %r" % scene)
+            put(tmp, "clip-recording", "%s %s" % (scene, nonce))
+            put(tmp, "clip-finished", "%s %s" % (scene, nonce))
+            sys.exit(1)
+        try:
+            durations[scene] = driver.record(
+                scene, lambda name, s=scene, n=nonce: put(tmp, name, "%s %s" % (s, n)))
+        except Exception as error:
+            log("RECORD FAIL: %s" % error)
+            sys.exit(1)
+    if args.settings:
+        try:
+            # Settings reopens where it was left; terminated first, it opens at its root.
+            subprocess.run(["xcrun", "simctl", "terminate", args.udid, "com.apple.Preferences"],
+                           capture_output=True, timeout=60)
+            subprocess.run(["xcrun", "simctl", "launch", args.udid, "com.apple.Preferences"],
+                           check=True, capture_output=True, timeout=60)
+            time.sleep(3)
+            durations["781b-settings-storage"] = driver.record(
+                "settings-storage", lambda name: None)
+            os.replace(os.path.join(args.out, "settings-storage.mov"),
+                       os.path.join(args.out, "781b-settings-storage.mov"))
+        except Exception as error:
+            log("RECORD FAIL: settings: %s" % error)
+            sys.exit(1)
+    for scene, duration in durations.items():
+        log("CLIP %s %s s" % (scene, duration))
+    log("RECORD OK: %d clips in %s" % (len(durations), args.out))
+
+
+if __name__ == "__main__":
+    main()

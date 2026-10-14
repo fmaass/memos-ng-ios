@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (47)
+
+- The Library's round button is now a filter: All items, Photos or Videos, with Sort By underneath, laid out like the Photos app.
+- Select All is gone from the Library; in Select mode the bar's middle button reads Show Selected with the count and narrows the grid to those pictures until it is tapped again.
+- Collections opens on rows of square cover cards with the name inside the picture and the count in the corner; Tags, Months and Years now have rows of their own next to Trips, and a trip's own tag is no longer listed as a tag.
+- Tapping Collections again while it is already selected goes back to its root.
+- The pin on trips is gone; the composer offers the trip whose dates contain today.
+- Storage moved into the phone's Settings app under memos: it shows the size of the media cache and has a switch to clear it the next time the app opens.
+- Please open the Library's filter and change the sort, select a few pictures and open Show Selected, scroll the Collections rows and tap a card, re-tap Collections from inside a trip, and try the cache switch in Settings.
+
 ## 2.3.0 (46)
 
 - Trips now live on the server. Every phone signed in to my server sees the same trips with the same pictures, and the trips this phone kept for itself are gone; the Portugal 2026 trip is already listed.

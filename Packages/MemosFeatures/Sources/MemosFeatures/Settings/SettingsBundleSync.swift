@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import MemosOutbox
 
 /// The device's preferences, now that they live in the phone's Settings app.
@@ -16,6 +17,14 @@ import MemosOutbox
 public enum SettingsBundleSync {
     /// The read-only Version row's key. Written by the app; the pane only displays it.
     public static let versionKey = "settings.version"
+    /// The Storage group's read-only size row (MEMNG-781): written by the app at launch, on every
+    /// return to the front and on the way to the background; the pane only displays it.
+    public static let mediaCacheSizeKey = "settings.mediaCacheSize"
+    /// The Storage group's switch: read once, at the next cold launch, and turned off again there.
+    public static let clearMediaCacheKey = "settings.clearMediaCacheOnLaunch"
+    /// What the Storage group says under the switch — the pane's footer, held to this text.
+    public static let clearMediaCacheFooter =
+        "Cleared the next time the app opens; the switch then turns off again."
 
     /// The one suite the pane writes and the app reads the pane's keys from: the app group's,
     /// falling back to the app's own when the group is unreachable — the outbox's own degradation
@@ -92,17 +101,30 @@ public enum SettingsBundleSync {
 
     /// Everything launch has to do before the first read of either preference, all into the
     /// pane's suite: the defaults the pane shows, an appearance an earlier build saved carried
-    /// across, the version the pane displays.
-    /// - Parameter group: the pane's suite — `paneDefaults` in the app.
+    /// across, the version the pane displays — and the media cache (MEMNG-781, decision 2): when
+    /// the Storage switch is on it is cleared here, synchronously, and the switch turned off
+    /// again; either way the size row is written. Launch runs in `App.init()`, before any view
+    /// exists, so no picture has been asked for yet and none is cleared out from under a grid.
+    /// - Parameters:
+    ///   - group: the pane's suite — `paneDefaults` in the app.
+    ///   - cache: the derived media cache — `MediaSession.shared.cache` in the app, the very
+    ///     object every image fetch goes through; nil leaves the cache and its rows alone.
     public static func launch(
         from bundle: Bundle, standard: UserDefaults, domain: String, group: UserDefaults,
-        groupDomain: String
+        groupDomain: String,
+        cache: (any DerivedMediaCache)? = nil
     ) {
         if let plist = rootPlist(in: bundle) {
             registerDefaults(from: plist, into: group)
         }
         seedAppearance(standard: standard, domain: domain, group: group, groupDomain: groupDomain)
         writeVersion(AboutInfo.versionLine(from: bundle), into: group)
+        guard let cache else { return }
+        if group.bool(forKey: clearMediaCacheKey) {
+            MediaCacheMaintenance.clear(cache)
+            group.set(false, forKey: clearMediaCacheKey)
+        }
+        writeCacheSize(of: cache, into: group)
     }
 
     /// The app is in front again, and the Settings app may have changed either choice meanwhile.
@@ -112,16 +134,40 @@ public enum SettingsBundleSync {
     /// re-read the appearance; bring the switch's model to the group's value, whose apply tells
     /// the outbox synchronously so the verdict it shows is the new one; and only then open
     /// scheduling and drain, so that drain reads the new answer. An unchanged choice writes and
-    /// tells nothing.
+    /// tells nothing. The cache's size row is written again, and the cache is NEVER cleared
+    /// here — a switch turned on while the app was away waits for the next cold launch, as its
+    /// footer says, so no grid on screen loses its pictures (decision 2).
     /// - Returns: the foreground drain `Outbox.appBecameActive` started, if there is an outbox.
     @discardableResult
     public static func activate(
         settings: AppSettings,
         uploads: UploadSettings?,
-        outbox: Outbox?
+        outbox: Outbox?,
+        cache: (any DerivedMediaCache)? = nil,
+        group: UserDefaults? = nil
     ) -> Task<Void, Never>? {
         settings.reload()
         uploads?.reload()
+        if let cache, let group { writeCacheSize(of: cache, into: group) }
         return outbox?.appBecameActive()
+    }
+
+    /// The way to the background, as `activate` is the way back: the outbox stops opening new
+    /// work, and the pane's size row is written as the cache stands now — never a clear. The app's
+    /// one background observer calls this and nothing else, so what it does is what is tested.
+    public static func enteredBackground(
+        outbox: Outbox?, cache: any DerivedMediaCache, group: UserDefaults
+    ) {
+        outbox?.appEnteredBackground()
+        writeCacheSize(of: cache, into: group)
+    }
+
+    /// The size row's text for the cache as it stands now: what it holds against what it may
+    /// (`MediaCacheMaintenance.summary`, the arithmetic the in-app row used, the same on every
+    /// locale). Also written on the way to the background, so the pane shows a size from this
+    /// run rather than from its launch.
+    public static func writeCacheSize(of cache: any DerivedMediaCache, into group: UserDefaults) {
+        let usage = MediaCacheMaintenance.usage(of: cache)
+        group.set(MediaCacheMaintenance.summary(usage), forKey: mediaCacheSizeKey)
     }
 }

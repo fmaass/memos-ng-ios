@@ -202,7 +202,7 @@ struct FiltersContractTests {
         }
         let generated = try ok.body.json
         #expect(generated.map { $0.cover?.visibility?.rawValue } == ["PROTECTED", nil])
-        let trips = generated.map { Trip($0, baseURL: Stub.baseURL, pinnedUntil: nil) }
+        let trips = generated.map { Trip($0, baseURL: Stub.baseURL) }
         #expect(trips.map { $0.cover?.id } == ["c1", "c2"])
     }
 }

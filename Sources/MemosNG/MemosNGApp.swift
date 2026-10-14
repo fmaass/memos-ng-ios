@@ -25,13 +25,16 @@ struct MemosNGApp: App {
         // and `UploadSettings` reads the group's value when the delegate builds it, so the pane's
         // defaults, an earlier build's appearance carried into the group and the version row are
         // all in place first. The group is the pane's one suite; `.standard` is only where earlier
-        // builds kept the appearance.
+        // builds kept the appearance. The media cache handed over is the one installed above and
+        // the one every image fetch goes through: when the pane's Storage switch is on it is
+        // cleared here, synchronously, before any view exists to ask for a picture (MEMNG-781).
         SettingsBundleSync.launch(
             from: .main,
             standard: .standard,
             domain: Bundle.main.bundleIdentifier ?? "",
             group: SettingsBundleSync.paneDefaults,
-            groupDomain: OutboxDefaults.appGroup
+            groupDomain: OutboxDefaults.appGroup,
+            cache: MediaSession.shared.cache
         )
     }
 
@@ -136,14 +139,22 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                     _ = SettingsBundleSync.activate(
                         settings: AppSettings.shared,
                         uploads: self.uploadSettings,
-                        outbox: self.outbox
+                        outbox: self.outbox,
+                        cache: MediaSession.shared.cache,
+                        group: SettingsBundleSync.paneDefaults
                     )
                 }
             },
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
             ) { _ in
-                MainActor.assumeIsolated { self.outbox?.appEnteredBackground() }
+                MainActor.assumeIsolated {
+                    // The outbox closes, and the pane's size row is written as the cache stands
+                    // when the app leaves the front.
+                    SettingsBundleSync.enteredBackground(
+                        outbox: self.outbox, cache: MediaSession.shared.cache,
+                        group: SettingsBundleSync.paneDefaults)
+                }
             },
         ]
         // Registration has to happen before launch finishes, whatever else is true of this

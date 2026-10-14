@@ -208,9 +208,9 @@ struct MediaLibraryRenderTests {
     }
 
     /// Plan page 3929 decision 10: a large title with the subtitle under it, then on the right the
-    /// round options button and, after it, the Select capsule — drawn, and inert where there is
+    /// round filter button and, after it, the Select capsule — drawn, and inert where there is
     /// nothing to select (no `select` action: Years and Months).
-    @Test("the header draws the title, the subtitle, the options button and a disabled Select")
+    @Test("the header draws the title, the subtitle, the filter button and a disabled Select")
     func headerChrome() async throws {
         let subtitle = "Videos · Oldest First · #travel"
         let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
@@ -239,11 +239,11 @@ struct MediaLibraryRenderTests {
         let title = try #require(element("Library"), "no title")
         #expect(title.accessibilityTraits.contains(.header), "the title is not a heading")
         #expect(element(subtitle) != nil, "no subtitle line")
-        let options = try #require(element("Options"), "no options button")
+        let options = try #require(element("Filter"), "no filter button")
         let select = try #require(element("Select"), "no Select capsule")
-        #expect(!options.accessibilityTraits.contains(.notEnabled), "the options button is inert")
+        #expect(!options.accessibilityTraits.contains(.notEnabled), "the filter button is inert")
         #expect(select.accessibilityTraits.contains(.notEnabled), "Select is live too early")
-        // Right of the title, the options button first and the capsule after it.
+        // Right of the title, the filter button first and the capsule after it.
         let left = title.accessibilityFrame.midX
         let middle = options.accessibilityFrame.midX
         let right = select.accessibilityFrame.midX
@@ -380,25 +380,161 @@ struct MediaLibraryRenderTests {
         #expect(!select.accessibilityTraits.contains(.notEnabled), "Select is still inert in All")
     }
 
-    /// MEMNG-588, the mockup's section 7: in select mode the options button and the capsule give
-    /// way to a round select-all toggle and a round close button.
-    @Test("select mode swaps the header's controls for select all and close")
-    func selectModeHeader() async throws {
-        let found = try await Self.elements(
+    /// The labels and the controls of `view` as hosted, read while its window is still up: once
+    /// the window is gone every frame is zero, and `controls(in:)` tells controls apart by frame.
+    private static func hostedControls(
+        of view: some View, waitFor: String
+    ) async throws -> (labels: [String], controls: [String]) {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.rootViewController = UIHostingController(rootView: view)
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var found: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            found = []
+            collectElements(window, into: &found)
+            if found.contains(where: { $0.accessibilityLabel == waitFor }) { break }
+        }
+        return (found.compactMap(\.accessibilityLabel), controls(in: found))
+    }
+
+    /// The header's controls, leading to trailing: what carries the button trait, each CONTROL
+    /// once. The walk can meet one control twice — a view and the element it hosts — at one frame;
+    /// two controls never share a frame, so two close buttons count as two. A control read with no
+    /// frame (its window already gone) says so in its label rather than merging with the others.
+    private static func controls(in found: [NSObject]) -> [String] {
+        var seen: Set<String> = []
+        return found.filter { $0.accessibilityTraits.contains(.button) }
+            .filter { element in
+                let frame = element.accessibilityFrame.integral
+                let key =
+                    "\(element.accessibilityLabel ?? "")@\(frame.minX),\(frame.minY),"
+                    + "\(frame.width),\(frame.height)"
+                return seen.insert(key).inserted
+            }
+            .sorted { $0.accessibilityFrame.minX < $1.accessibilityFrame.minX }
+            .map { element in
+                let label = element.accessibilityLabel ?? ""
+                return element.accessibilityFrame.isEmpty ? "\(label) (no frame)" : label
+            }
+    }
+
+    /// The bands of ink, one under another, that the glyph inside `frame` draws, read from the
+    /// hosting view as drawn over its middle half of columns and the button's whole height (the
+    /// glass sets its glyph below the centre), with the darkest value of each row as the evidence:
+    /// the filter glyph is three lines stacked, an ellipsis one row of dots. Ink is measured
+    /// against the lightest row, not a fixed grey, because the glass draws its symbol softened.
+    private static func inkBands(
+        in frame: CGRect, of view: UIView
+    ) -> (bands: Int, profile: String) {
+        let scale: CGFloat = 3
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = true
+        var drew = false
+        let image = UIGraphicsImageRenderer(bounds: view.bounds, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(view.bounds)
+            drew = view.drawHierarchy(in: view.bounds, afterScreenUpdates: true)
+        }
+        guard drew, let whole = image.cgImage else { return (-1, "drew \(drew)") }
+        let inner = view.convert(frame, from: nil).insetBy(dx: frame.width / 4, dy: 0)
+        let pixels = CGRect(
+            x: inner.minX * scale, y: inner.minY * scale, width: inner.width * scale,
+            height: inner.height * scale
+        ).integral
+        guard let drawn = whole.cropping(to: pixels) else { return (-1, "no crop \(pixels)") }
+        let width = drawn.width
+        let height = drawn.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        bytes.withUnsafeMutableBytes { raw in
+            let context = CGContext(
+                data: raw.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            context?.draw(drawn, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        let darkest: [Double] = (0..<height).map { y in
+            (0..<width).map { x in
+                let at = (y * width + x) * 4
+                let weighted =
+                    0.299 * Double(bytes[at]) + 0.587 * Double(bytes[at + 1])
+                    + 0.114 * Double(bytes[at + 2])
+                return weighted / 255
+            }.min() ?? 1
+        }
+        let background = darkest.max() ?? 1
+        var bands = 0
+        var inBand = false
+        for value in darkest {
+            let inked = value < background - 0.2
+            if inked && !inBand { bands += 1 }
+            inBand = inked
+        }
+        let profile = darkest.map { String(Int(($0 * 9).rounded())) }.joined()
+        return (bands, "frame \(frame) \(width)x\(height) darkest-by-row \(profile)")
+    }
+
+    /// MEMNG-779 (WPN-12 phase 1): browsing, the header holds exactly the round filter button and
+    /// Select, and the round button DRAWS the filter glyph — three stacked lines, read from the
+    /// window, not from a constant; in select mode with nothing chosen there is no Select All or
+    /// Deselect All, and the trailing capsule holds one control, the close button — its actions
+    /// menu has no rows on the Library.
+    @Test("the header shows the filter button and Select; select mode shows only its close button")
+    func filterHeaderAndSelectChrome() async throws {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: CGSize(width: 390, height: 844)))
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = UIHostingController(
+            rootView: VStack {
+                LibraryHeader(subtitle: "All", select: {}) { Text("row") }
+                Spacer()
+            }
+            .background(Color.white))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var browsing: [NSObject] = []
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            browsing = []
+            Self.collectElements(window, into: &browsing)
+            if browsing.contains(where: { $0.accessibilityLabel == "Select" }) { break }
+        }
+        #expect(
+            Self.controls(in: browsing) == ["Filter", "Select"],
+            "browsing controls: \(Self.controls(in: browsing))")
+        let filter = try #require(browsing.first { $0.accessibilityLabel == "Filter" })
+        let hosted = try #require(window.rootViewController?.view)
+        let ink = Self.inkBands(in: filter.accessibilityFrame, of: hosted)
+        #expect(
+            ink.bands == 3, "the round button draws \(ink.bands) band(s) of ink: \(ink.profile)")
+
+        let (labels, selecting) = try await Self.hostedControls(
             of: LibraryHeader(subtitle: "All", select: {}, selecting: true) { Text("row") },
             waitFor: "Close")
-        let labels = found.compactMap(\.accessibilityLabel)
-        #expect(labels.contains("Select All"), "no select-all toggle: \(labels)")
-        #expect(labels.contains("Close"), "no close button: \(labels)")
-        #expect(!labels.contains("Options"), "the options button stayed in select mode")
-        #expect(!labels.contains("Select"), "the Select capsule stayed in select mode")
+        #expect(!labels.contains("Select All"), "a Select All control: \(labels)")
+        #expect(!labels.contains("Deselect All"), "a Deselect All control: \(labels)")
+        #expect(selecting == ["Close"], "select mode controls: \(selecting)")
+    }
 
-        let all = try await Self.elements(
-            of: LibraryHeader(subtitle: "All", selecting: true, allSelected: true) {
-                Text("row")
-            },
-            waitFor: "Close")
-        #expect(all.contains { $0.accessibilityLabel == "Deselect All" }, "no way to clear")
+    /// MEMNG-779: once select mode's actions menu has rows (WPN-14 gives the Library some), the
+    /// trailing capsule holds that menu and then the close button.
+    @Test("select mode's capsule holds the actions menu and the close button once it has rows")
+    func selectChromeWithRows() async throws {
+        let rows = [
+            SelectAction(id: "share", title: "Share", systemImage: "square.and.arrow.up") {}
+        ]
+        let (_, found) = try await Self.hostedControls(
+            of: SelectChrome(menuRows: rows, close: {}), waitFor: "Close")
+        #expect(found == ["More", "Close"], "capsule controls: \(found)")
     }
 
     /// MEMNG-588 and MEMNG-589: the bottom bar says how many are chosen, and share and delete take

@@ -2,9 +2,9 @@ import MemosCore
 import SwiftUI
 
 /// The Library's header (plan page 3929 decision 10): a large bold title with a small subtitle
-/// line under it, and on the right a round glass options button, then a glass "Select" capsule.
-/// In select mode (MEMNG-588, the mockup's section 7) the two become a round "select all of mine
-/// in view" toggle and a round close button.
+/// line under it, and on the right a round glass filter button, then a glass "Select" capsule.
+/// In select mode (MEMNG-588; MEMNG-779) the two give way to `SelectChrome`: the close button
+/// alone while select mode's actions menu has no rows, as on the Library. There is no Select All.
 ///
 /// Drawn by the screen rather than by the navigation bar, so the two controls are two pieces of
 /// glass side by side, as the Photos app draws them, and not items a toolbar may group into one.
@@ -16,10 +16,8 @@ struct LibraryHeader<MenuContent: View>: View {
     var select: (() -> Void)?
     /// Whether the grid is in select mode, which swaps the controls on the right.
     var selecting = false
-    /// Whether every picture in view is chosen: the toggle is drawn filled, and its next tap
-    /// clears.
-    var allSelected = false
-    var toggleAll: () -> Void = {}
+    /// Select mode's actions menu: none on the Library yet (WPN-14 adds them).
+    var menuRows: [SelectAction] = []
     var close: () -> Void = {}
     @ViewBuilder let menu: () -> MenuContent
 
@@ -38,10 +36,10 @@ struct LibraryHeader<MenuContent: View>: View {
         Menu {
             menu()
         } label: {
-            HeaderGlassCircle.symbol("ellipsis")
+            HeaderGlassCircle.symbol(LibraryFilterMenuContent.symbol)
         }
         .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel("Options")
+        .accessibilityLabel("Filter")
         // Live only where there are files to choose (All); on Years and Months it is still drawn,
         // so the header keeps its shape, and disabled, so it promises nothing it cannot do. The
         // padding and the height are the label's, so the button is the whole capsule of glass and
@@ -58,14 +56,8 @@ struct LibraryHeader<MenuContent: View>: View {
         .disabled(select == nil)
     }
 
-    @ViewBuilder
     private var selectModeControls: some View {
-        HeaderGlassCircle(
-            systemName: allSelected ? "checkmark.circle.fill" : "checkmark.circle",
-            label: allSelected ? "Deselect All" : "Select All",
-            action: toggleAll
-        )
-        HeaderGlassCircle(systemName: "xmark", label: "Close", action: close)
+        SelectChrome(menuRows: menuRows, close: close)
     }
 }
 
@@ -124,41 +116,75 @@ struct HeaderGlassCircle: View {
     }
 }
 
-/// The rows of the Library's options menu, in the order page 3929 gives them (decisions 5, 10
-/// and 12): the sort, the kind, then "All tags" and every tag with its picture count. Each group is
-/// an inline Picker, which is what draws the checkmark on the chosen row — one selection each, so
-/// choosing a row un-chooses the others in its group and leaves the other groups alone.
+/// The round filter button's menu, in the Photos app's shape (MEMNG-779, WPN-12 phase 1): the
+/// kinds as an inline Picker under the heading "Filter", which is what draws the checkmark on the
+/// chosen row; a divider; then a nested "Sort By" menu whose label says the order in force.
 ///
-/// LAST, below the pickers, the one action in the menu: clearing the media cache, labelled with
-/// its size (chrome trim, 2026-10-10 — its home since the Settings screen went). The size is the
-/// screen's, read when the header appears, and the item reads it again after clearing.
-struct LibraryOptionsMenuContent: View {
-    @Binding var order: MediaLibraryOrder
+/// The tags are not here — they are reached from Collections — and neither is clearing the media
+/// cache, which is the Settings app's Storage group (MEMNG-781).
+struct LibraryFilterMenuContent: View {
+    /// The round button's glyph: Photos' filter symbol.
+    static let symbol = "line.3.horizontal.decrease"
+
     @Binding var filter: MediaLibraryFilter
-    @Binding var tag: String?
-    let tagRows: [LibraryTagRow]
-    @Binding var cache: MediaCacheMaintenance.Usage
+    @Binding var order: MediaLibraryOrder
 
     var body: some View {
-        Picker("Sort", selection: $order) {
-            ForEach(MediaLibraryOrder.allCases) { order in
-                Text(MediaLibraryPresentation.sortLabel(for: order)).tag(order)
-            }
-        }
-        .pickerStyle(.inline)
-        Picker("Kind", selection: $filter) {
+        Picker("Filter", selection: $filter) {
             ForEach(MediaLibraryFilter.allCases) { filter in
                 Text(MediaLibraryPresentation.label(for: filter)).tag(filter)
             }
         }
         .pickerStyle(.inline)
-        Picker("Tags", selection: $tag) {
-            ForEach(tagRows) { row in
-                Text(row.label).tag(row.selection)
+        Divider()
+        SortByMenu(order: $order)
+    }
+}
+
+/// The filter menu's nested "Sort By" menu: its label carries the order in force as a second,
+/// smaller line, and opening it shows the two orders with a checkmark on the current one.
+struct SortByMenu: View {
+    @Binding var order: MediaLibraryOrder
+
+    var body: some View {
+        Menu {
+            SortByMenuContent(order: $order)
+        } label: {
+            SortByMenuLabel(order: order)
+        }
+        // One element for VoiceOver, "Sort By, Newest First": the two lines read as the menu's
+        // name and its value rather than as two things to visit.
+        .accessibilityLabel("Sort By")
+        .accessibilityValue(order.label)
+    }
+}
+
+/// "Sort By", and under it the order in force — the menu's title and subtitle.
+struct SortByMenuLabel: View {
+    let order: MediaLibraryOrder
+
+    var body: some View {
+        Text("Sort By")
+        Text(order.label)
+            .font(.caption)
+    }
+}
+
+/// The Sort By menu's rows, Oldest First then Newest First: an inline Picker, so the order in force
+/// carries the checkmark and choosing the other un-chooses it.
+struct SortByMenuContent: View {
+    @Binding var order: MediaLibraryOrder
+
+    /// The rows' order, as the design of record lists them.
+    static let orders: [MediaLibraryOrder] = [.oldestFirst, .newestFirst]
+
+    var body: some View {
+        Picker("Sort By", selection: $order) {
+            ForEach(Self.orders) { order in
+                Text(order.label).tag(order)
             }
         }
         .pickerStyle(.inline)
-        Divider()
-        ClearMediaCacheItem(usage: $cache)
+        .labelsHidden()
     }
 }

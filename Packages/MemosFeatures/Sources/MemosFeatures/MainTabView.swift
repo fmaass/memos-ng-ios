@@ -21,6 +21,8 @@ struct MainTabView: View {
     @State private var tagJump = LibraryTagJump()
     /// A year asked for from the Collections root, which the Library shows in Months (MEMNG-720).
     @State private var yearJump = LibraryYearJump()
+    /// A month asked for from the Collections root, which the Library shows in Months (MEMNG-783).
+    @State private var monthJump = LibraryMonthJump()
     /// The session's collections and their memberships: one of each for as long as this view
     /// shows a session, built once its identity can be read, moved to a new identity beside the
     /// timeline (`TimelineView`), and read by every tab through the environment.
@@ -44,6 +46,13 @@ struct MainTabView: View {
             tabs
         }
         .task { makeTripStores() }
+        // The trip list at once, not when the Collections root first appears: the composer's
+        // offer of today's trip reads it (MEMNG-781).
+        .readsTrips(trips, under: session.snapshotIdentity) { [session] in
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+            else { return nil }
+            return CollectionsAccess(handle: handle, baseURL: baseURL)
+        }
     }
 
     /// Builds the trip and member stores, once, under the identity signed in now. Both report to
@@ -105,6 +114,7 @@ struct MainTabView: View {
         .environment(jump)
         .environment(tagJump)
         .environment(yearJump)
+        .environment(monthJump)
         .environment(trips)
         .environment(members)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
@@ -119,6 +129,10 @@ struct MainTabView: View {
         // And for a year asked for from Collections: the Library shows it.
         .onChange(of: yearJump.pending) { _, pending in
             selection = LibraryYearJumpRouting.tab(showing: selection, whenOpening: pending)
+        }
+        // And for a month: the Library shows its days.
+        .onChange(of: monthJump.pending) { _, pending in
+            selection = LibraryMonthJumpRouting.tab(showing: selection, whenOpening: pending)
         }
     }
 

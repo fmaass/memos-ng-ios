@@ -579,7 +579,7 @@ extension MediaImageLoaderTests {
     }
 
     /// The words of the kind filter, and the name its bar was read out by. Since MEMNG-595 the
-    /// kind is chosen in the header's options menu, whose rows are drawn only while it is open.
+    /// kind is chosen in the header's filter menu, whose rows are drawn only while it is open.
     private static let kindWords: Set<String> = [
         "All Items", "Images", "Photos", "Videos", "Filter media type",
     ]
@@ -601,7 +601,7 @@ extension MediaImageLoaderTests {
         return found + labels(in: window).filter { kindWords.contains($0) }
     }
 
-    /// Plan page 3929 decision 5: sort and filter are in the header's options button, not on a bar
+    /// Plan page 3929 decision 5: sort and filter are in the header's filter button, not on a bar
     /// over the Library, so no segmented control draws Photos or Videos over All, Years or Months.
     @Test("no kind filter bar is drawn over the grid, Years or Months")
     func noKindFilterBar() async {
@@ -617,7 +617,7 @@ extension MediaImageLoaderTests {
             let (_, window) = await hostYears(wire) { window in
                 overAll = Self.kindFilterShown(in: window)
                 Self.elements(labelled: "Select", in: window, into: &select)
-                Self.elements(labelled: "Options", in: window, into: &options)
+                Self.elements(labelled: "Filter", in: window, into: &options)
                 live = select.allSatisfy { !$0.accessibilityTraits.contains(.notEnabled) }
             }
             defer {
@@ -626,10 +626,10 @@ extension MediaImageLoaderTests {
                 window.rootViewController = nil
             }
             #expect(overAll.isEmpty, "a kind filter over the All grid: \(overAll)")
-            // The header the kind moved into, on the real Library: its options button, and the
+            // The header the kind moved into, on the real Library: its filter button, and the
             // Select capsule (decision 10), live over All where there are files to choose
             // (MEMNG-588).
-            #expect(!options.isEmpty, "the Library draws no options button")
+            #expect(!options.isEmpty, "the Library draws no filter button")
             #expect(!select.isEmpty && live, "Select is missing or inert in All")
 
             var labels: [String] = []

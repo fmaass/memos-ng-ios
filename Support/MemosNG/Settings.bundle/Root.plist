@@ -58,6 +58,34 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>Title</key>
+			<string>Storage</string>
+			<key>FooterText</key>
+			<string>Cleared the next time the app opens; the switch then turns off again.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+			<key>Title</key>
+			<string>Media cache</string>
+			<key>Key</key>
+			<string>settings.mediaCacheSize</string>
+			<key>DefaultValue</key>
+			<string></string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Clear media cache on next launch</string>
+			<key>Key</key>
+			<string>settings.clearMediaCacheOnLaunch</string>
+			<key>DefaultValue</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
 			<string>About</string>
 		</dict>
 		<dict>

@@ -57,6 +57,7 @@ nonisolated final class TripRows: @unchecked Sendable {
     private var failing: Set<String> = []
     private var held: Set<String> = []
     private var log: [Call] = []
+    private var served: [String] = []
     private var writes = 0
     /// The cover's JSON, as the transport signs its pictures.
     private let coverItem: @Sendable (String) -> String
@@ -76,6 +77,12 @@ nonisolated final class TripRows: @unchecked Sendable {
     var calls: [Call] { lock.withLock { log } }
 
     func calls(_ operation: String) -> [Call] { calls.filter { $0.operation == operation } }
+
+    /// How many requests of `operation` got past their hold and were answered; a held request
+    /// whose task was cancelled never is.
+    func answered(_ operation: String) -> Int {
+        lock.withLock { served.filter { $0 == operation }.count }
+    }
 
     /// Every collection route but the reads.
     var writeCalls: [Call] {
@@ -134,6 +141,7 @@ nonisolated final class TripRows: @unchecked Sendable {
         while lock.withLock({ held.contains(operationID) }) {
             try await Task.sleep(for: .milliseconds(20))
         }
+        lock.withLock { served.append(operationID) }
         if lock.withLock({ failing.contains(operationID) }) {
             return (HTTPResponse(status: .internalServerError), nil)
         }

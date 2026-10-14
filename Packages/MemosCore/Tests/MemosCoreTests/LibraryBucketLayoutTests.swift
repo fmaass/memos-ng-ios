@@ -227,4 +227,14 @@ struct LibraryBucketLayoutTests {
         #expect(bucketCountLabel(0) == "0 items")
         #expect(bucketCountLabel(12) == "12 items")
     }
+
+    @Test("a month bucket's key is titled with its short month and year, anything else not")
+    func monthBucketLabels() {
+        #expect(monthBucketLabel("2026-09") == "Sep 2026")
+        #expect(monthBucketLabel("2026-10") == "Oct 2026")
+        #expect(monthBucketLabel("1999-01") == "Jan 1999")
+        for key in ["2026", "2026-13", "2026-00", "2026-9", "2026-09-01", "", "+026-09"] {
+            #expect(monthBucketLabel(key) == nil, "\(key)")
+        }
+    }
 }

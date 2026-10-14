@@ -154,6 +154,13 @@ public func bucketCountLabel(_ count: Int) -> String {
     count == 1 ? "1 item" : "\(count) items"
 }
 
+/// A month bucket's key (`YYYY-MM`) as its card titles it — "Sep 2026", the short month the
+/// Library's Months view writes — or nil for a key that names no month.
+public func monthBucketLabel(_ key: String) -> String? {
+    guard key.count == 7 else { return nil }
+    return LibraryDayKey(key + "-01")?.monthLabel
+}
+
 /// A `YYYY-MM-DD` day key read into its fields, or nil for anything else.
 private struct LibraryDayKey {
     let year: Int

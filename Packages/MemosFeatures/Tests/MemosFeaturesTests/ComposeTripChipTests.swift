@@ -132,8 +132,9 @@ struct ComposeTripChipTests {
     private let edit = ComposeView.Mode.edit(
         uid: "m1", content: "x", createdAt: Date(timeIntervalSince1970: 0), attachments: [])
 
+    /// The chip speaks of the trip, never of a pin (MEMNG-781).
     private func chipShown(_ labels: [String]) -> Bool {
-        labels.contains("Pinned trip, Portugal 2026")
+        labels.contains("Trip, Portugal 2026")
     }
 
     /// The sheet as a new capture of `content` opens it, offered `pinnedTrip`.
@@ -143,43 +144,6 @@ struct ComposeTripChipTests {
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome = { _ in .saved }
     ) -> ComposeView {
         ComposeView(mode: draft(content), pinnedTrip: pinnedTrip, submit: submit)
-    }
-
-    // MARK: - The offer, read from the store
-
-    /// A trip as the server lists it, made at `now`.
-    private func listed(_ title: String, tag: String?, at now: Date) -> Trip {
-        Trip(uid: "trip-1", title: title, tag: tag, createdAt: now, updatedAt: now)
-    }
-
-    @Test("the offer is the pinned trip's title and tag, while the pin lasts")
-    func offerFollowsThePin() throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        let made = listed("Portugal 2026", tag: "portugal2026", at: now)
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil, "an unpinned trip offered")
-
-        pins.pin(made, lastTaken: nil, now: now)
-        let until = try #require(pins.pinnedUntil(uid: made.uid))
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == trip)
-        #expect(
-            ComposePinnedTrip.offered(by: pins, now: until.addingTimeInterval(-1)) == trip)
-        #expect(
-            ComposePinnedTrip.offered(by: pins, now: until) == nil,
-            "a pin that ends exactly now is over and must not be offered")
-        #expect(ComposePinnedTrip.offered(by: nil, now: now) == nil)
-    }
-
-    @Test("a pinned record with no tag offers nothing")
-    func untaggedRecordOffersNothing() {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        pins.pin(listed("Nowhere", tag: nil, at: now), lastTaken: nil, now: now)
-        #expect(pins.activePin(now: now) != nil, "the case needs the pin to be active")
-        #expect(ComposePinnedTrip.offered(by: pins, now: now) == nil)
-        #expect(
-            ComposePinnedTrip(
-                pin: TripPin(uid: "blank", title: "Blank", tag: "", pinnedUntil: now)) == nil)
     }
 
     // MARK: - The chip's state
@@ -224,24 +188,6 @@ struct ComposeTripChipTests {
         #expect(!chipShown(ScreenProbe.labels(of: editing)), "an edit showed the chip")
     }
 
-    @Test("the timeline's sheet shows the chip for an active pin and not for an expired one")
-    func timelineSheetFollowsThePin() throws {
-        let now = Date(timeIntervalSince1970: 1_750_000_000)
-        let pins = TripPins(identity: alice, root: root)
-        pins.pin(listed("Portugal 2026", tag: "portugal2026", at: now), lastTaken: nil, now: now)
-        let until = try #require(pins.pinnedUntil(uid: "trip-1"))
-
-        func sheet(at instant: Date) -> some View {
-            TimelineView.editSheet(
-                mode: .create(restoring: nil), isAsking: false, failure: nil,
-                pinnedTrip: ComposePinnedTrip.offered(by: pins, now: instant),
-                send: { _ in }, submit: { _ in .saved })
-        }
-        #expect(chipShown(ScreenProbe.labels(of: sheet(at: now))))
-        #expect(
-            !chipShown(ScreenProbe.labels(of: sheet(at: until))), "an expired pin showed a chip")
-    }
-
     @Test("Post sends the tag line; after the x it does not; a new sheet has the chip back")
     func postCarriesTheTag() async {
         let log = PostLog()
@@ -254,7 +200,7 @@ struct ComposeTripChipTests {
             // waits for Post to be live again, not only for the log.
             let sentOnce = await screen.until { log.sent.count == 1 && screen.isLive("Post") }
             let removed = screen.press("Remove trip tag")
-            let chipGone = await screen.until { !screen.says("Pinned trip") }
+            let chipGone = await screen.until { !screen.says("Trip, Portugal 2026") }
             let postedAgain = screen.press("Post")
             let sentTwice = await screen.until { log.sent.count == 2 }
             return (posted, removed, postedAgain, (sentOnce, chipGone, sentTwice))
@@ -448,7 +394,7 @@ struct ComposeTripVisibilityTests {
             var removed = true
             if removingTheTrip {
                 removed = screen.press("Remove trip tag")
-                await screen.settle(until: { !screen.says("Pinned trip") })
+                await screen.settle(until: { !screen.says("Trip, Portugal 2026") })
             }
             let pill = MemoVisibility.allCases.map { "Visibility: \($0.label)" }
                 .first { screen.says($0) && !screen.says("\($0), the account default") }
@@ -698,5 +644,301 @@ struct ComposeTripVisibilityTests {
         #expect(body["content"] as? String == "Lisbon at dusk", "positive control: body was read")
         #expect(body["visibility"] == nil, "an edit sent a visibility")
         #expect(timeline.memos.first?.visibility == .public)
+    }
+}
+
+// MARK: - Today's trip (MEMNG-781, decision 3)
+
+/// 8 October 2026 at a given hour and minute in `zone`.
+private func at(
+    _ day: Int, _ hour: Int = 12, _ minute: Int = 0, month: Int = 10,
+    in zone: String = "Europe/Lisbon"
+) -> Date {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: zone)!
+    return calendar.date(
+        from: DateComponents(year: 2026, month: month, day: day, hour: hour, minute: minute))!
+}
+
+private func trip(
+    _ uid: String, tag: String?, from start: Date?, to end: Date?,
+    zone: String? = "Europe/Lisbon"
+) -> Trip {
+    Trip(
+        uid: uid, title: "Trip \(uid)", tag: tag, spanStart: start, spanEnd: end, tz: zone,
+        createdAt: at(1), updatedAt: at(1))
+}
+
+/// Which trip a new memo is offered: the one whose span holds today, in the span's own zone.
+@MainActor
+@Suite("Composer trip chip: today's trip")
+struct ComposeTodaysTripTests {
+    /// 8 October 2026, 13:00 in Lisbon.
+    private let now = at(8, 13)
+
+    private func offered(_ trips: [Trip], at instant: Date? = nil) -> String? {
+        ComposePinnedTrip.offered(among: trips, now: instant ?? now)?.tag
+    }
+
+    @Test("a span holding today offers its trip; one that ended before today does not")
+    func insideAndOutside() {
+        #expect(offered([trip("a", tag: "lisbon", from: at(5, 0), to: at(12, 23))]) == "lisbon")
+        #expect(offered([trip("b", tag: "porto", from: at(1, 0), to: at(5, 23))]) == nil)
+        #expect(offered([trip("c", tag: "faro", from: at(9, 0), to: at(12, 23))]) == nil)
+    }
+
+    @Test("the first and the last day count whole, whatever the hour the span starts or ends")
+    func boundaryDays() {
+        // Ended at 09:00 today, four hours ago: today is still its last day.
+        #expect(offered([trip("a", tag: "endday", from: at(5, 0), to: at(8, 9))]) == "endday")
+        // Starts at 20:00 today, seven hours from now: today is already its first day.
+        #expect(offered([trip("b", tag: "startday", from: at(8, 20), to: at(12))]) == "startday")
+    }
+
+    @Test("today is the span's zone's today, not the device's or UTC's")
+    func todayInTheSpansZone() {
+        // Ended 23:30 on the 7th in Lisbon; it is 00:15 on the 8th there, still the 7th in UTC.
+        let span = trip("a", tag: "late", from: at(1, 0), to: at(7, 23, 30))
+        #expect(offered([span], at: at(8, 0, 15)) == nil, "the span's last day was yesterday")
+        #expect(offered([span], at: at(7, 23, 45)) == "late", "control: its last day")
+        // The same instants in New York's zone: still the 7th there, so still its last day.
+        let west = trip(
+            "b", tag: "west", from: at(1, 0, in: "America/New_York"),
+            to: at(7, 18, 30, in: "America/New_York"), zone: "America/New_York")
+        #expect(offered([west], at: at(8, 0, 15)) == "west")
+    }
+
+    @Test("a span with no end in sight yet holds today when it has begun")
+    func endInTheFuture() {
+        let long = trip("a", tag: "sabbatical", from: at(1, 0), to: at(31, 23, month: 12))
+        #expect(offered([long]) == "sabbatical")
+    }
+
+    @Test("a trip with no span, or with no tag, is never offered")
+    func noSpanOrNoTag() {
+        #expect(offered([trip("a", tag: "nospan", from: nil, to: nil)]) == nil)
+        #expect(offered([trip("b", tag: nil, from: at(5, 0), to: at(12))]) == nil)
+        #expect(offered([trip("c", tag: "", from: at(5, 0), to: at(12))]) == nil)
+        #expect(ComposePinnedTrip.offered(from: nil, now: now) == nil)
+    }
+
+    @Test("of two tagged trips holding today, the one begun later; equal starts, the shorter")
+    func overlappingTaggedTrips() {
+        let early = trip("a", tag: "portugal", from: at(1, 0), to: at(20))
+        let late = trip("b", tag: "lisbon", from: at(6, 0), to: at(10))
+        #expect(offered([early, late]) == "lisbon")
+        #expect(offered([late, early]) == "lisbon", "the list's order decided")
+        let wide = trip("c", tag: "wide", from: at(6, 0), to: at(20))
+        #expect(offered([wide, late]) == "lisbon", "equal starts: the earlier end")
+        let twin = trip("0", tag: "twin", from: at(6, 0), to: at(10))
+        #expect(offered([late, twin]) == "twin", "all equal: the smaller uid")
+    }
+
+    @Test("a span-only trip overlapping a tagged one leaves the tagged one offered")
+    func spanOnlyNeverWins() {
+        let tagged = trip("a", tag: "lisbon", from: at(1, 0), to: at(20))
+        let spanOnly = trip("b", tag: nil, from: at(7, 0), to: at(9))
+        #expect(offered([spanOnly, tagged]) == "lisbon")
+    }
+
+    @Test("the offer is the trip's title and tag")
+    func offerIsTitleAndTag() {
+        let found = ComposePinnedTrip.offered(
+            among: [trip("a", tag: "lisbon", from: at(5, 0), to: at(12))], now: now)
+        #expect(found == ComposePinnedTrip(title: "Trip a", tag: "lisbon"))
+    }
+}
+
+/// Whose identity a hosted reader of the trips follows; a test moves it.
+@MainActor
+@Observable
+private final class IdentityBox {
+    var identity: TimelineSnapshotIdentity?
+    init(_ identity: TimelineSnapshotIdentity?) { self.identity = identity }
+}
+
+/// The session's trips read as the app reads them at a cold launch (`readsTrips`), with nothing
+/// else on screen.
+private struct TripsReader: View {
+    let box: IdentityBox
+    let trips: TripStore
+    let access: (TimelineSnapshotIdentity?) -> CollectionsAccess?
+
+    var body: some View {
+        Color.clear.readsTrips(trips, under: box.identity) { access(box.identity) }
+    }
+}
+
+/// The cold launch: the trip list is read at once, before any Collections screen appears, so a
+/// capture opened from the Timeline is offered today's trip once that list has answered.
+@MainActor
+@Suite("Composer trip chip: the cold launch")
+struct ComposeColdLaunchTripTests {
+    private let alice = TimelineSnapshotIdentity(
+        server: CollectionsWire.baseURL, subject: "fabian")
+    private let bob = TimelineSnapshotIdentity(server: CollectionsWire.baseURL, subject: "bob")
+
+    private static func stamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
+    /// A trip on `rows` whose span holds the real today, as the Timeline's sheet reads the clock.
+    private static func seedToday(_ title: String, tag: String, on rows: TripRows) {
+        let now = Date()
+        rows.seed(
+            title, tag: tag, spanStart: stamp(now.addingTimeInterval(-86_400)),
+            spanEnd: stamp(now.addingTimeInterval(86_400)), tz: "UTC")
+    }
+
+    /// Polls `ready` for at most five seconds, for a case with no screen to settle.
+    private static func until(_ ready: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if ready() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return ready()
+    }
+
+    /// Presses the Timeline's New memo and waits for the sheet's Post.
+    private static func openNewMemo(on screen: PressProbe.Screen) async -> Bool {
+        let pressed = CollectionsHost.pressBarItem("New memo", on: screen)
+        guard pressed.took else { return false }
+        return await screen.until(seconds: 10) { screen.element(labelled: "Post") != nil }
+    }
+
+    /// Presses the sheet's Cancel and waits for the sheet to go.
+    private static func cancelSheet(on screen: PressProbe.Screen) async -> Bool {
+        guard CollectionsHost.pressBarItem("Cancel", on: screen).took else { return false }
+        return await screen.until(seconds: 10) { screen.element(labelled: "Post") == nil }
+    }
+
+    /// The app as it launches: the real tab view over a signed-in session, opening on the
+    /// Timeline, its New memo the real sheet. Nothing in the case reads the trips itself, so the
+    /// list is asked for by the app's own launch read (`MainTabView`), and the chip comes from
+    /// what the Timeline hands its sheet.
+    @Test("the app's Timeline offers today's trip on New memo once the launch's list answers")
+    func coldLaunchOffersOnceTheListAnswers() async {
+        let transport = CollectionsTransport()
+        Self.seedToday("Lisbon now", tag: "lisbonnow", on: transport.trips)
+        transport.trips.hold(TripRows.list)
+        let session = CollectionsWire.signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let chip = "Trip, Lisbon now"
+        let tabs = MainTabView(opening: .timeline).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let asked = await screen.until(seconds: 10) {
+                !transport.trips.calls(TripRows.list).isEmpty
+            }
+            #expect(asked, "the launch asked for no trip list: \(transport.sent)")
+            let opened = await Self.openNewMemo(on: screen)
+            #expect(opened, "New memo opened no sheet")
+            #expect(!screen.says(chip), "a chip before the list answered")
+            let closed = await Self.cancelSheet(on: screen)
+            #expect(closed, "the sheet did not close")
+            transport.trips.release(TripRows.list)
+            let listed = await screen.until { transport.trips.answered(TripRows.list) >= 1 }
+            #expect(listed, "the held list never answered")
+            let reopened = await Self.openNewMemo(on: screen)
+            #expect(reopened, "New memo opened no second sheet")
+            let shown = await screen.until { screen.says(chip) }
+            #expect(shown, "the newly opened sheet has no chip")
+            _ = await Self.cancelSheet(on: screen)
+        }
+    }
+
+    @Test("an identity change reads the new identity's list at once")
+    func identityChangeReadsTheNewList() async {
+        let wireA = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wireA.transport.trips)
+        wireA.transport.trips.hold(TripRows.list)
+        let wireB = CollectionsWire()
+        Self.seedToday("Bob's trip", tag: "bobs", on: wireB.transport.trips)
+        let trips = TripStore(identity: alice, root: nil)
+        let box = IdentityBox(alice)
+        let (accessA, accessB) = (wireA.access, wireB.access)
+        let view = TripsReader(box: box, trips: trips) { $0?.subject == "bob" ? accessB : accessA }
+        await CollectionsHost.with(view) { screen in
+            let asked = await screen.until { !wireA.transport.trips.calls(TripRows.list).isEmpty }
+            #expect(asked, "no trip list was asked for at launch")
+            box.identity = bob
+            let moved = await screen.until { trips.trips.map(\.title) == ["Bob's trip"] }
+            #expect(moved, "the new identity's list was not read: \(trips.trips.map(\.title))")
+            #expect(trips.identity == bob)
+            // Fabian's list goes too, so no held read outlives the case.
+            wireA.transport.trips.release(TripRows.list)
+            _ = await screen.until { wireA.transport.trips.answered(TripRows.list) == 1 }
+        }
+    }
+
+    // MARK: - The list's fences, on the store
+    //
+    // Driven on the store itself so each answer's delivery is awaited rather than waited out: a
+    // refresh returns only once its answer has been judged, applied or dropped.
+
+    @Test("a list asked for one identity and answered after the switch is dropped on arrival")
+    func staleListIsDropped() async {
+        let wireA = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wireA.transport.trips)
+        wireA.transport.trips.hold(TripRows.list)
+        let wireB = CollectionsWire()
+        Self.seedToday("Bob's trip", tag: "bobs", on: wireB.transport.trips)
+        let trips = TripStore(identity: alice, root: nil)
+        let (accessA, accessB) = (wireA.access, wireB.access)
+        let first = Task { await trips.refresh(using: accessA.handle, baseURL: accessA.baseURL) }
+        let asked = await Self.until { !wireA.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "fabian's list was never asked for")
+        trips.sessionIdentityChanged(to: bob)
+        await trips.refresh(using: accessB.handle, baseURL: accessB.baseURL)
+        #expect(trips.trips.map(\.title) == ["Bob's trip"], "precondition: bob's list")
+        wireA.transport.trips.release(TripRows.list)
+        await first.value
+        #expect(wireA.transport.trips.answered(TripRows.list) == 1, "fabian's list never answered")
+        #expect(trips.trips.map(\.title) == ["Bob's trip"], "fabian's late list replaced bob's")
+        #expect(trips.identity == bob)
+        #expect(trips.lastError == nil, "the late answer was taken for a failure")
+    }
+
+    @Test("a list still out when the session signs out fills nothing once it answers")
+    func signOutWhileListed() async {
+        let wire = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wire.transport.trips)
+        wire.transport.trips.hold(TripRows.list)
+        let trips = TripStore(identity: alice, root: nil)
+        let access = wire.access
+        let first = Task { await trips.refresh(using: access.handle, baseURL: access.baseURL) }
+        let asked = await Self.until { !wire.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "the list was never asked for")
+        trips.sessionIdentityChanged(to: nil)
+        wire.transport.trips.release(TripRows.list)
+        await first.value
+        #expect(wire.transport.trips.answered(TripRows.list) == 1, "the list never answered")
+        #expect(trips.trips.isEmpty, "a signed-out store took the list")
+        #expect(trips.identity == nil)
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
+        #expect(wire.transport.trips.calls(TripRows.list).count == 1, "signed out, it asked again")
+    }
+
+    @Test("two refreshes while one list is out are one request, and both see its answer")
+    func overlappingRefreshesJoin() async {
+        let wire = CollectionsWire()
+        Self.seedToday("Portugal 2026", tag: "portugal2026", on: wire.transport.trips)
+        wire.transport.trips.hold(TripRows.list)
+        let trips = TripStore(identity: alice, root: nil)
+        let access = wire.access
+        let first = Task { await trips.refresh(using: access.handle, baseURL: access.baseURL) }
+        let asked = await Self.until { !wire.transport.trips.calls(TripRows.list).isEmpty }
+        #expect(asked, "the list was never asked for")
+        // Released and asked again in one turn of the main actor: the first answer cannot be
+        // applied before the second refresh has either joined it or sent a list of its own.
+        wire.transport.trips.release(TripRows.list)
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
+        let joinerSaw = trips.trips.map(\.title)
+        await first.value
+        #expect(wire.transport.trips.calls(TripRows.list).count == 1, "the second sent its own")
+        #expect(joinerSaw == ["Portugal 2026"], "the joiner returned before the answer")
+        #expect(trips.trips.map(\.title) == ["Portugal 2026"])
     }
 }

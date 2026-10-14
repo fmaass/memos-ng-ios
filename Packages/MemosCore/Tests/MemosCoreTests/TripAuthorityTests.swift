@@ -9,8 +9,7 @@ import Testing
 /// answered only while the slot it waited on is still the latest one on that trip, a removal
 /// batch holds its slot through its record re-read and member re-drain, every cached result is
 /// fenced by the lineage that produced it, every answered request is reported to the session, a
-/// change re-reads its record, and a fresh member summary moves the pin. `@testable` for the join
-/// and delivery seams.
+/// and a change re-reads its record. `@testable` for the join and delivery seams.
 @MainActor
 @Suite("Trip authority")
 struct TripAuthorityTests {
@@ -382,25 +381,7 @@ struct TripAuthorityTests {
         }
     }
 
-    // MARK: - (6) a fresh summary moves the pin
-
-    @Test("a fresh member summary extends the pin on the trip and moves the revision")
-    func freshSummaryExtendsThePin() async throws {
-        let calls = TripCalls()
-        let client = client(calls, members: { _ in TripWire.page([1, 200]) })
-        let (trips, members) = await stores(client)
-        trips.pin(uid: "t1", lastTaken: TripWire.taken(0), now: TripWire.taken(0))
-        let pinned = trips.revision
-        await members.drain(try trip(trips), using: client.handle, baseURL: Stub.baseURL)
-
-        let expected = TripWire.taken(200).addingTimeInterval(TripPins.pinDuration)
-        #expect(trips.pins.pinnedUntil(uid: "t1") == expected, "the pin file kept the old pin")
-        #expect(try trip(trips).pinnedUntil == expected, "the trip kept the old pin")
-        #expect(trips.revision > pinned, "the pin moved without the revision")
-        #expect(members.state(for: try trip(trips)) == .complete, "the drain voided itself")
-    }
-
-    // MARK: - R2: the empty Removed answer and a pin that cannot extend
+    // MARK: - R2: the empty Removed answer, and a drain that changes nothing
 
     @Test("an empty Removed answer issued before a change adds criteria is not current after it")
     func emptyRemovedIssuedBeforeACriteriaChange() async throws {
@@ -467,23 +448,20 @@ struct TripAuthorityTests {
             "an empty answer of an earlier revision is shown as current")
     }
 
-    @Test("a second summary of a pinned trip whose pin cannot extend moves nothing")
-    func repeatedSummaryLeavesThePin() async throws {
+    /// What the retired repeated-summary case held besides the pin (MEMNG-781): a second drain
+    /// of a trip nothing changed reads again, moves no revision, and leaves the members complete.
+    @Test("a second drain of an unchanged trip reads again, moves no revision, stays complete")
+    func repeatedDrainMovesNothing() async throws {
         let calls = TripCalls()
         let client = client(calls, members: { _ in TripWire.page([1, 200]) })
         let (trips, members) = await stores(client)
-        trips.pin(uid: "t1", lastTaken: TripWire.taken(0), now: TripWire.taken(0))
         await members.drain(try trip(trips), using: client.handle, baseURL: Stub.baseURL)
-        let pinned = try #require(trips.pins.pinnedUntil(uid: "t1"))
-        let expected = TripWire.taken(200).addingTimeInterval(TripPins.pinDuration)
-        #expect(pinned == expected, "control: the first summary extended the pin")
+        #expect(members.state(for: try trip(trips)) == .complete, "control: the first completed")
         let revision = trips.revision
         await members.drain(try trip(trips), using: client.handle, baseURL: Stub.baseURL)
 
         #expect(calls.of(TripWire.members).count == 2, "control: the second drain read again")
-        #expect(trips.pins.pinnedUntil(uid: "t1") == pinned, "the pin file moved")
-        #expect(try trip(trips).pinnedUntil == pinned, "the trip's pin moved")
-        #expect(trips.revision == revision, "a summary that moved no pin moved the revision")
+        #expect(trips.revision == revision, "a drain that changed nothing moved the revision")
         #expect(members.state(for: try trip(trips)) == .complete, "the second drain voided itself")
     }
 }

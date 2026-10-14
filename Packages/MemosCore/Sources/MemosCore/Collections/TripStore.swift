@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MemosAPI
 import Observation
@@ -11,7 +12,7 @@ import Observation
 /// its frozen request: the identical request joins, another one under the same key is `.busy`.
 ///
 /// **A revision arbitrates reads; a write is judged by its own slot.** `revision` moves on every
-/// applied mutation (create, update, delete, exclusion, pin), every applied list and every identity
+/// applied mutation (create, update, delete, exclusion), every applied list and every identity
 /// change. A READ answer is applied only while the revision, the session generation and the scope
 /// are the ones it was issued under — so a list asked before a delete cannot bring the trip back.
 /// A WRITE answer is applied while the scope and the session generation are the issuing ones and
@@ -55,7 +56,6 @@ public final class TripStore {
     public private(set) var identity: TimelineSnapshotIdentity?
     /// What the last list could not do.
     public private(set) var lastError: String?
-    public let pins: TripPins
 
     /// A seam for tests: called when a caller joins a write already on the wire.
     @ObservationIgnored var onJoin: (@MainActor () -> Void)?
@@ -127,15 +127,14 @@ public final class TripStore {
 
     public init(
         identity: TimelineSnapshotIdentity?,
-        root: URL? = TripPins.appGroupRoot(),
+        root: URL? = TripStore.appGroupRoot(),
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded }
     ) {
         self.identity = identity
         self.root = root
         self.onUnauthorized = onUnauthorized
-        pins = TripPins(identity: identity, root: root)
-        dropLegacyFile()
+        dropLegacyFiles()
     }
 
     /// Names the session this store's transport outcomes belong to. Idempotent.
@@ -145,7 +144,7 @@ public final class TripStore {
     public var isRefreshing: Bool { listing != nil }
 
     /// The session became somebody else's, or nobody's: every trip, slot and sentence of the
-    /// outgoing scope goes, the revision moves, and the incoming scope's pins are read.
+    /// outgoing scope goes, and the revision moves.
     public func sessionIdentityChanged(to identity: TimelineSnapshotIdentity?) {
         guard identity != self.identity else { return }
         self.identity = identity
@@ -156,8 +155,7 @@ public final class TripStore {
         latestWrite = [:]
         latestCreate = [:]
         listing = nil
-        pins.sessionIdentityChanged(to: identity)
-        dropLegacyFile()
+        dropLegacyFiles()
         bump(nil)
     }
 
@@ -192,10 +190,7 @@ public final class TripStore {
                 MemosLog.api.info("a trip list answered for a revision that has moved on; dropped")
                 return
             }
-            trips = answered.map {
-                Trip($0, baseURL: baseURL, pinnedUntil: pins.pinnedUntil(uid: $0.uid))
-            }
-            pins.noteTrips(trips)
+            trips = answered.map { Trip($0, baseURL: baseURL) }
             lastError = nil
             bump(nil)
         } catch {
@@ -225,7 +220,7 @@ public final class TripStore {
             MemosLog.api.info("a trip record answered for a revision that has moved on; dropped")
             throw Failure.superseded
         }
-        let trip = Trip(answered, baseURL: baseURL, pinnedUntil: pins.pinnedUntil(uid: uid))
+        let trip = Trip(answered, baseURL: baseURL)
         trips[index] = trip
         return trip
     }
@@ -280,8 +275,7 @@ public final class TripStore {
                 MemosLog.api.info("a trip create answered for a scope that has moved on; dropped")
                 return .failed(.superseded)
             }
-            let pinned = pins.pinnedUntil(uid: answered.uid)
-            let trip = Trip(answered, baseURL: baseURL, pinnedUntil: pinned)
+            let trip = Trip(answered, baseURL: baseURL)
             if let index = trips.firstIndex(where: { $0.uid == trip.uid }) {
                 trips[index] = trip
             } else {
@@ -317,8 +311,7 @@ public final class TripStore {
                 MemosLog.api.info("a trip change answered for a scope that has moved on; dropped")
                 return .failed(.superseded)
             }
-            let pinned = pins.pinnedUntil(uid: answered.uid)
-            let trip = Trip(answered, baseURL: baseURL, pinnedUntil: pinned)
+            let trip = Trip(answered, baseURL: baseURL)
             if let index = trips.firstIndex(where: { $0.uid == trip.uid }) { trips[index] = trip }
             bump(trip.uid)
             return .trip(await reread(trip, handle, baseURL))
@@ -348,7 +341,6 @@ public final class TripStore {
                 return .failed(.superseded)
             }
             trips.removeAll { $0.uid == authority.uid }
-            pins.unpin(uid: authority.uid)
             bump(authority.uid)
             return .deleted
         } catch {
@@ -439,39 +431,6 @@ public final class TripStore {
         }
         for reconcile in onReconcile { await reconcile(authority.uid, handle, baseURL) }
         return .batch(outcome)
-    }
-
-    // MARK: - The pin
-
-    public func pin(uid: String, lastTaken: Date?, now: Date) {
-        guard let trip = trips.first(where: { $0.uid == uid }) else { return }
-        pins.pin(trip, lastTaken: lastTaken, now: now)
-        syncPins()
-        bump(nil)
-    }
-
-    public func unpin(uid: String) {
-        pins.unpin(uid: uid)
-        syncPins()
-        bump(nil)
-    }
-
-    /// A fresh member summary of trip `uid` (decision 8): a pinned trip's pin moves to seven days
-    /// after its last picture when that is later. The pin is part of the trip's projection, so the
-    /// trip takes it and the revision moves; nothing is invalidated, because a pin changes no
-    /// member — the drain that brings the summary keeps what it read (`TripMemberStore`).
-    public func noteMembers(uid: String, firstTaken: Date?, lastTaken: Date?, now: Date) {
-        let before = pins.pinnedUntil(uid: uid)
-        pins.noteMembers(uid: uid, firstTaken: firstTaken, lastTaken: lastTaken, now: now)
-        guard pins.pinnedUntil(uid: uid) != before else { return }
-        syncPins()
-        revision += 1
-    }
-
-    private func syncPins() {
-        for index in trips.indices {
-            trips[index].pinnedUntil = pins.pinnedUntil(uid: trips[index].uid)
-        }
     }
 
     // MARK: - Slots and fences
@@ -635,26 +594,52 @@ public final class TripStore {
         return session.nothingEstablishedSince(handle)
     }
 
-    // MARK: - The legacy file
+    // MARK: - The legacy files
 
-    /// The name of the pilot's device-local trips file, beside `pins.json` in the scope's
-    /// directory. Spelled in parts: nothing in the packages names the old file whole, so a search
-    /// for that name finds no reader or writer of it left (MEMNG-754).
-    static let legacyFileName = ["collections", "json"].joined(separator: ".")
+    /// The names of the device-local files the scope's directory once held, each spelled in parts
+    /// so nothing in the packages names an old file whole and a search for either name finds no
+    /// reader or writer of it left: the pilot's trips file (MEMNG-754) and the composer pin's file
+    /// (MEMNG-781 — the pin is gone; the composer offers the trip whose span holds today).
+    nonisolated static let legacyFileNames = [
+        ["collections", "json"].joined(separator: "."),
+        ["pins", "json"].joined(separator: "."),
+    ]
 
-    /// The device-local trips of the pilot are gone (the server is the source): the scope's
-    /// legacy file (`legacyFileName`) is removed the first time the scope loads, and never read.
-    private func dropLegacyFile() {
+    /// Nothing device-local of a trip is kept any more: the scope's legacy files
+    /// (`legacyFileNames`) are removed, best effort, every time the store enters the scope (at
+    /// init and at each identity change), and never read. No attempt is recorded: nothing in the
+    /// app writes either file any more, so a later entry only retries a removal that failed, or
+    /// removes one an older build wrote back — both wanted.
+    private func dropLegacyFiles() {
         guard let root, let identity else { return }
-        let legacy = root.appending(path: TripPins.scopeKey(for: identity))
-            .appending(path: Self.legacyFileName)
-        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
-        do {
-            try FileManager.default.removeItem(at: legacy)
-            MemosLog.session.info("the device-local trips file was removed; trips are the server's")
-        } catch {
-            MemosLog.session.error("the device-local trips file could not be removed")
+        let directory = root.appending(path: Self.scopeKey(for: identity))
+        for name in Self.legacyFileNames {
+            let legacy = directory.appending(path: name)
+            guard FileManager.default.fileExists(atPath: legacy.path) else { continue }
+            do {
+                try FileManager.default.removeItem(at: legacy)
+                MemosLog.session.info("a device-local trip file was removed; nothing reads it")
+            } catch {
+                MemosLog.session.error("a device-local trips file could not be removed")
+            }
         }
+    }
+
+    /// `Collections` inside the app group, or nil when the container is not reachable.
+    public nonisolated static func appGroupRoot(
+        appGroup: String = DeviceCredentials.appGroup
+    ) -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+            .appending(path: "Collections")
+    }
+
+    /// The directory name an identity's files were kept under: the SHA-256 of the pair, in hex.
+    ///
+    /// A digest because neither a base URL nor an issuer's subject is a legal path component, and
+    /// a stable one because the same identity has to find its directory again on the next launch.
+    public nonisolated static func scopeKey(for identity: TimelineSnapshotIdentity) -> String {
+        let material = Data("\(identity.server.absoluteString)\n\(identity.subject)".utf8)
+        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - The wire
