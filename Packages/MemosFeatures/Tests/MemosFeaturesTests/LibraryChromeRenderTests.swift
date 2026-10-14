@@ -1203,6 +1203,121 @@ extension MediaImageLoaderTests {
         }
     }
 
+    /// MEMNG-819: pictures chosen far down the grid, then "Show Selected" — the narrowed grid is a
+    /// few bands at the top of the page while the scroll stays where the reader chose them, so the
+    /// screen shows nothing at all (black, in dark mode, on the device). The chosen pictures must
+    /// be on screen once the grid narrows, and still on screen once the same press widens it. The
+    /// window is a phone's height, so the lazy grid builds only what is near the scroll.
+    @Test("Show Selected from deep in the grid keeps the chosen pictures on screen")
+    func showSelectedFromDeepKeepsTheChosenOnScreen() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            guard let scroller = Self.mainScroll(in: window) else {
+                Issue.record("no scroll view holds the grid")
+                return
+            }
+            // Deep into the page, short of its end: where a reader scrolls to find a picture.
+            let page = window.bounds.height
+            for _ in 0..<200 where scroller.contentSize.height < 4 * page {
+                await chromeSettle(window)
+            }
+            let deep = min(3000, scroller.contentSize.height - 2 * page)
+            scroller.setContentOffset(CGPoint(x: 0, y: deep), animated: false)
+            await chromeSettle(window, turns: 20)
+            let onScreen = Self.tileFrames(in: window).filter { _, frame in
+                frame.minY >= 150 && frame.maxY <= window.bounds.height - 150
+            }.sorted { ($0.value.minY, $0.value.minX) < ($1.value.minY, $1.value.minX) }
+            guard let first = onScreen.first?.key,
+                let second = onScreen.dropFirst().first(where: {
+                    Self.day(ofTile: $0.key) == Self.day(ofTile: first)
+                })?.key ?? onScreen.dropFirst().first?.key
+            else {
+                Issue.record("control: fewer than two tiles on screen at \(deep) pt: \(onScreen)")
+                return
+            }
+            // Deeper than a screen: a narrowed grid of a band or two lies wholly above it.
+            #expect(scroller.contentOffset.y > page, "control: the scroll did not go deep")
+
+            let select = Self.elements(labelled: "Select", in: window)
+            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
+            for _ in 0..<200 where Self.elements(labelled: "Share", in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            await chromeSettle(window, turns: 20)
+            for uid in [first, second] {
+                #expect(Self.pressTile(uid, in: window), "no tile \(uid) took the press")
+                await chromeSettle(window, turns: 5)
+            }
+            let button = "Show Selected (2)"
+            for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
+                await chromeSettle(window)
+            }
+            @MainActor func press() -> Bool {
+                Self.elements(labelled: button, in: window).contains {
+                    $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
+                }
+            }
+            // Where each chosen picture is drawn once the grid has settled, absent where none is.
+            @MainActor func chosenFrames() async -> [String: CGRect] {
+                await chromeSettle(window, turns: 40)
+                return Self.tileFrames(in: window).filter { [first, second].contains($0.key) }
+            }
+
+            #expect(press(), "no \(button) button took the press")
+            let narrowed = await chosenFrames()
+            Self.shoot("819-narrowed", window)
+            for uid in [first, second] {
+                let frame = narrowed[uid]
+                #expect(
+                    frame.map { window.bounds.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true,
+                    """
+                    narrowed: the chosen \(uid) is not on screen (frame \(String(describing: frame)), \
+                    offset \(scroller.contentOffset.y), content \(scroller.contentSize.height))
+                    """)
+            }
+
+            #expect(press(), "the second press found no \(button) button")
+            let widened = await chosenFrames()
+            Self.shoot("819-widened", window)
+            for uid in [first, second] {
+                let frame = widened[uid]
+                #expect(
+                    frame.map { window.bounds.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true,
+                    """
+                    widened: the chosen \(uid) is not on screen (frame \(String(describing: frame)), \
+                    offset \(scroller.contentOffset.y), content \(scroller.contentSize.height))
+                    """)
+            }
+            await closeSelect(window)
+        }
+    }
+
+    /// Every built tile's file and where it is drawn, in window points.
+    private static func tileFrames(in window: UIWindow) -> [String: CGRect] {
+        let prefix = LibraryGrid.tileIdentifier("")
+        var found: [String: CGRect] = [:]
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.responds(to: Selector(("accessibilityIdentifier"))),
+                let identifier = object.value(forKey: "accessibilityIdentifier") as? String,
+                identifier.hasPrefix(prefix)
+            {
+                let uid = String(identifier.dropFirst(prefix.count))
+                if found[uid] == nil { found[uid] = object.accessibilityFrame }
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found
+    }
+
     private func closeSelect(_ window: UIWindow) async {
         let close = Self.elements(labelled: "Close", in: window)
         #expect(close.contains { $0.accessibilityActivate() }, "Close took no press")

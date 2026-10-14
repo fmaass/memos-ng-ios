@@ -827,6 +827,10 @@ struct LibraryGrid: View {
     /// Where each built heading and band starts on the page, for the pill. A reference for the
     /// reason `onScreen` is one.
     @State private var markers = DayMarkers()
+    /// A "Show Selected" press still bringing the chosen pictures into view (MEMNG-819): the first
+    /// chosen file in the grid's order, and which way the press went. A file, not a band: a band
+    /// is named by its first file, so the band holding it is another one on each side of the press.
+    @State private var revealing: (fileID: String, narrowed: Bool)?
 
     var body: some View {
         // Hoisted because the measuring closure below is `Sendable` and may run off the main
@@ -838,6 +842,19 @@ struct LibraryGrid: View {
                 // may already be there — and again whenever the landing or the measured width
                 // moves, because before the width is known no row exists to scroll to.
                 .onChange(of: readiness, initial: true) { bring(proxy) }
+                // Narrowing leaves a band or two at the top of a page still scrolled to where the
+                // pictures were chosen, which then shows nothing; widening puts back everything
+                // above them. Either way the chosen pictures are brought into view (MEMNG-819).
+                .onChange(of: selection.narrowed) { _, narrowed in
+                    revealing = items.first { selection.contains($0.id) }.map { ($0.id, narrowed) }
+                    // A landing's held heading would pull the page back over them.
+                    holding = nil
+                    // A band the wide grid had built may keep its identity in the narrowed one,
+                    // so whether it is built does not say the page can reach it: the gallery's top
+                    // first, every time, where the narrowed grid's first band is.
+                    if narrowed { proxy.scrollTo(Self.galleryID, anchor: .top) }
+                    reveal(proxy)
+                }
                 // And again each time the rows are laid out anew: a scroll to a row the lazy stack
                 // has not built goes where its estimate puts it, which moves as rows are measured.
                 // No delay stands in for this: the layout, and the rows built, say when to ask.
@@ -845,6 +862,7 @@ struct LibraryGrid: View {
                     geometry.contentSize.height
                 } action: { _, laid in
                     hold(proxy)
+                    reveal(proxy)
                     guard landing != nil, landing != scrolledTo else { return }
                     laidOut = laid
                 }
@@ -860,11 +878,13 @@ struct LibraryGrid: View {
                     // reached only once the scroll has actually brought it to the line.
                     bring(proxy)
                     hold(proxy)
+                    reveal(proxy)
                 }
                 // The reader's own scroll lets go of the landing's heading.
                 .onScrollPhaseChange { _, phase in
                     if phase == .tracking || phase == .interacting || phase == .decelerating {
                         holding = nil
+                        revealing = nil
                     }
                 }
                 .overlay(alignment: .top) {
@@ -884,8 +904,9 @@ struct LibraryGrid: View {
     private func bring(_ proxy: ScrollViewProxy) {
         guard let landing, landing != scrolledTo, let heading = headingID(holding: landing.rowID)
         else { return }
-        // A new landing takes over from the one held before it.
+        // A new landing takes over from the one held before it, and from a press's reveal.
         holding = nil
+        revealing = nil
         // The app's own jump, not the layout's: the dock counts the move it makes. `hold` below
         // does not tell it, because it only answers a layout that moved the scroll.
         dock?.askedToJump()
@@ -910,6 +931,43 @@ struct LibraryGrid: View {
             return
         }
         proxy.scrollTo(holding.heading, anchor: .top)
+    }
+
+    /// Brings the band holding the press's file to the top, again as the lazy stack measures, until
+    /// it is built and at the line — or the page can scroll no further, or the reader scrolls.
+    private func reveal(_ proxy: ScrollViewProxy) {
+        guard let revealing else { return }
+        // Another press, or the file gone from the list: this one is over.
+        guard revealing.narrowed == selection.narrowed,
+            let band = bandID(holding: revealing.fileID)
+        else {
+            self.revealing = nil
+            return
+        }
+        // The gallery is ONE child of the page's lazy stack: narrowed, it is a band or two above
+        // the screen, which the page has not built, so no row inside it can be scrolled to yet.
+        // Its own top first — the narrowed grid's first band holds the file — then the band.
+        if revealing.narrowed, !onScreen.rows.contains(band) {
+            proxy.scrollTo(Self.galleryID, anchor: .top)
+            return
+        }
+        proxy.scrollTo(band, anchor: .top)
+        if onScreen.rows.contains(band), markers.reached(band) {
+            self.revealing = nil
+        }
+    }
+
+    /// The band of the grid as drawn now that holds `fileID`: in a flat grid as in a grid by day.
+    private func bandID(holding fileID: String) -> String? {
+        let rows =
+            grouping == .byDay
+            ? sections.flatMap(\.rows) : MediaLibraryPresentation.flatRows(for: items)
+        for row in rows {
+            if case .band(let band, _) = row, band.pictures.contains(where: { $0.id == fileID }) {
+                return row.id
+            }
+        }
+        return nil
     }
 
     /// The landing's heading is built and scrolled to: the landing is done with, here and in the
@@ -945,6 +1003,7 @@ struct LibraryGrid: View {
                         .padding(.horizontal, DesignTokens.Space.roomy)
                 }
                 gallery
+                    .id(Self.galleryID)
                 // The next page is on its way; this is what says so at the bottom of the scroll.
                 if loadingMore {
                     ProgressView().padding(DesignTokens.Space.roomy)
@@ -1072,6 +1131,9 @@ struct LibraryGrid: View {
         // The library's one calendar, never the device's (`libraryTimeZone`).
         MediaLibraryPresentation.daySections(for: items)
     }
+
+    /// The gallery's identity in the page, for a scroll to reach it while the page has not built it.
+    static let galleryID = "library-gallery"
 
     /// What a test finds a loaded tile by: the file it shows, which its label does not say.
     static func tileIdentifier(_ uid: String) -> String { "library-tile:\(uid)" }
