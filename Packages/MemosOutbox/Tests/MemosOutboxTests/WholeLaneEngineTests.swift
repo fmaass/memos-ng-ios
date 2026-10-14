@@ -3838,3 +3838,103 @@ private struct WholeRigSetup {
     var listing: @Sendable (UploadJob) -> [WholeTaskListing]
     var prepare: @Sendable (UploadJob) -> UploadJob?
 }
+
+/// MEMNG-700: memo 363's seven files were all on the server at 21:36 and its create came 13.7 h
+/// later. Each hypothesis the ticket named is asked of the engine as the app drives it — answers
+/// through the session's own delegate, never `handle` called by the test — so a RED here is a
+/// defect in this package and a green one moves the cause outside it.
+@Suite("Whole lane: the last file's answer creates the memo in its own drain (MEMNG-700)")
+struct WholeLastAnswerCreatesTests {
+    /// The incident's shape: six pictures and a video, two places, each answer starting the next.
+    private static let seven: [WholeRig.Media] =
+        (0..<6).map {
+            WholeRig.Media(name: "IMG_\($0).heic", bytes: 1000 + $0, mime: "image/heic")
+        } + [WholeRig.Media(name: "IMG_6.mov", bytes: 3000, mime: "video/quicktime")]
+
+    /// Answers every task the session holds, oldest first, through the delegate, until no file
+    /// is left to answer. The test never drains: whatever comes next, the engine starts itself.
+    private func answerEveryFile(of rig: WholeRig) async throws {
+        var answered: Set<Int> = []
+        for _ in 0..<rig.job.files.count {
+            let next = try #require(
+                rig.session.createdTasks.first { !answered.contains($0.taskIdentifier) }
+            )
+            let identity = try #require(WholeTaskIdentity(taskDescription: next.description))
+            let size = try #require(rig.job.file(identity.fileID)?.byteSize)
+            answered.insert(next.taskIdentifier)
+            rig.session.forget(next.taskIdentifier)
+            rig.delegate.deliver(try rig.answer(next, status: 200, received: Int(size)))
+            let expected = answered.count
+            let total = rig.job.files.count
+            let moved = try await rig.eventually {
+                let job = await rig.repository.job(rig.job.id)
+                guard let job else { return true }
+                guard job.files.filter(\.isComplete).count >= expected else { return false }
+                let started = Swift.min(expected + UploadBudget.inFlightUploads, total)
+                return expected == total || rig.session.createdTasks.count >= started
+            }
+            #expect(moved, "answer \(expected) neither landed nor started the next file")
+        }
+    }
+
+    @Test("H4, foreground: the seventh answer posts the memo with no drain from the test")
+    func lastAnswerCreatesInForeground() async throws {
+        let rig = try await WholeRig.make(media: Self.seven)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.session.createdTasks.count == UploadBudget.inFlightUploads)
+        try await answerEveryFile(of: rig)
+        let created = try await rig.eventually { rig.completion.idempotencyKeys.count == 1 }
+        #expect(created)
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+        #expect(rig.uploadPosts == rig.job.files.count)
+        #expect(await rig.repository.job(rig.job.id) == nil)
+    }
+
+    @Test("H4, wake: the last answer, delivered with the gate closed, posts the memo")
+    func lastAnswerCreatesOnWake() async throws {
+        let rig = try await WholeRig.make()
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        rig.delegate.deliver(try rig.answer(picture, status: 200, received: 1000))
+        let landed = try await rig.eventually {
+            try await rig.reload().file(rig.picture.id)?.isComplete == true
+        }
+        #expect(landed)
+        rig.gate.close()
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        rig.delegate.deliver(try rig.answer(video, status: 200, received: 3000))
+        let created = try await rig.eventually { rig.completion.idempotencyKeys.count == 1 }
+        #expect(created)
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+
+    @Test("H2: a last answer applied with no grant creates nothing; the next granted drain does")
+    func lastAnswerWithoutGrantWaitsForTheNextDrain() async throws {
+        let rig = try await WholeRig.make()
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let picture = try rig.task(for: rig.picture.id)
+        let video = try rig.task(for: rig.video.id)
+        rig.gate.close()
+        rig.session.forget(picture.taskIdentifier)
+        rig.session.forget(video.taskIdentifier)
+        // A process the system launched for these answers, replaying them before the session's
+        // restore: the rows land, and there is nobody to send the create as.
+        rig.credentials.set(nil)
+        await rig.engine.handle(try rig.answer(picture, status: 200, received: 1000))
+        await rig.engine.handle(try rig.answer(video, status: 200, received: 3000))
+        try await settled(rig.engine)
+        #expect(try await rig.reload().files.allSatisfy(\.isComplete))
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+        rig.credentials.set(Fixture.credentials())
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+    }
+}
