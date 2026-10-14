@@ -3732,12 +3732,7 @@ struct WholePilotChecklistTests {
 
     /// Line 20: the mobile-data choice changes while a deferred successor is being handed to the
     /// scheduler. The task left carrying the file runs under the choice that stands.
-    @Test(
-        "line 20: a choice changed mid-hand-off of a deferred successor leaves its task in step",
-        .disabled(
-            "MEMNG-669: a mobile-data change during a deferred successor's hand-off leaves the task on the old setting"
-        )
-    )
+    @Test("line 20: a choice changed mid-hand-off of a deferred successor leaves its task in step")
     func choiceChangedDuringDeferredHandOff() async throws {
         let parked = TestGate()
         let rig = try await WholeRig.make(
@@ -3764,6 +3759,46 @@ struct WholePilotChecklistTests {
         await rig.engine.drain()
         await parked.open()
         try await settled(rig.engine)
+
+        // The deferred successor is sent from a task the termination observer spawns, which
+        // `settled` does not wait for. Found on the old setting it is cancelled, and it stays
+        // listed until its end is delivered: the corrected one waits for that end.
+        func pictureTasks() -> [ScriptedUploadTaskSession.Created] {
+            rig.session.createdTasks.filter {
+                WholeTaskIdentity(taskDescription: $0.description)?.fileID == rig.picture.id
+            }
+        }
+        func handedOff() -> ScriptedUploadTaskSession.Created? {
+            pictureTasks().first {
+                $0.taskIdentifier != picture.taskIdentifier
+                    && rig.session.cancelledIdentifiers.contains($0.taskIdentifier)
+            }
+        }
+        try #require(
+            try await rig.eventually { handedOff() != nil },
+            "the deferred successor was never sent and cancelled"
+        )
+        let handed = try #require(handedOff())
+        #expect(
+            pictureTasks().allSatisfy {
+                [picture.taskIdentifier, handed.taskIdentifier].contains($0.taskIdentifier)
+            },
+            "a second task for the file was created before the handed-off one was cancelled"
+        )
+        rig.delegate.complete(
+            taskIdentifier: handed.taskIdentifier, taskDescription: handed.description,
+            statusCode: nil, errorDescription: "cancelled"
+        )
+        try await settled(rig.engine)
+        try #require(
+            try await rig.eventually {
+                pictureTasks().contains {
+                    ![picture.taskIdentifier, handed.taskIdentifier].contains($0.taskIdentifier)
+                        && !rig.session.cancelledIdentifiers.contains($0.taskIdentifier)
+                }
+            },
+            "the corrected successor was never created"
+        )
 
         let running = rig.session.createdTasks.last {
             WholeTaskIdentity(taskDescription: $0.description)?.fileID == rig.picture.id

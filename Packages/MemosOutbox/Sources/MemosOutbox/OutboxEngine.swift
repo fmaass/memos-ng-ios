@@ -1998,11 +1998,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// A replacement is over. One that sent no successor — its write fenced out, its authority
     /// withdrawn, nothing left to send — may leave a sendable row that every other pass skipped
-    /// while this one owned it, so it asks for another pass.
+    /// while this one owned it, so it asks for another pass. One that sent a successor asks too: a
+    /// deferred successor was built under the choice that stood when it was written, and a change
+    /// since then reached no task, so the pass's `replaceMismatched` judges the task as sent.
     private func replacementSettled(_ ref: WholeFileRef, sent: WholeTask?) {
         disown(ref)
         if let sent {
             occupy(sent)
+            requestDrain()
         } else {
             slotsReserved -= 1
             requestDrain()
