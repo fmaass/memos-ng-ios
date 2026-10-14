@@ -910,6 +910,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         filter: MediaLibraryFilter,
         order: MediaLibraryOrder,
         tag: String?,
+        bucket: String? = nil,
+        timeZone: String? = nil,
         cursor: String?,
         limit: Int,
         baseURL: URL
@@ -924,7 +926,11 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     // file spells out: what the generator calls that type is the generator's to
                     // decide, and this call is the only place the app has to agree with it.
                     order: order == .oldestFirst ? .takenAsc : .takenDesc,
-                    tag: tag
+                    tag: tag,
+                    // Where a walk STARTS, never where it ends (an automatic collection's month or
+                    // year, MEMNG-817); nil for every other caller, so their requests are unchanged.
+                    bucket: bucket,
+                    tz: timeZone
                 )
             )
         )

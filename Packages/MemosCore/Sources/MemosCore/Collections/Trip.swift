@@ -242,12 +242,24 @@ public struct TripMemberSummary: Sendable, Equatable {
     public var firstTaken: Date?
     public var lastTaken: Date?
     public var cover: LibraryRow?
+    /// Which picture is the cover. It names one `cover` cannot hold when an automatic
+    /// collection's carried cover lies past a truncated drain: the screen keeps drawing the
+    /// thumbnail the card carried rather than swapping to a drained row (MEMNG-817).
+    public var coverUid: String?
+    /// Whether the drain behind this summary read to the end of the listing. Short of it,
+    /// `lastTaken` is only the last row read, and an automatic collection's count is its card's.
+    public var complete: Bool
 
-    public init(count: Int, firstTaken: Date?, lastTaken: Date?, cover: LibraryRow?) {
+    public init(
+        count: Int, firstTaken: Date?, lastTaken: Date?, cover: LibraryRow?,
+        coverUid: String? = nil, complete: Bool = true
+    ) {
         self.count = count
         self.firstTaken = firstTaken
         self.lastTaken = lastTaken
         self.cover = cover
+        self.coverUid = coverUid ?? cover?.id
+        self.complete = complete
     }
 }
 

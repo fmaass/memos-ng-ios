@@ -2785,11 +2785,15 @@ public final class TimelineStore {
         calendar: Calendar,
         direction: MemoPageDirection = .older,
         after bound: Date? = nil,
+        before ceiling: Date? = nil,
         cursor: String?,
         limit: Int,
         baseURL: URL
     ) async throws -> (memos: [Memo], nextCursor: String?) {
-        let parameters = query.parameters(in: calendar, direction: direction, after: bound)
+        var parameters = query.parameters(in: calendar, direction: direction, after: bound)
+        // A period's journal reads towards now and still needs its exclusive upper bound on every
+        // page (MEMNG-817); the direction alone drops it. Nil leaves every other request as it was.
+        if let ceiling { parameters.createdBefore = ceiling }
         let response = try await client.listMemosApiMemosGet(
             .init(
                 query: .init(

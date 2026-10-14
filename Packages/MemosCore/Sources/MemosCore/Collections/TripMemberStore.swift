@@ -38,7 +38,21 @@ public final class TripMemberStore {
     private struct Lineage: Equatable {
         var revision: Int
         var session: Int
+        /// The key the lane is held under: the trip's uid, or an automatic scope's id.
         var uid: String
+        /// What was asked for. A month's display id is the same in every zone, so its zone and
+        /// bounds take part in joining a flight and in showing a drain (MEMNG-817).
+        var request: MemberRequest = .trip
+    }
+
+    /// What one drain asked the server for.
+    private enum MemberRequest: Equatable {
+        /// The member route of the trip the key names.
+        case trip
+        /// The Library's listing under a tag.
+        case tag(String)
+        /// The Library's listing from a bucket, held to the period's interval.
+        case period(bucket: String, CollectionPeriod)
     }
 
     let trips: TripStore
@@ -148,7 +162,7 @@ public final class TripMemberStore {
     /// The server's count, the drained rows' taken extrema, and the cover: the chosen one while it
     /// is a member, else the first member. Nil before a drain has applied.
     public func summary(for trip: Trip) -> TripMemberSummary? {
-        guard held(trip.uid) != nil else { return nil }
+        guard let held = held(trip.uid) else { return nil }
         let rows = members(for: trip)
         let dates = rows.compactMap(\.takenAt)
         let chosen = trip.cover.flatMap { cover in rows.first { $0.id == cover.id } }
@@ -156,8 +170,166 @@ public final class TripMemberStore {
             count: trip.memberCount,
             firstTaken: dates.min(),
             lastTaken: dates.max(),
-            cover: chosen ?? rows.first
+            cover: chosen ?? rows.first,
+            complete: held.complete
         )
+    }
+
+    // MARK: - Members by scope (MEMNG-817)
+
+    /// Where a scope's members stand; a trip's as `state(for:)` says.
+    public func state(for scope: CollectionScope) -> TripMemberState {
+        if case .trip(let trip) = scope { return state(for: trip) }
+        guard let request = Self.request(for: scope) else { return .notLoaded }
+        if let flight = flights[scope.id], flight.lineage.request == request { return .draining }
+        guard let held = held(scope.id, request: request) else { return .notLoaded }
+        return held.complete ? .complete : .truncated
+    }
+
+    /// A scope's drained members, oldest taken first, less every picture Delete took. A trip's are
+    /// `members(for:)`'s, which also leave out what this app removed from it.
+    public func members(for scope: CollectionScope) -> [LibraryRow] {
+        switch scope {
+        case .trip(let trip): return members(for: trip)
+        case .automatic:
+            guard let request = Self.request(for: scope),
+                let held = held(scope.id, request: request)
+            else { return [] }
+            guard !deleted.isEmpty else { return held.rows }
+            return held.rows.filter { !deleted.contains($0.id) }
+        }
+    }
+
+    /// A trip's summary as `summary(for:)` makes it. An automatic collection has no server count
+    /// and no chosen cover: its count is the card's until a drain has read every member, then the
+    /// drained rows'; its cover is the one the card carried while it is a drained member or the
+    /// drain stopped short of the end (the cover may lie past it), else the newest drained row —
+    /// the picture the card would show now, where a trip keeps its oldest.
+    public func summary(for scope: CollectionScope) -> TripMemberSummary? {
+        let collection: AutomaticCollection
+        switch scope {
+        case .trip(let trip): return summary(for: trip)
+        case .automatic(let automatic): collection = automatic
+        }
+        guard let request = Self.request(for: scope), let held = held(scope.id, request: request)
+        else { return nil }
+        let rows = members(for: scope)
+        let dates = rows.compactMap(\.takenAt)
+        let carried = collection.cover.flatMap { cover in rows.first { $0.id == cover.uid } }
+        var cover = rows.last
+        var coverUid = rows.last?.id
+        if let carried {
+            cover = carried
+            coverUid = carried.id
+        } else if let card = collection.cover, !held.complete {
+            cover = nil
+            coverUid = card.uid
+        }
+        return TripMemberSummary(
+            count: held.complete ? rows.count : collection.count,
+            firstTaken: dates.min(),
+            lastTaken: dates.max(),
+            cover: cover,
+            coverUid: coverUid,
+            complete: held.complete
+        )
+    }
+
+    /// Reads a scope's members: a trip's through `drain(_:using:baseURL:)`, an automatic
+    /// collection's from the Library's listing, under the same fences. Joins a drain of the same
+    /// lineage — key, request, revision and session — already on the wire. A month or year key
+    /// that names no period sends nothing.
+    public func drain(_ scope: CollectionScope, using handle: SessionHandle, baseURL: URL) async {
+        if case .trip(let trip) = scope {
+            await drain(trip, using: handle, baseURL: baseURL)
+            return
+        }
+        guard let request = Self.request(for: scope) else { return }
+        let lineage = Lineage(
+            revision: trips.revision, session: handle.generation, uid: scope.id, request: request)
+        if let running = flights[scope.id], running.lineage == lineage {
+            await running.task.value
+            return
+        }
+        nextToken += 1
+        let token = nextToken
+        let task = Task { await self.runAutomaticDrain(lineage, token: token, handle, baseURL) }
+        flights[scope.id] = (lineage, token, task)
+        await task.value
+    }
+
+    private static func request(for scope: CollectionScope) -> MemberRequest? {
+        switch scope {
+        case .trip: return .trip
+        case .automatic(let collection):
+            if case .tag(let name) = collection.kind { return .tag(name) }
+            guard let bucket = collection.bucket, let period = collection.period else { return nil }
+            return .period(bucket: bucket, period)
+        }
+    }
+
+    /// The trip drain's walk over `GET /api/attachments`, no `type`, oldest taken first. `bucket=`
+    /// only says where the walk STARTS — the listing runs on past the period, and past an empty
+    /// bucket into the next — so a period keeps a row only while it was taken before `nextStart`
+    /// and asks for no page after the first row that was not.
+    private func runAutomaticDrain(
+        _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
+    ) async {
+        defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
+        var tag: String?
+        var bucket: String?
+        var period: CollectionPeriod?
+        switch lineage.request {
+        case .trip: return
+        case .tag(let name): tag = name
+        case .period(let key, let interval):
+            bucket = key
+            period = interval
+        }
+        var rows: [LibraryRow] = []
+        var cursor: String?
+        var complete = true
+        do {
+            repeat {
+                let page = try await MediaLibraryStore.page(
+                    handle.client, filter: .all, order: .oldestFirst, tag: tag, bucket: bucket,
+                    timeZone: period?.zone.identifier, cursor: cursor, limit: pageSize,
+                    baseURL: baseURL)
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                guard stillCurrent(lineage), flights[lineage.uid]?.token == token else {
+                    MemosLog.api.info("a collection's member page answered for a moved revision")
+                    return
+                }
+                var items = page.items
+                var next = page.nextCursor
+                // An undated row cannot be placed against the bound; the server dates every row
+                // (`taken_at_expr` coalesces), so one would be a contract change, and it is kept.
+                if let period,
+                    let past = items.firstIndex(where: {
+                        $0.takenAt.map { $0 >= period.nextStart } ?? false
+                    })
+                {
+                    items = Array(items[..<past])
+                    next = nil
+                }
+                rows = MediaLibraryStore.merged(rows, with: items, filter: .all)
+                cursor = next
+                if rows.count >= memberCap, rows.count > memberCap || cursor != nil {
+                    complete = false
+                    rows = Array(rows.prefix(memberCap))
+                    break
+                }
+            } while cursor != nil
+        } catch {
+            await report(error, handle: handle) {
+                self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token
+            }
+            return
+        }
+        var landed = lineage
+        landed.revision = trips.revision
+        drained[lineage.uid] = Drained(lineage: landed, rows: rows, complete: complete)
+        lastError = nil
     }
 
     /// Reads the trip's members. Joins a drain of the same lineage already on the wire.
@@ -413,11 +585,27 @@ public final class TripMemberStore {
         removedFlights[uid] = nil
     }
 
+    /// Drops everything this store holds for `scope`: its members and Removed list as
+    /// `invalidate(uid:)` does, and its journal, its sentence and the ownership of its journal
+    /// load in flight, so a page or a refusal that outlives the forget writes nothing and the
+    /// walk reads no further page. A member revision calls `invalidate(uid:)` alone and leaves
+    /// the journal standing — a trip's is fenced by its record's rule, an automatic one's by its
+    /// own — but an automatic collection has no record whose removal would fence it, so leaving
+    /// a scope is this call.
+    public func forget(_ scope: CollectionScope) {
+        invalidate(uid: scope.id)
+        journals[scope.id] = nil
+        journalErrors[scope.id] = nil
+        journalFlights[scope.id] = nil
+    }
+
     // MARK: - Helpers
 
-    /// What a drain left for `uid`, while its lineage is the current one.
-    private func held(_ uid: String) -> Drained? {
-        guard let held = drained[uid], current(held.lineage) else { return nil }
+    /// What a drain left for `uid`, while its lineage is the current one and it answered
+    /// `request`.
+    private func held(_ uid: String, request: MemberRequest = .trip) -> Drained? {
+        guard let held = drained[uid], current(held.lineage), held.lineage.request == request
+        else { return nil }
         return held
     }
 

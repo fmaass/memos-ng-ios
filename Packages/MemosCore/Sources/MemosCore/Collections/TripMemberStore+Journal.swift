@@ -14,6 +14,31 @@ struct TripJournalRule: Equatable {
     }
 }
 
+/// What a collection's journal is read by (MEMNG-817, decision 3): a trip's tag and span; a tag
+/// collection's tag lane alone; a month's or a year's creation interval in its bucket's zone,
+/// with no picture date consulted — a memo posted in March about February is March's.
+enum CollectionJournalRule: Equatable {
+    case trip(TripJournalRule)
+    case tag(String)
+    case period(CollectionPeriod)
+
+    /// Nil for a trip without a tag, and for a month or year key naming no period.
+    init?(_ scope: CollectionScope) {
+        switch scope {
+        case .trip(let trip):
+            guard let rule = TripJournalRule(trip) else { return nil }
+            self = .trip(rule)
+        case .automatic(let collection):
+            if case .tag(let name) = collection.kind {
+                self = .tag(name)
+                return
+            }
+            guard let period = collection.period else { return nil }
+            self = .period(period)
+        }
+    }
+}
+
 /// What a journal load in flight was issued under — what a second caller has to match to join it.
 ///
 /// A load is fenced by this store's identity generation, the credential and the trip's rule (its
@@ -26,11 +51,11 @@ struct TripJournalRule: Equatable {
 struct TripJournalLineage: Equatable {
     var generation: Int
     var session: Int
-    var rule: TripJournalRule
+    var rule: CollectionJournalRule
 }
 
 struct TripJournal {
-    var rule: TripJournalRule
+    var rule: CollectionJournalRule
     var memos: [Memo]
     /// The memos the tag lane read, which keep their place whatever left the trip.
     var tagged: Set<String>
@@ -90,7 +115,9 @@ extension TripMemberStore {
 
     /// The journal's memos that are in the trip now, their files as read.
     private func kept(_ journal: TripJournal, of trip: Trip) -> [Memo] {
-        guard let span = journal.rule.span else { return journal.memos }
+        guard case .trip(let rule) = journal.rule, let span = rule.span else {
+            return journal.memos
+        }
         // The server's members say which files are in the trip once a drain has read them all;
         // before that the window is the only rule this device knows.
         let members: Set<String>? =
@@ -118,18 +145,66 @@ extension TripMemberStore {
         memo.attachments.compactMap(\.captureInstant).min() ?? memo.createdAt
     }
 
+    // MARK: - The journal by scope (MEMNG-817)
+
+    /// A scope's journal: a trip's as `journal(for:)` reads it; an automatic collection's every
+    /// memo its rule read, oldest first by journal instant, less the files Delete took. Empty until
+    /// a load under the scope's own rule — its zone and bounds included — has applied.
+    public func journal(for scope: CollectionScope) -> [Memo] {
+        if case .trip(let trip) = scope { return journal(for: trip) }
+        guard let journal = automaticJournal(scope) else { return [] }
+        return withoutDeleted(journal.memos)
+    }
+
+    public func journalState(for scope: CollectionScope) -> TripMemberState {
+        if case .trip(let trip) = scope { return journalState(for: trip) }
+        if journalFlights[scope.id] != nil { return .draining }
+        guard let journal = automaticJournal(scope) else { return .notLoaded }
+        return journal.truncated ? .truncated : .complete
+    }
+
+    public func journalError(for scope: CollectionScope) -> String? {
+        journalErrors[scope.id]
+    }
+
+    /// Reads a scope's whole journal; joins a load of the same key, session and rule in flight.
+    public func loadJournal(_ scope: CollectionScope, using handle: SessionHandle, baseURL: URL)
+        async
+    {
+        if case .trip(let trip) = scope {
+            await loadJournal(trip, using: handle, baseURL: baseURL)
+            return
+        }
+        guard let rule = CollectionJournalRule(scope) else { return }
+        await loadJournal(scope.id, rule: rule, using: handle, baseURL: baseURL)
+    }
+
+    /// What applied for an automatic scope under the rule it has now.
+    private func automaticJournal(_ scope: CollectionScope) -> TripJournal? {
+        guard let rule = CollectionJournalRule(scope), let journal = journals[scope.id],
+            journal.rule == rule
+        else { return nil }
+        return journal
+    }
+
     /// Reads the trip's whole journal. Joins a load of the same trip already in flight under the
     /// same session and rule; a trip without a tag sends nothing.
     public func loadJournal(_ trip: Trip, using handle: SessionHandle, baseURL: URL) async {
         guard let rule = TripJournalRule(trip) else { return }
+        await loadJournal(trip.uid, rule: .trip(rule), using: handle, baseURL: baseURL)
+    }
+
+    /// The load under `uid`, the key a scope's journal is held by.
+    private func loadJournal(
+        _ uid: String, rule: CollectionJournalRule, using handle: SessionHandle, baseURL: URL
+    ) async {
         let lineage = TripJournalLineage(
             generation: generation, session: handle.generation, rule: rule)
-        if let running = journalFlights[trip.uid], running.lineage == lineage {
+        if let running = journalFlights[uid], running.lineage == lineage {
             onJournalJoin?()
             await running.task.value
             return
         }
-        let uid = trip.uid
         journalToken += 1
         let token = journalToken
         let task = Task {
@@ -155,18 +230,34 @@ extension TripMemberStore {
             // `sort=created_at` (`MemoQuery.parameters(in:direction:after:)`) — with no bound for
             // the tag, and from just before the span's start for the span (`created_after` is
             // strict). A memo the tag lane read is not added twice.
-            var lanes: [(query: MemoQuery, span: TripSpan?)] = [
-                (MemoQuery(tags: [lineage.rule.tag]), nil)
-            ]
-            if let span = lineage.rule.span { lanes.append((MemoQuery(), span)) }
+            // A period's lane asks from a second before its start up to its exclusive end on
+            // every page, and cuts both again by `createdAt` as it reads.
+            var lanes: [(query: MemoQuery, span: TripSpan?, period: CollectionPeriod?)]
+            switch lineage.rule {
+            case .trip(let rule):
+                lanes = [(MemoQuery(tags: [rule.tag]), nil, nil)]
+                if let span = rule.span { lanes.append((MemoQuery(), span, nil)) }
+            case .tag(let name): lanes = [(MemoQuery(tags: [name]), nil, nil)]
+            case .period(let period): lanes = [(MemoQuery(), nil, period)]
+            }
             var known: Set<String> = []
-            lanes: for (query, span) in lanes {
-                let after = span.map { $0.start.addingTimeInterval(-1) }
+            lanes: for (query, span, period) in lanes {
+                let after =
+                    span.map { $0.start.addingTimeInterval(-1) }
+                    ?? period.map { $0.start.addingTimeInterval(-1) }
+                // A period's query carries no day, so no calendar is consulted for it; the
+                // period's own keeps the device's zone out of the request all the same.
+                var calendar = Calendar.current
+                if let period {
+                    calendar = Calendar(identifier: .gregorian)
+                    calendar.timeZone = period.zone
+                }
                 var cursor: String?
                 repeat {
                     let page = try await TimelineStore.page(
-                        handle.client, query: query, calendar: .current, direction: .newer,
-                        after: after, cursor: cursor, limit: pageSize, baseURL: baseURL)
+                        handle.client, query: query, calendar: calendar, direction: .newer,
+                        after: after, before: period?.nextStart, cursor: cursor, limit: pageSize,
+                        baseURL: baseURL)
                     guard journalStillCurrent(lineage, handle), ownsJournal(uid, token),
                         isLive(uid, lineage)
                     else {
@@ -174,13 +265,22 @@ extension TripMemberStore {
                             "a trip's journal page answered for a list that has moved on")
                         return
                     }
+                    var pastPeriod = false
                     for memo in page.memos where !known.contains(memo.uid) {
                         if let span, !span.contains(Self.journalInstant(of: memo)) { continue }
+                        if let period {
+                            // Oldest first: the first memo at or past the end ends the lane.
+                            if memo.createdAt >= period.nextStart {
+                                pastPeriod = true
+                                break
+                            }
+                            if memo.createdAt < period.start { continue }
+                        }
                         known.insert(memo.uid)
                         memos.append(memo)
-                        if span == nil { tagged.insert(memo.uid) }
+                        if span == nil, period == nil { tagged.insert(memo.uid) }
                     }
-                    cursor = page.nextCursor
+                    cursor = pastPeriod ? nil : page.nextCursor
                     if memos.count >= memberCap {
                         truncated = memos.count > memberCap || cursor != nil
                         memos = Array(memos.prefix(memberCap))
@@ -225,7 +325,7 @@ extension TripMemberStore {
     private func journal(of trip: Trip) -> TripJournal? {
         guard let journal = journals[trip.uid],
             let held = trips.trips.first(where: { $0.uid == trip.uid }),
-            journal.rule == TripJournalRule(held)
+            journal.rule == TripJournalRule(held).map(CollectionJournalRule.trip)
         else { return nil }
         return journal
     }
@@ -236,11 +336,14 @@ extension TripMemberStore {
 
     /// Whether the trip store still holds trip `uid` under the rule the load was issued for, in
     /// the generation it was issued in.
+    /// An automatic collection has no record to outlive: its load stands on its own lineage — the
+    /// generation here, the credential and the rule in `journalStillCurrent` and the token.
     private func isLive(_ uid: String, _ lineage: TripJournalLineage) -> Bool {
+        guard case .trip = lineage.rule else { return lineage.generation == generation }
         guard lineage.generation == generation,
             let trip = trips.trips.first(where: { $0.uid == uid })
         else { return false }
-        return TripJournalRule(trip) == lineage.rule
+        return TripJournalRule(trip).map(CollectionJournalRule.trip) == lineage.rule
     }
 
     private func journalStillCurrent(_ lineage: TripJournalLineage, _ handle: SessionHandle)
