@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (49)
+
+- A memo whose pictures have all finished uploading is created right away instead of waiting for the next cold start of the app.
+- The outbox arms its retry timer on the job's own next attempt time, not only on each file's deadline, so a held memo is retried when it is due.
+- Switching mobile data on or off while an upload hands over to its successor applies the new setting to that successor.
+- Signing out and back in with another account no longer lets a delayed cancel from the old account cancel the new account's capture.
+- The New trip sheet's counts and date spans refresh after deletes from the Library, the Timeline and partial deletes, and a refusal left over from a signed-out session can no longer reach the sheet after a new sign-in.
+- Please create a memo with several pictures on mobile data and toggle mobile data while it uploads, then sign out, sign in again, delete a picture and open the New trip sheet.
+
 ## 2.4.0 (48)
 
 - Show Selected no longer turns the screen black when the selection has pictures from more than one day.
