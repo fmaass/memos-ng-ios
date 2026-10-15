@@ -139,8 +139,8 @@ struct CollectionScreenTests {
     @Test("an automatic collection offers no Trip Dates; a trip does")
     func noSpanItem() async { await expectTripOnly(TripView.spanButton) }
 
-    @Test("an automatic collection offers no Show Removed; a trip does")
-    func noShowRemovedItem() async { await expectTripOnly(TripView.showRemovedButton) }
+    @Test("an automatic collection offers no Removed from trip; a trip does")
+    func noShowRemovedItem() async { await expectTripOnly(TripView.removedRowButton) }
 
     @Test("an automatic collection offers no Rename; a trip does")
     func noRenameItem() async { await expectTripOnly(TripView.renameButton) }
@@ -283,14 +283,16 @@ struct CollectionScreenTests {
                 _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
                 let pressed = CollectionsHost.pressBarItem(TripView.selectButton, on: screen)
                 #expect(pressed.took, "Select took no press: \(pressed.seen)")
-                let reached7 = await screen.until { screen.says("0 Items Selected") }
+                let reached7 = await screen.until { screen.says("Select Items") }
                 #expect(reached7, "no toolbar")
                 let photos = TripProbe.photos(in: screen.window)
                 #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
-                let bar = await screen.until { screen.says("1 Item Selected") }
+                let bar = await screen.until { screen.says("Show Selected (1)") }
                 #expect(bar, "control: nothing was chosen")
-                let remove = screen.element(labelled: LibrarySelectToolbar.removeLabel)
-                #expect((remove != nil) == !automatic, "automatic=\(automatic)")
+                // The trip's Remove is its actions menu's row (MEMNG-780); a month has no menu.
+                let rows = TripMenuProbe.rows(of: SelectChrome.moreLabel, in: screen.window)
+                let remove = rows.contains(TripView.removeRowTitle(1))
+                #expect(remove == !automatic, "automatic=\(automatic): \(rows)")
             }
         }
     }

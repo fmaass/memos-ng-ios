@@ -444,9 +444,9 @@ struct TripScreenRenderTests {
     func selectOnATrip() async {
         await selectingTrip(TripWire()) { screen, dock in
             #expect(dock.bar(on: .collections) == .tabs, "control: the tabs stand before Select")
-            #expect(!screen.says("0 Items Selected"))
+            #expect(!screen.says("Select Items"))
             let entered = await pressBar("Select", on: screen) {
-                screen.says("0 Items Selected")
+                screen.says("Select Items")
             }
             #expect(entered, "Select stood no toolbar")
             let bar = dock.bar(on: .collections)
@@ -456,7 +456,7 @@ struct TripScreenRenderTests {
                 "the main bar stands beside the toolbar")
             #expect(screen.element(labelled: TripView.manageButton) == nil, "Manage stayed")
             let left = await pressBar("Close", on: screen) {
-                !screen.says("0 Items Selected")
+                !screen.says("Select Items")
             }
             #expect(left, "Close left the toolbar standing")
             #expect(dock.bar(on: .collections) == .tabs, "the tabs did not come back")
@@ -473,12 +473,12 @@ struct TripScreenRenderTests {
         wire.transport.others("p1")
         await selectingTrip(wire) { screen, dock in
             let entered = await pressBar("Select", on: screen) {
-                screen.says("0 Items Selected")
+                screen.says("Select Items")
             }
             #expect(entered, "Select stood no toolbar")
             let photos = TripProbe.photos(in: screen.window)
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
-            #expect(await screen.until { screen.says("1 Item Selected") })
+            #expect(await screen.until { screen.says("Show Selected (1)") })
             let share = screen.element(labelled: "Share")
             let delete = screen.element(labelled: "Delete")
             #expect(share?.accessibilityTraits.contains(.notEnabled) == false, "Share is off")
@@ -487,7 +487,7 @@ struct TripScreenRenderTests {
                 "Delete is offered for another member's picture")
 
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
-            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(await screen.until { screen.says("Show Selected (2)") })
             let live = screen.element(labelled: "Delete")
             #expect(live?.accessibilityTraits.contains(.notEnabled) == false, "Delete stayed off")
             #expect(live?.accessibilityActivate() == true, "Delete took no press")
@@ -508,12 +508,12 @@ struct TripScreenRenderTests {
     func shareOnATrip() async {
         let lane = TripShareRecorder()
         await selectingTrip(TripWire(), shareLane: lane.lane) { screen, _ in
-            let entered = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            let entered = await pressBar("Select", on: screen) { screen.says("Select Items") }
             #expect(entered, "Select stood no toolbar")
             let photos = TripProbe.photos(in: screen.window)
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[3]), "p3 took no press")
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
-            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(await screen.until { screen.says("Show Selected (2)") })
             #expect(screen.element(labelled: "Share")?.accessibilityActivate() == true)
             let offered = await screen.until { TripProbe.shareSheet(over: screen.host) != nil }
             #expect(offered, "no share sheet: asked \(lane.asked)")
@@ -530,20 +530,20 @@ struct TripScreenRenderTests {
         let lane = TripShareRecorder()
         lane.holding = true
         await selectingTrip(TripWire(), shareLane: lane.lane) { screen, _ in
-            let entered = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            let entered = await pressBar("Select", on: screen) { screen.says("Select Items") }
             #expect(entered, "Select stood no toolbar")
             let photos = TripProbe.photos(in: screen.window)
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[2]), "p2 took no press")
-            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(await screen.until { screen.says("Show Selected (2)") })
             #expect(screen.element(labelled: "Share")?.accessibilityActivate() == true)
             #expect(await screen.until { lane.asked.count == 1 }, "the first file was not asked")
-            let left = await pressBar("Close", on: screen) { !screen.says("2 Items Selected") }
+            let left = await pressBar("Close", on: screen) { !screen.says("Show Selected (2)") }
             #expect(left, "Close left the toolbar standing")
             lane.holding = false
             await screen.settle(turns: 40)
             #expect(TripProbe.shareSheet(over: screen.host) == nil, "a sheet over a closed Select")
-            let again = await pressBar("Select", on: screen) { screen.says("0 Items Selected") }
+            let again = await pressBar("Select", on: screen) { screen.says("Select Items") }
             #expect(again, "Select stood no toolbar the second time")
             await screen.settle(turns: 40)
             #expect(TripProbe.shareSheet(over: screen.host) == nil, "the left batch was offered")
@@ -556,12 +556,12 @@ struct TripScreenRenderTests {
     func journalEndsSelectOnATrip() async {
         await selectingTrip(TripWire()) { screen, dock in
             let entered = await pressBar("Select", on: screen) {
-                screen.says("0 Items Selected")
+                screen.says("Select Items")
             }
             #expect(entered, "Select stood no toolbar")
             #expect(TripProbe.pressAtOnce("Journal", on: screen), "the chip took no press")
             let ended = await screen.until {
-                !screen.says("0 Items Selected")
+                !screen.says("Select Items")
                     && dock.bar(on: .collections) == .tabs
             }
             #expect(ended, "select mode outlived the grid: \(dock.bar(on: .collections))")
@@ -2178,23 +2178,27 @@ extension TripScreenRenderTests {
         let stores = stores()
         await selectingTrip(wire, stores: stores) { screen, _ in
             let entered = await pressBar("Select", on: screen) {
-                screen.says("0 Items Selected")
+                screen.says("Select Items")
             }
             #expect(entered, "Select stood no toolbar")
             let photos = TripProbe.photos(in: screen.window)
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
             #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]), "p1 took no press")
-            #expect(await screen.until { screen.says("2 Items Selected") })
+            #expect(await screen.until { screen.says("Show Selected (2)") })
 
-            let remove = screen.element(labelled: LibrarySelectToolbar.removeLabel)
-            #expect(remove?.accessibilityActivate() == true, "Remove from Trip took no press")
+            let row = TripView.removeRowTitle(2)
+            #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
+            #expect(await screen.until { TripMenuProbe.alert(over: screen.host) != nil })
+            #expect(
+                TripProbe.pressAlert(TripView.removeConfirmButton, in: screen.host),
+                "the dialog's Remove took no press")
 
             let gone = await screen.until { TripProbe.photos(in: screen.window).count == 3 }
             #expect(gone, "the removed pictures stayed in the grid")
             #expect(screen.says("3 photos"), "the hero still counts the removed pictures")
             // Select mode stays, holding nothing: the removed pictures left the selection with
             // the trip.
-            let emptied = await screen.until { screen.says("0 Items Selected") }
+            let emptied = await screen.until { screen.says("Select Items") }
             #expect(emptied, "a removed picture stayed chosen")
             #expect(wire.transport.trips.rows.first?.exclusions.sorted() == ["p0", "p1"])
             let exclude = "PUT \(TripRows.exclude)"
@@ -2262,19 +2266,18 @@ extension TripScreenRenderTests {
         #expect(wire.transport.writes == written, "\(wire.transport.writes)")
     }
 
-    @Test("the Library's toolbar offers no Remove; the trip's does")
-    func onlyTheTripOffersRemove() async {
-        let library = LibrarySelectToolbar(
-            count: 1, ownCount: 1, isSharing: false, isDeleting: false, share: {}, delete: {})
-        await CollectionsHost.with(library) { screen in
-            #expect(screen.element(labelled: "Delete") != nil, "control: the toolbar stood")
-            #expect(screen.element(labelled: LibrarySelectToolbar.removeLabel) == nil)
-        }
-        let trip = LibrarySelectToolbar(
+    /// MEMNG-780: Remove from trip left the select bar for the trip's actions menu, where it asks
+    /// first; the bar is the shared Share · Show Selected (N) · Delete.
+    @Test("the select bar is Share, Show Selected and Delete, with no Remove button of its own")
+    func theSelectBarHasNoRemove() async {
+        let bar = LibrarySelectToolbar(
             count: 1, ownCount: 1, isSharing: false, isDeleting: false, share: {}, delete: {},
-            remove: {})
-        await CollectionsHost.with(trip) { screen in
-            #expect(screen.element(labelled: LibrarySelectToolbar.removeLabel) != nil)
+            showSelected: {})
+        await CollectionsHost.with(bar) { screen in
+            #expect(screen.element(labelled: "Delete") != nil, "control: the toolbar stood")
+            #expect(screen.element(labelled: "Share") != nil)
+            #expect(screen.element(labelled: "Show Selected (1)") != nil)
+            #expect(screen.element(labelled: "Remove from Trip") == nil, "a Remove button stands")
         }
     }
 }

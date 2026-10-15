@@ -153,6 +153,12 @@ struct TripView: View {
     @State private var settled = TripSettledMembers()
     /// Why the last Remove from Trip did not finish, or nil.
     @State private var removeFailure: String?
+    /// What select mode's Remove row asked about (MEMNG-780): the pictures, the trip and the
+    /// session, taken when it asked. Only the dialog's Remove sends it; nothing re-reads the
+    /// selection after the question.
+    @State private var removing: TripPendingRemoval?
+    /// Whether that question is on screen; its going away takes it off the screen only.
+    @State private var askingRemove = false
     /// This showing's lease (`TripMemberStore.coverLease(for:)`): what its lapsed signatures'
     /// re-reads of the carried cover, the members and the journal must still hold.
     @State private var coverLease: TripMemberStore.CoverLease?
@@ -217,7 +223,21 @@ struct TripView: View {
     static let renameButton = "Rename"
     /// The Manage item that opens the trip's span.
     static let spanButton = TripSpanSheet.title
-    static let showRemovedButton = "Show Removed"
+    /// The filter menu's name and its row that opens the trip's removed pictures (MEMNG-780).
+    static let filterButton = "Filter"
+    static let removedRowButton = "Removed from trip"
+    /// Select mode's Remove row and the dialog it asks (MEMNG-780).
+    static func removeRowTitle(_ count: Int) -> String {
+        "Remove \(pictures(count)) from trip…"
+    }
+    static func removeQuestion(_ count: Int, from title: String) -> String {
+        "Remove \(pictures(count)) from \(title)?"
+    }
+    static let removeExplanation = "They stay in your library."
+    static let removeConfirmButton = "Remove"
+    private static func pictures(_ count: Int) -> String {
+        count == 1 ? "1 picture" : "\(count) pictures"
+    }
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
     /// to go.
     static let leavingDelay = Duration.milliseconds(600)
@@ -552,6 +572,19 @@ struct TripView: View {
                 }
             }
             .background { Color.clear.fetchingFile(saving) }
+            // Select mode's Remove: an alert, for the delete's reason above.
+            .background {
+                Color.clear.alert(
+                    Self.removeQuestion(
+                        removing?.uids.count ?? 0, from: removing?.trip.title ?? shown.title),
+                    isPresented: $askingRemove
+                ) {
+                    Button(Self.removeConfirmButton, role: .destructive) { confirmRemove() }
+                    Button("Cancel", role: .cancel) { removing = nil }
+                } message: {
+                    Text(Self.removeExplanation)
+                }
+            }
             .background {
                 Color.clear.sheet(isPresented: $manage.showingRemoved) {
                     if let removing = live ?? openedTrip {
@@ -573,20 +606,32 @@ struct TripView: View {
             }
             .navigationTitle(shown.title)
             .navigationBarTitleDisplayMode(.inline)
+            // The system bar's (decision B, MEMNG-780): Filter and the ellipsis menu as one group,
+            // then Select; in select mode the shared actions menu (`SelectChrome`'s rows) and
+            // Close, as plain items the system draws.
             .toolbar {
                 if selection.isActive {
                     ToolbarItemGroup(placement: .primaryAction) {
-                        Button(selection.coversAll(in: members) ? "Deselect All" : "Select All") {
-                            selection.toggleAll(in: members)
+                        let rows = selectRows
+                        if !rows.isEmpty {
+                            Menu(SelectChrome.moreLabel, systemImage: "ellipsis") {
+                                SelectActionRows(rows: rows)
+                            }
                         }
                         Button(Self.closeButton, systemImage: "xmark") { selection.close() }
                     }
                 } else {
-                    ToolbarItemGroup(placement: .primaryAction) {
-                        if mode == .photos {
+                    if scope.isTrip {
+                        ToolbarItemGroup(placement: .primaryAction) {
+                            filterMenu
+                            manageMenu
+                        }
+                        ToolbarSpacer(.fixed, placement: .primaryAction)
+                    }
+                    if mode == .photos {
+                        ToolbarItem(placement: .primaryAction) {
                             Button(Self.selectButton) { selection.begin() }
                         }
-                        if scope.isTrip { manageMenu }
                     }
                 }
             }
@@ -616,6 +661,7 @@ struct TripView: View {
                 journalViewing = nil
                 held = []
                 selection.close()
+                removing = nil
             }
             // A picture that leaves the trip leaves the selection with it.
             .onChange(of: members) { _, now in selection.prune(keeping: now) }
@@ -661,6 +707,15 @@ struct TripView: View {
             .task(id: memberStore.state(for: shown) == .notLoaded) {
                 guard memberStore.state(for: shown) == .notLoaded else { return }
                 await drain()
+            }
+            // The grid's filter (MEMNG-780): read again when it changes, the account changes or
+            // the store let the read go; the unfiltered query reads nothing of its own.
+            .task(
+                id: FilterKey(
+                    identity: identity, id: scope.id, query: manage.query,
+                    stale: filteredState == .notLoaded)
+            ) {
+                await drainFiltered()
             }
             // Read when the chip is chosen, and again whenever it is chosen anew, the account or
             // the tag changes; a load already on the wire is joined.
@@ -812,9 +867,10 @@ struct TripView: View {
 
     private func grid(_ shown: CollectionScope) -> some View {
         let members = shownMembers.rows
-        let state = memberStore.state(for: shown)
+        let items = gridRows
+        let state = manage.query.isUnfiltered ? memberStore.state(for: shown) : filteredState
         return LibraryGrid(
-            items: members,
+            items: items,
             errorText: memberStore.lastError,
             loadingMore: state == .draining,
             zoom: zoom,
@@ -828,7 +884,7 @@ struct TripView: View {
             selection: selection,
             toggle: { selection.toggle($0) },
             above: AnyView(hero(shown, members: members)),
-            below: footerText(shown, state: state, empty: members.isEmpty).map {
+            below: footerText(shown, state: state, empty: items.isEmpty).map {
                 AnyView(TripFooter(text: $0))
             },
             grouping: .flat
@@ -1008,8 +1064,8 @@ struct TripView: View {
                 share: { shareSelection() },
                 // Only the chosen pictures that are mine, as in the Library.
                 delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) },
-                // Remove from Trip writes the trip's exclusions: a trip's toolbar alone offers it.
-                remove: scope.isTrip ? { removeSelection() } : nil
+                showSelected: { selection.toggleNarrowed() },
+                narrowed: selection.narrowed
             )
             .sharingFiles(sharing)
         }
@@ -1066,17 +1122,42 @@ struct TripView: View {
         }
     }
 
-    /// Select mode's Remove from Trip: the chosen pictures leave this trip at once, and the
-    /// selection with them — select mode stays, holding nothing, as after a Delete.
-    private func removeSelection() {
+    /// Select mode's actions menu: on a trip the one destructive Remove row (MEMNG-780), live
+    /// while something is chosen and no share or delete is out; none elsewhere.
+    private var selectRows: [SelectAction] {
+        guard scope.isTrip else { return [] }
+        let enabled = LibrarySelectionPresentation.actionsEnabled(
+            count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
+        return [
+            SelectAction(
+                id: "remove", title: Self.removeRowTitle(selection.count),
+                systemImage: "minus.circle", role: .destructive, disabled: !enabled
+            ) { askRemove() }
+        ]
+    }
+
+    /// The Remove row: the question is asked about the pictures chosen NOW, the trip and the
+    /// session — what the answer sends, whatever the selection does meanwhile.
+    private func askRemove() {
         let chosen = selection.rows(in: currentMembers).map(\.id)
         guard !chosen.isEmpty, let access = access(), let target = live ?? openedTrip else {
             return
         }
+        removing = TripPendingRemoval(uids: chosen, trip: target, access: access)
+        askingRemove = true
+    }
+
+    /// The dialog's Remove: the question is claimed here, synchronously, so a second answer finds
+    /// none; the chosen pictures leave this trip, and the selection with them — select mode
+    /// stays, holding nothing, as after a Delete.
+    private func confirmRemove() {
+        guard let asked = removing else { return }
+        removing = nil
         Task {
             do {
                 let outcome = try await memberStore.remove(
-                    chosen, from: target, using: access.handle, baseURL: access.baseURL)
+                    asked.uids, from: asked.trip, using: asked.access.handle,
+                    baseURL: asked.access.baseURL)
                 removeFailure = outcome.stopped.flatMap(TripManage.sentence)
             } catch {
                 removeFailure = TripManage.sentence(error)
@@ -1092,17 +1173,25 @@ struct TripView: View {
         shareTask?.cancel()
         shareTask = nil
         deleting.abandon()
+        removing = nil
         dock?.release(dockClaim)
     }
 
+    /// The filter menu (MEMNG-780): the Library's kinds and Sort By, read by the server, then the
+    /// row that opens the removed pictures.
+    private var filterMenu: some View {
+        Menu(Self.filterButton, systemImage: LibraryFilterMenuContent.symbol) {
+            TripFilterMenuContent(query: $manage.query) { manage.showRemoved() }
+        }
+    }
+
+    /// The ellipsis menu: Rename, Trip Dates, then Delete Trip.
     private var manageMenu: some View {
-        Menu(Self.manageButton, systemImage: "ellipsis.circle") {
+        Menu(Self.manageButton, systemImage: "ellipsis") {
             Button(Self.renameButton, systemImage: "pencil") {
                 manage.askRename(current: shownScope.title)
             }
             Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
-            // Offered before anything is known: its sheet computes the list when it opens.
-            Button(Self.showRemovedButton, systemImage: "eye.slash") { manage.showRemoved() }
             Divider()
             Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
                 manage.askDelete()
@@ -1127,7 +1216,8 @@ struct TripView: View {
             trips: trips,
             scope: scope,
             session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL }),
-            lease: coverLease
+            lease: coverLease,
+            query: manage.query
         )
     }
 
@@ -1171,6 +1261,29 @@ struct TripView: View {
         await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
+    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query.
+    private func drainFiltered() async {
+        guard let trip = live ?? openedTrip, let access = access() else { return }
+        await memberStore.drainFiltered(
+            trip, query: manage.query, using: access.handle, baseURL: access.baseURL)
+    }
+
+    /// Where the grid's filtered read stands; a collection that is no trip has none.
+    private var filteredState: TripMemberState {
+        guard let trip = live ?? openedTrip else { return .notLoaded }
+        return memberStore.filteredState(for: trip, query: manage.query)
+    }
+
+    /// What the grid draws: the members, or the trip's filtered read while a filter is chosen —
+    /// narrowed to the chosen pictures while Show Selected is pressed.
+    private var gridRows: [LibraryRow] {
+        var rows = shownMembers.rows
+        if !manage.query.isUnfiltered, let trip = live ?? openedTrip {
+            rows = memberStore.filteredMembers(for: trip, query: manage.query) ?? []
+        }
+        return selection.visible(in: rows)
+    }
+
     private func loadJournal() async {
         guard let readScope, let access = access() else { return }
         await memberStore.loadJournal(readScope, using: access.handle, baseURL: access.baseURL)
@@ -1187,6 +1300,13 @@ struct TripView: View {
         let id: String
         let tag: String?
         let span: TripSpan?
+    }
+
+    private struct FilterKey: Equatable {
+        let identity: TimelineSnapshotIdentity?
+        let id: String
+        let query: TripMemberQuery
+        let stale: Bool
     }
 
     private struct JournalKey: Equatable {
@@ -1453,8 +1573,10 @@ final class TripManage {
     private var armed: Question?
     /// How many changes are out.
     private var saving = 0
-    /// Manage's Show Removed is up.
+    /// The filter menu's Removed from trip sheet is up.
     var showingRemoved = false
+    /// The grid's Kind and Sort (MEMNG-780): the filter menu's choice, read by the server.
+    var query = TripMemberQuery.unfiltered
 
     /// Whether a rename, delete or cover change is out: the hero says so.
     var isSaving: Bool { saving > 0 }
@@ -1591,4 +1713,34 @@ struct TripSettledMembers: Equatable {
     var loaded = false
     /// The summary read with these members, kept with them.
     var summary: TripMemberSummary? = nil
+}
+
+/// The question select mode's Remove row asked (MEMNG-780): what the dialog's Remove sends — the
+/// pictures chosen when it asked, the trip, and the session it asked under.
+struct TripPendingRemoval {
+    let uids: [String]
+    let trip: Trip
+    let access: CollectionsAccess
+}
+
+/// The trip's filter menu (MEMNG-780): the Library's kinds as an inline Picker under "Filter",
+/// a divider, its nested Sort By menu — the same rows and glyphs as `LibraryFilterMenuContent` —
+/// then, after a divider, the row that opens the pictures removed from the trip.
+struct TripFilterMenuContent: View {
+    @Binding var query: TripMemberQuery
+    let showRemoved: () -> Void
+
+    var body: some View {
+        Picker("Filter", selection: $query.filter) {
+            ForEach(MediaLibraryFilter.allCases) { filter in
+                Text(MediaLibraryPresentation.label(for: filter)).tag(filter)
+            }
+        }
+        .pickerStyle(.inline)
+        Divider()
+        SortByMenu(order: $query.order)
+        Divider()
+        // Offered before anything is known: its sheet computes the list when it opens.
+        Button(TripView.removedRowButton, systemImage: "eye.slash", action: showRemoved)
+    }
 }
