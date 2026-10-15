@@ -332,7 +332,7 @@ extension TripMemberStore {
         } catch {
             guard issued == generation else { return }
             await say(error, issuedUnder: handle, lane: .members) {
-                issued == self.generation && issuedDeletion == self.deletionRevision
+                true
             }
         }
     }

@@ -334,6 +334,62 @@ struct TripMemberSheetTests {
         await joiner.value
         #expect(store.spans[Self.tag] == Self.span, "control: the fresh read landed")
     }
+
+    // MARK: - a refusal decided across a change of identity (MEMNG-743)
+
+    private typealias Read = @MainActor @Sendable (TripMemberStore, any APIProtocol) async -> Void
+
+    /// Runs one sheet read against a server that answers it 401 and returns what the read left
+    /// in `lastError`. The 401 is held until the read is in flight and let go BEFORE the session's
+    /// decision (`onUnauthorized`, which ends the session) is entered; the decision is held until
+    /// the test lets it go. With `reset`, the identity changes while the decision is suspended, so
+    /// only the predicate the read hands `say` can keep the outgoing account's sentence off the
+    /// sheet: nothing is deleted, no session is told and the credential never moves.
+    private func refusedRead(reset: Bool, _ read: @escaping Read) async -> String? {
+        let hold = TripHold(holding: [0])
+        let client = Stub.client { request, _, _ in
+            await hold.pass(request.path ?? "")
+            return Stub.empty(.unauthorized)
+        }
+        let asked = TripLatch()
+        let decided = TripLatch()
+        let store = TripMemberStore(
+            trips: TripStore(identity: TripWire.alice, root: TripWire.root()),
+            onUnauthorized: { (_: CredentialRefusal) in
+                asked.open()
+                await decided.wait()
+                return .endedSession
+            })
+        let task = Task { await read(store, client) }
+        #expect(await hold.entered[0].wait(), "the read was not sent")
+        hold.release[0].open()
+        #expect(await asked.wait(), "the refusal never reached the session's decision")
+        if reset { store.sessionIdentityChanged() }
+        decided.open()
+        await task.value
+        #expect(hold.calls == 1, "control: one request, refused: \(hold.calls)")
+        return store.lastError
+    }
+
+    @Test("a count refusal decided across a change of identity writes no sentence")
+    func aCountRefusalAcrossAnIdentityChangeSaysNothing() async {
+        let count: Read = { store, client in await store.loadTagCounts(using: client.handle) }
+        #expect(await refusedRead(reset: false, count) != nil, "control: it said nothing")
+        #expect(
+            await refusedRead(reset: true, count) == nil,
+            "the outgoing account's count refusal wrote a sentence")
+    }
+
+    @Test("a span refusal decided across a change of identity writes no sentence")
+    func aSpanRefusalAcrossAnIdentityChangeSaysNothing() async {
+        let span: Read = { store, client in
+            await store.loadSpan(ofTag: Self.tag, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await refusedRead(reset: false, span) != nil, "control: it said nothing")
+        #expect(
+            await refusedRead(reset: true, span) == nil,
+            "the outgoing account's span refusal wrote a sentence")
+    }
 }
 
 /// A scripted server that holds the requests it is told to, by arrival index from 0, until the
