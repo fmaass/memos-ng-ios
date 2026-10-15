@@ -580,6 +580,9 @@ extension TripMemberStore {
         journalErrors = [:]
         deleted = []
         ownExclusions = [:]
+        renewedCovers = [:]
+        coverFlights = [:]
+        coverLeases = [:]
         generation += 1
     }
 

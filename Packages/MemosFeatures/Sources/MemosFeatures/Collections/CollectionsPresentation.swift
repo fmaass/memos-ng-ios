@@ -78,6 +78,56 @@ enum CollectionsPresentation {
         return "\(text) · \(counted)"
     }
 
+    /// An automatic collection's line under its title (MEMNG-817; owner, 13:09 CEST 2026-10-14:
+    /// "the same subheading below the title as for trips: timespan and amount of pictures").
+    ///
+    /// - A summary of a drain that read every member: its taken span and its count, as a trip's.
+    /// - A summary of a drain that stopped short: the count alone — the card's, since the members
+    ///   read are not all of them, and neither are their dates.
+    /// - Nothing settled yet: a month's or a year's own period and the card's count
+    ///   ("September 2026 · 143 photos"), a tag's count alone.
+    ///
+    /// The card's count is shown only under the account the card was read for (`carrying`).
+    static func automaticDetail(
+        _ collection: AutomaticCollection, summary: TripMemberSummary?, carrying: Bool,
+        locale: Locale, timeZone: TimeZone
+    ) -> String? {
+        if let summary, summary.complete {
+            let counted = photoCount(summary.count)
+            guard
+                let text = spanText(
+                    first: summary.firstTaken, last: summary.lastTaken, locale: locale,
+                    timeZone: timeZone)
+            else { return counted }
+            return "\(text) · \(counted)"
+        }
+        let counted = carrying ? photoCount(collection.count) : nil
+        if summary != nil { return counted }
+        switch (periodText(collection, locale: locale), counted) {
+        case (let period?, let counted?): return "\(period) · \(counted)"
+        case (let period?, nil): return period
+        case (nil, let counted): return counted
+        }
+    }
+
+    /// A month's or a year's own name in its zone — "September 2026", "2026" — or nil for a tag.
+    static func periodText(_ collection: AutomaticCollection, locale: Locale) -> String? {
+        guard let period = collection.period else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = locale
+        calendar.timeZone = period.zone
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = locale
+        formatter.timeZone = period.zone
+        switch collection.kind {
+        case .tag: return nil
+        case .month: formatter.setLocalizedDateFormatFromTemplate("MMMMy")
+        case .year: formatter.setLocalizedDateFormatFromTemplate("y")
+        }
+        return formatter.string(from: period.start)
+    }
+
     /// The tags the sheet suggests, in the order the server listed them: those whose span has
     /// been read and that `TripSuggestion.rule` accepts. A tag whose span has not arrived yet is
     /// not suggested until it has.
@@ -162,11 +212,12 @@ enum CollectionsPresentation {
         tags.filter { !tripTags.contains($0.name) }
     }
 
-    /// The pushed trips that still exist: the stack up to the first trip `ids` no longer holds,
-    /// since a screen pushed from a trip that is gone has nothing to stand on either.
-    static func trail(_ routes: [TripRoute], keeping ids: [String]) -> [TripRoute] {
+    /// The pushed collections that still exist: the stack up to the first trip `ids` no longer
+    /// holds, since a screen pushed from a trip that is gone has nothing to stand on either. A tag,
+    /// a month or a year has no record to lose, and stays (MEMNG-817).
+    static func trail(_ routes: [CollectionRoute], keeping ids: [String]) -> [CollectionRoute] {
         let kept = Set(ids)
-        return Array(routes.prefix { kept.contains($0.id) })
+        return Array(routes.prefix { !$0.scope.isTrip || kept.contains($0.id) })
     }
 }
 

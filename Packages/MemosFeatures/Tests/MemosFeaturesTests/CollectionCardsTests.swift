@@ -52,7 +52,7 @@ struct CollectionCardsTests {
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: stores.2, years: years,
                 months: months, tagCovers: covers, identity: alice, access: { access },
-                openTag: { _ in }, now: { Self.now })
+                now: { Self.now })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -366,33 +366,82 @@ struct CollectionCardsTests {
         #expect(flow.failure == nil)
     }
 
-    @Test("a month card asks for its month, a year card for its year")
-    func monthAndYearCardsAsk() async {
+    /// The automatic collection the last push carried, or nil.
+    private static func pushed(_ log: TripStackLog) -> AutomaticCollection? {
+        guard case .automatic(let collection)? = log.paths.last?.last?.scope else { return nil }
+        return collection
+    }
+
+    private func pushing(
+        _ held: (TripStore, TripMemberStore, LibraryTagStore), _ wire: CollectionsWire,
+        log: TripStackLog, years: LibraryBucketStore? = nil, months: LibraryBucketStore? = nil,
+        covers: TagCoverStore? = nil
+    ) -> some View {
+        let access = wire.access
+        return TripStack(log: log) { trail in
+            CollectionsScreen(
+                trips: held.0, members: held.1, tags: held.2, years: years, months: months,
+                tagCovers: covers, identity: alice, access: { access }, now: { Self.now },
+                trail: trail)
+        }
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+    }
+
+    @Test("a month card and a year card push their collections, cut in their buckets' zone")
+    func monthAndYearCardsPush() async {
         let wire = CollectionsWire()
         wire.transport.answerTags("[]")
         wire.transport.answerMonths(
-            "[\(Self.bucket("2026-10", 12)),\(Self.bucket("2026-09", 4))]")
-        let months = LibraryBucketStore()
-        let years = LibraryBucketStore()
-        let opened = Box<[String]>([])
-        let access = wire.access
+            "[\(Self.bucket("2026-10", 12)),\(Self.bucket("2026-09", 4, cover: "m9"))]")
+        // The device stands in UTC (the host's environment); the buckets were counted in Zurich.
+        let months = LibraryBucketStore(timeZoneIdentifier: "Europe/Zurich")
+        let years = LibraryBucketStore(timeZoneIdentifier: "Europe/Zurich")
         let held = stores()
-        let view = NavigationStack {
-            CollectionsScreen(
-                trips: held.0, members: held.1, tags: held.2, years: years,
-                months: months, identity: alice, access: { access }, openTag: { _ in },
-                openYear: { opened.value.append("year \($0)") },
-                openMonth: { opened.value.append("month \($0)") }, now: { Self.now })
-        }
+        let log = TripStackLog()
+        let zurich = TimeZone(identifier: "Europe/Zurich")!
+        let view = pushing(held, wire, log: log, years: years, months: months)
         await CollectionsHost.with(view) { screen in
             #expect(await screen.until { screen.element(labelled: "Sep 2026") != nil })
-            let value = screen.element(labelled: "Oct 2026")?.accessibilityValue
-            #expect(value == "12 items")
             #expect(screen.press("Sep 2026"), "the month card took no press")
+            #expect(await screen.until { Self.pushed(log) != nil }, "no month was pushed")
+        }
+        let month = Self.pushed(log)
+        #expect(month?.kind == .month("2026-09"))
+        #expect(month?.title == "Sep 2026")
+        #expect(month?.count == 4)
+        #expect(month?.cover?.uid == "m9", "not the card's cover")
+        #expect(month?.zone == zurich, "the route took another zone than its bucket's")
+        let again = TripStackLog()
+        let view2 = pushing(held, wire, log: again, years: years, months: months)
+        await CollectionsHost.with(view2) { screen in
             #expect(await screen.until { screen.element(labelled: "2019") != nil })
             #expect(screen.press("2019"), "the year card took no press")
+            #expect(await screen.until { Self.pushed(again)?.kind == .year("2019") })
         }
-        #expect(opened.value == ["month 2026-09", "year 2019"])
+        #expect(Self.pushed(again)?.title == "2019")
+        #expect(Self.pushed(again)?.zone == zurich)
+    }
+
+    @Test("a tag card pushes its collection with the card's title, count and cover")
+    func aTagCardPushesItsCover() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags(#"[{"name":"garden","count":7}]"#)
+        let covers = TagCoverStore()
+        let log = TripStackLog()
+        await CollectionsHost.with(pushing(stores(), wire, log: log, covers: covers)) { screen in
+            let drawn = await screen.until {
+                CollectionsHost.identified(CollectionCard.coverIdentifier("p2"), in: screen.window)
+            }
+            #expect(drawn, "precondition: the card drew its cover: \(wire.transport.sent)")
+            #expect(screen.press("#garden"), "the tag card took no press")
+            #expect(await screen.until { Self.pushed(log) != nil }, "no tag was pushed")
+        }
+        let tag = Self.pushed(log)
+        #expect(tag?.kind == .tag("garden"))
+        #expect(tag?.title == "#garden")
+        #expect(tag?.count == 7)
+        #expect(tag?.cover?.uid == "p2", "not the cover the card showed")
     }
 
     @Test("a month request widens the tag, shows Months at that month, and is applied once")
@@ -417,8 +466,8 @@ struct CollectionCardsTests {
         #expect(scope.scope == .all, "a taken request moved the scope again")
     }
 
-    @Test("a month card on the Collections root opens the Library in Months")
-    func aMonthCardReachesTheLibrary() async {
+    @Test("a month card on the Collections root opens its collection, and the tabs stay")
+    func aMonthCardOpensItsCollection() async {
         let transport = CollectionsTransport()
         transport.answerMonths("[\(Self.bucket("2026-03", 3))]")
         let session = CollectionsWire.signedOutSession(transport)
@@ -430,21 +479,16 @@ struct CollectionCardsTests {
             let card = await screen.until { screen.element(labelled: "Mar 2026") != nil }
             #expect(card, "the Months row never appeared: \(transport.sent)")
             let library = MainTab.library.title
-            let resting = ScopeBarProbe.selectedTitle(in: screen.window)
-            #expect(resting != library, "control: the tabs already stood on the Library")
+            #expect(ScopeBarProbe.selectedTitle(in: screen.window) != library, "control")
             #expect(screen.press("Mar 2026"), "the card took no press")
-            let moved = await screen.until(seconds: 10) {
+            let opened = await screen.until(seconds: 10) {
+                screen.element(labelled: TripMode.journal.title) != nil
+            }
+            #expect(opened, "the month's collection never opened")
+            let moved = await TripProbe.idle(seconds: 2) {
                 ScopeBarProbe.selectedTitle(in: screen.window) == library
             }
-            #expect(moved, "the tabs never moved to the Library")
-            // The scope row stands in the bar's place once the Library's item is pressed
-            // (MEMNG-604); it shows the scope the jump left, and choosing nothing itself.
-            #expect(ScopeBarProbe.pressTab(.library, in: screen.window), "no Library item")
-            let months = await screen.until(seconds: 10) {
-                let control = ScopeBarProbe.control(in: screen.window)
-                return control.flatMap(ScopeBarProbe.chosen(in:)) == "Months"
-            }
-            #expect(months, "not Months: \(ScopeBarProbe.describe(screen.window))")
+            #expect(!moved, "the tabs moved to the Library")
         }
     }
 

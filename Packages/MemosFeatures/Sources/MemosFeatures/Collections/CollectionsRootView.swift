@@ -14,9 +14,6 @@ struct CollectionsRootView: View {
     @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(TripStore.self) private var trips: TripStore?
     @Environment(TripMemberStore.self) private var members: TripMemberStore?
-    @Environment(LibraryTagJump.self) private var tagJump: LibraryTagJump?
-    @Environment(LibraryYearJump.self) private var yearJump: LibraryYearJump?
-    @Environment(LibraryMonthJump.self) private var monthJump: LibraryMonthJump?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
     /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720).
@@ -26,8 +23,8 @@ struct CollectionsRootView: View {
     @State private var months: LibraryBucketStore?
     /// The tag cards' covers, one lookup per tag (MEMNG-783).
     @State private var covers: TagCoverStore?
-    /// The trips pushed onto the tab's stack (MEMNG-714).
-    @State private var trail: [TripRoute] = []
+    /// The collections pushed onto the tab's stack (MEMNG-714, MEMNG-817).
+    @State private var trail: [CollectionRoute] = []
 
     var body: some View {
         Self.stack(trail: $trail) { content }
@@ -37,7 +34,7 @@ struct CollectionsRootView: View {
     /// foot, and a press on Collections while it shows taking the stack back to the root
     /// (MEMNG-781). A press on another tab, or the one that comes back here, keeps the trail.
     static func stack(
-        trail: Binding<[TripRoute]>, @ViewBuilder root: () -> some View
+        trail: Binding<[CollectionRoute]>, @ViewBuilder root: () -> some View
     ) -> some View {
         NavigationStack(path: trail) {
             root()
@@ -62,18 +59,6 @@ struct CollectionsRootView: View {
                     guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
                     else { return nil }
                     return CollectionsAccess(handle: handle, baseURL: baseURL)
-                },
-                openTag: {
-                    LibraryJumpRequests.openTag(
-                        $0, tags: tagJump, years: yearJump, months: monthJump)
-                },
-                openYear: {
-                    LibraryJumpRequests.openYear(
-                        $0, tags: tagJump, years: yearJump, months: monthJump)
-                },
-                openMonth: {
-                    LibraryJumpRequests.openMonth(
-                        $0, tags: tagJump, years: yearJump, months: monthJump)
                 },
                 trail: $trail
             )
@@ -141,13 +126,13 @@ struct CollectionsRootView: View {
 /// **Tags.** The tags with their counts, every kind of file counted — less every tag a listed trip
 /// is made of (decision H): a trip's tag is the trip's card. While the list of trips is unread or
 /// failed nothing is left out. Each card's cover is its tag's newest picture (`TagCoverStore`). A
-/// card opens the Library narrowed to its tag.
+/// card opens its collection — the trip's screen over the tag's pictures (MEMNG-817).
 ///
 /// **Months and Years.** The month and the year buckets, every kind and every tag counted, newest
 /// first, each from a store of its own and each drawn only from a list read for exactly that, so
 /// nothing else the store held, nor an empty or failed read, puts a row on screen: none, no row.
-/// A card's cover is its bucket's own, so it costs no request. A month card opens the Library's
-/// days at that month, a year card the Library at that year, both in Months.
+/// A card's cover is its bucket's own, so it costs no request. A month or a year card opens its
+/// collection, cut in the zone its bucket was counted in (MEMNG-817).
 struct CollectionsScreen: View {
     let trips: TripStore
     let members: TripMemberStore
@@ -163,18 +148,12 @@ struct CollectionsScreen: View {
     let identity: TimelineSnapshotIdentity?
     /// The session's handle and server when a read is issued, or nil when there is none.
     let access: () -> CollectionsAccess?
-    /// A tag card was tapped: the Library opens narrowed to it.
-    let openTag: (String) -> Void
-    /// A year card was tapped: the Library opens at that year, in Months.
-    var openYear: (String) -> Void = { _ in }
-    /// A month card was tapped: the Library opens at that month's days, in Months.
-    var openMonth: (String) -> Void = { _ in }
     var now: () -> Date = { Date() }
     /// The trips pushed onto the stack this screen is the root of. A trip that leaves the store —
     /// deleted from its own screen, or filed under an identity that has gone — leaves the stack
     /// with it, here, by the stack's own state: a trip's screen popping itself as its delete
     /// alert goes away is a dismissal the going alert takes for its own.
-    var trail: Binding<[TripRoute]> = .constant([])
+    var trail: Binding<[CollectionRoute]> = .constant([])
     /// What a pushed trip's Manage menu runs through; a test hands in its own to drive it.
     var tripManage: () -> TripManage = { TripManage() }
 
@@ -236,9 +215,9 @@ struct CollectionsScreen: View {
         .toolbarVisibility(.hidden, for: .navigationBar)
         // A card opens its trip inside the tab's stack (MEMNG-714), under the main bar, with
         // its room (MEMNG-715).
-        .stackDestination(for: TripRoute.self) { route in
+        .stackDestination(for: CollectionRoute.self) { route in
             TripView(
-                trip: trips.trips.first { $0.uid == route.id } ?? route.opened,
+                scope: Self.destination(route, in: trips), openedUnder: route.openedUnder,
                 trips: trips, memberStore: members, identity: identity, access: access,
                 trail: trail, manage: tripManage(), now: now)
         }
@@ -263,6 +242,47 @@ struct CollectionsScreen: View {
         ) {
             await drainTrips()
         }
+    }
+
+    /// What a pushed route's screen opens on: a trip as the store holds it now, or as its card
+    /// opened it; an automatic collection as its card opened it.
+    static func destination(_ route: CollectionRoute, in trips: TripStore) -> CollectionScope {
+        guard let opened = route.opened else { return route.scope }
+        return .trip(trips.trips.first { $0.uid == opened.uid } ?? opened)
+    }
+
+    /// A tag card's collection: its name, its count and the cover the card shows (MEMNG-817).
+    static func tagRoute(
+        _ tag: LibraryTag, cover: MemoAttachment?, zone: TimeZone,
+        under identity: TimelineSnapshotIdentity?
+    ) -> CollectionRoute {
+        let collection = AutomaticCollection(
+            kind: .tag(tag.name), count: tag.count,
+            cover: cover.map { CollectionCover(uid: $0.uid, thumbnailURL: $0.thumbnailURL) },
+            zone: zone)
+        return CollectionRoute(scope: .automatic(collection), openedUnder: identity)
+    }
+
+    /// A month or a year card's collection, cut in the zone its bucket store answered in — never
+    /// the device's, which may count another month — or nil when that zone is unknown or the key
+    /// names no period: a route that could never be read is not pushed.
+    static func bucketRoute(
+        _ kind: AutomaticCollection.Kind, count: Int, coverUid: String, thumbnailURL: URL?,
+        answeredZone: String?, under identity: TimelineSnapshotIdentity?
+    ) -> CollectionRoute? {
+        guard let answeredZone, let zone = TimeZone(identifier: answeredZone) else { return nil }
+        let collection = AutomaticCollection(
+            kind: kind, count: count,
+            cover: thumbnailURL.map { CollectionCover(uid: coverUid, thumbnailURL: $0) },
+            zone: zone)
+        guard collection.period != nil else { return nil }
+        return CollectionRoute(scope: .automatic(collection), openedUnder: identity)
+    }
+
+    /// Pushes `route` onto the tab's stack; nothing for a card whose route was refused.
+    private func push(_ route: CollectionRoute?) {
+        guard let route else { return }
+        trail.wrappedValue.append(route)
     }
 
     /// The root before the session's stores exist: the empty state and a `+` that cannot act.
@@ -343,7 +363,7 @@ struct CollectionsScreen: View {
 
     private var tripsRow: some View {
         row(Self.tripsHeader, trips.trips) { trip in
-            NavigationLink(value: TripRoute(trip)) {
+            NavigationLink(value: CollectionRoute(trip, openedUnder: identity)) {
                 CollectionCard(
                     cover: CollectionsPresentation.cover(of: trip, summary: shownSummary(of: trip)),
                     title: trip.title,
@@ -363,7 +383,12 @@ struct CollectionsScreen: View {
 
     private var tagsRow: some View {
         row(Self.tagsHeader, tagsShown) { tag in
-            TagCard(tag: tag, covers: tagCovers, access: access) { openTag(tag.name) }
+            TagCard(tag: tag, covers: tagCovers, access: access) {
+                push(
+                    Self.tagRoute(
+                        tag, cover: tagCovers?.cover(for: tag.name), zone: timeZone,
+                        under: identity))
+            }
         }
     }
 
@@ -390,7 +415,11 @@ struct CollectionsScreen: View {
     private func monthsRow(_ shown: [LibraryBucket]) -> some View {
         row(Self.monthsHeader, CollectionsPresentation.monthCards(shown)) { month in
             Button {
-                openMonth(month.key)
+                push(
+                    Self.bucketRoute(
+                        .month(month.key), count: month.count, coverUid: month.cover?.uid ?? "",
+                        thumbnailURL: month.cover?.thumbnailURL,
+                        answeredZone: months?.loadedRequest?.timeZoneIdentifier, under: identity))
             } label: {
                 CollectionCard(cover: month.cover, title: month.title, count: month.count)
             }
@@ -417,7 +446,11 @@ struct CollectionsScreen: View {
     private func yearsRow(_ shown: [LibraryBucket]) -> some View {
         row(Self.yearsHeader, shown) { year in
             Button {
-                openYear(year.key)
+                push(
+                    Self.bucketRoute(
+                        .year(year.key), count: year.count, coverUid: year.coverUID,
+                        thumbnailURL: year.coverThumbnailURL,
+                        answeredZone: years?.loadedRequest?.timeZoneIdentifier, under: identity))
             } label: {
                 CollectionCard(
                     cover: LibraryBucketCover.attachment(for: year), title: year.key,

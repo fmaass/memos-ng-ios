@@ -1,27 +1,43 @@
 import MemosCore
 import SwiftUI
 
-/// What the Collections root pushes for a trip card: the trip, known by its id.
-struct TripRoute: Hashable {
-    let id: String
-    /// The trip as it was when its card was opened. Its screen draws this once the trip has left
-    /// the store, while the stack lets the screen go: a destination that drew nothing for a trip
-    /// that is gone would take the screen's own way off the stack with it.
-    let opened: Trip
+/// What the Collections root pushes for a card (MEMNG-817): the collection it opens — a trip, or a
+/// tag, a month or a year — known by its id, and whose root it was opened from.
+struct CollectionRoute: Hashable {
+    /// The collection as it was when its card was opened. A trip's screen draws this once the trip
+    /// has left the store, while the stack lets the screen go: a destination that drew nothing for a
+    /// trip that is gone would take the screen's own way off the stack with it. An automatic
+    /// collection's is all the screen has of the card: its title, count, cover and zone.
+    let scope: CollectionScope
+    /// The account the card was read under. What the route carries from the card — its cover and
+    /// its count — is that account's, and is shown under no other.
+    let openedUnder: TimelineSnapshotIdentity?
 
-    init(_ trip: Trip) {
-        id = trip.uid
-        opened = trip
+    init(scope: CollectionScope, openedUnder: TimelineSnapshotIdentity? = nil) {
+        self.scope = scope
+        self.openedUnder = openedUnder
     }
 
-    static func == (lhs: TripRoute, rhs: TripRoute) -> Bool { lhs.id == rhs.id }
+    init(_ trip: Trip, openedUnder: TimelineSnapshotIdentity? = nil) {
+        self.init(scope: .trip(trip), openedUnder: openedUnder)
+    }
+
+    var id: String { scope.id }
+
+    /// The trip as it was opened, or nil for an automatic collection.
+    var opened: Trip? {
+        if case .trip(let trip) = scope { return trip }
+        return nil
+    }
+
+    static func == (lhs: CollectionRoute, rhs: CollectionRoute) -> Bool { lhs.id == rhs.id }
 
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-/// A trip stands inside the Collections tab (MEMNG-715): the main bar stays under it, with its
-/// room at the screen's foot, as under a memo pushed on the Timeline.
-extension TripRoute: @MainActor StackRoute {
+/// A collection stands inside the Collections tab (MEMNG-715): the main bar stays under it, with
+/// its room at the screen's foot, as under a memo pushed on the Timeline.
+extension CollectionRoute: @MainActor StackRoute {
     static let chrome = ScreenChrome.withinTab
 }
 
@@ -83,7 +99,13 @@ extension TripRoute: @MainActor StackRoute {
 /// offered: its sheet computes the removed pictures when it opens (`TripRemovedList`), each with
 /// Add Back.
 struct TripView: View {
-    let trip: Trip
+    /// What the screen was opened on (MEMNG-817): a trip as it was when its card was opened, or a
+    /// tag, a month or a year. The trip-only chrome — Manage, Trip Dates, Show Removed, Remove from
+    /// Trip and Use as Cover — stands only for a trip, because each writes a server collection.
+    let scope: CollectionScope
+    /// The account the route was opened under: an automatic collection's carried cover and count
+    /// are that account's, drawn under no other.
+    let openedUnder: TimelineSnapshotIdentity?
     let trips: TripStore
     let memberStore: TripMemberStore
     /// Whose trip this is — the server and the subject; a change reads it again, and lets go of
@@ -92,7 +114,7 @@ struct TripView: View {
     /// The session's handle and server when a read is issued, or nil when there is none.
     let access: () -> CollectionsAccess?
     /// The stack this screen was pushed onto, which it leaves once its trip is gone.
-    let trail: Binding<[TripRoute]>
+    let trail: Binding<[CollectionRoute]>
     @State private var manage: TripManage
     /// The chip that is chosen: Photos until somebody picks another.
     @State private var mode = TripMode.photos
@@ -131,6 +153,9 @@ struct TripView: View {
     @State private var settled = TripSettledMembers()
     /// Why the last Remove from Trip did not finish, or nil.
     @State private var removeFailure: String?
+    /// This showing's lease (`TripMemberStore.coverLease(for:)`): what its lapsed signatures'
+    /// re-reads of the carried cover, the members and the journal must still hold.
+    @State private var coverLease: TripMemberStore.CoverLease?
     @Namespace private var zoom
     /// What the viewer fetches its stills through; a test hands in one it can watch.
     private let viewerTransport: any MediaTransport
@@ -146,13 +171,33 @@ struct TripView: View {
         memberStore: TripMemberStore,
         identity: TimelineSnapshotIdentity?,
         access: @escaping () -> CollectionsAccess?,
-        trail: Binding<[TripRoute]> = .constant([]),
+        trail: Binding<[CollectionRoute]> = .constant([]),
         manage: TripManage = TripManage(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
-        self.trip = trip
+        self.init(
+            scope: .trip(trip), openedUnder: identity, trips: trips, memberStore: memberStore,
+            identity: identity, access: access, trail: trail, manage: manage,
+            viewerTransport: viewerTransport, shareLane: shareLane, now: now)
+    }
+
+    init(
+        scope: CollectionScope,
+        openedUnder: TimelineSnapshotIdentity?,
+        trips: TripStore,
+        memberStore: TripMemberStore,
+        identity: TimelineSnapshotIdentity?,
+        access: @escaping () -> CollectionsAccess?,
+        trail: Binding<[CollectionRoute]> = .constant([]),
+        manage: TripManage = TripManage(),
+        viewerTransport: any MediaTransport = MediaSession.shared,
+        shareLane: TripShareLane? = nil,
+        now: @escaping () -> Date = { Date() }
+    ) {
+        self.scope = scope
+        self.openedUnder = openedUnder
         self.trips = trips
         self.memberStore = memberStore
         self.identity = identity
@@ -320,31 +365,164 @@ struct TripView: View {
     /// The members as the store holds them, once a drain has settled; nil while none has, or the
     /// store let them go and a re-read is on the wire.
     static func settled(
-        of trip: Trip, in store: TripMemberStore, under identity: TimelineSnapshotIdentity?
+        of scope: CollectionScope, in store: TripMemberStore,
+        under identity: TimelineSnapshotIdentity?
     ) -> TripSettledMembers? {
-        switch store.state(for: trip) {
+        switch store.state(for: scope) {
         case .complete, .truncated:
             TripSettledMembers(
-                uid: trip.uid, identity: identity, rows: store.members(for: trip),
-                loaded: store.summary(for: trip) != nil)
+                key: settledKey(scope), identity: identity, rows: store.members(for: scope),
+                loaded: store.summary(for: scope) != nil, summary: store.summary(for: scope))
         case .notLoaded, .draining: nil
         }
     }
+
+    /// What kept members are kept under: a trip's uid; an automatic collection's id and zone, since
+    /// a month cut in another zone holds other pictures under the same id.
+    static func settledKey(_ scope: CollectionScope) -> String {
+        switch scope {
+        case .trip(let trip): trip.uid
+        case .automatic(let collection): "\(collection.id)@\(collection.zone.identifier)"
+        }
+    }
+
+    /// Of `rows`, read as `scope`'s members, the ones still its members as far as this app knows:
+    /// a trip's as the store says (`stillMembers`); an automatic collection's less every picture
+    /// Delete took.
+    static func stillMembers(
+        _ rows: [LibraryRow], of scope: CollectionScope, in store: TripMemberStore
+    ) -> [LibraryRow] {
+        switch scope {
+        case .trip(let trip): return store.stillMembers(rows, of: trip)
+        case .automatic:
+            guard !store.deleted.isEmpty else { return rows }
+            return rows.filter { !store.deleted.contains($0.id) }
+        }
+    }
+
+    /// What the hero's picture is (MEMNG-817).
+    enum HeroCover: Equatable {
+        /// A drained member, drawn as a trip's cover is.
+        case row(LibraryRow)
+        /// The thumbnail the card showed, until the drain answers with that picture.
+        case carried(MemoAttachment)
+        /// The placeholder.
+        case none
+    }
+
+    /// A trip's cover as `cover(of:members:)` picks it. An automatic collection's is the drained row
+    /// the summary names; while nothing has settled, or while the summary names the card's own
+    /// picture without holding it (a drain that stopped short of it), the card's thumbnail — and that
+    /// only under the account the card was read for (`carrying`), and as `renewed` once the card's
+    /// own signature was renewed (`TripMemberStore.renewCover`).
+    static func heroCover(
+        _ scope: CollectionScope, summary: TripMemberSummary?, members: [LibraryRow],
+        carrying: Bool, renewed: MemoAttachment? = nil
+    ) -> HeroCover {
+        switch scope {
+        case .trip(let trip):
+            return cover(of: trip, members: members).map(HeroCover.row) ?? .none
+        case .automatic(let collection):
+            if let row = summary?.cover { return .row(row) }
+            guard carrying, let card = collection.cover, let url = card.thumbnailURL,
+                summary == nil || summary?.coverUid == card.uid
+            else { return .none }
+            if let renewed, renewed.uid == card.uid { return .carried(renewed) }
+            return .carried(
+                MemoAttachment(
+                    uid: card.uid, mime: "image/jpeg", status: .ready, thumbnailURL: url))
+        }
+    }
+
+    /// The hero's carried thumbnail's identifier when it draws `uid`.
+    static func carriedCoverIdentifier(_ uid: String) -> String {
+        "collection-carried-cover-\(uid)"
+    }
+
+    /// The line under the hero's title: a trip's dates and count, in the device's zone; an
+    /// automatic collection's as `CollectionsPresentation.automaticDetail` words it, in the zone its
+    /// bucket was counted in, so its span names the days its period holds.
+    static func detail(
+        _ scope: CollectionScope, summary: TripMemberSummary?, carrying: Bool, locale: Locale,
+        timeZone: TimeZone
+    ) -> String? {
+        switch scope {
+        case .trip(let trip):
+            CollectionsPresentation.tripDetail(
+                trip, summary: summary, locale: locale, timeZone: timeZone)
+        case .automatic(let collection):
+            CollectionsPresentation.automaticDetail(
+                collection, summary: summary, carrying: carrying, locale: locale,
+                timeZone: collection.zone)
+        }
+    }
+
+    /// What an empty grid says.
+    static func emptyTitle(for scope: CollectionScope) -> String {
+        guard case .automatic(let collection) = scope else { return emptyTitle }
+        switch collection.kind {
+        case .tag: return "No photos with this tag"
+        case .month: return "No photos in this month"
+        case .year: return "No photos in this year"
+        }
+    }
+
+    /// What an empty journal says: a month or a year has no tag, and its journal is the memos
+    /// written in it.
+    static func journalEmptyTitle(for scope: CollectionScope) -> String {
+        guard case .automatic(let collection) = scope else { return journalEmptyTitle }
+        switch collection.kind {
+        case .tag: return "No memos with this tag"
+        case .month: return "No memos in this month"
+        case .year: return "No memos in this year"
+        }
+    }
+
+    /// The space between two cards of one Journal day: the Timeline's own between its cards
+    /// (`TimelineView`'s `listRowSpacing`), so a day reads as the Timeline does (MEMNG-820).
+    static let journalCardGap = DesignTokens.Space.regular
 
     /// The cover the hero draws: the chosen one while it is among `members`, else the first.
     static func cover(of trip: Trip, members: [LibraryRow]) -> LibraryRow? {
         trip.cover.flatMap { cover in members.first { $0.id == cover.id } } ?? members.first
     }
 
+    /// The trip this screen was opened on, as it was then; nil for an automatic collection.
+    private var openedTrip: Trip? {
+        if case .trip(let trip) = scope { return trip }
+        return nil
+    }
+
     private var live: Trip? {
-        trips.trips.first { $0.uid == trip.uid }
+        guard let openedTrip else { return nil }
+        return trips.trips.first { $0.uid == openedTrip.uid }
+    }
+
+    /// What the screen draws: the trip as the store holds it, or as it was on its way out; or the
+    /// automatic collection as its card opened it.
+    private var shownScope: CollectionScope {
+        (live ?? openedTrip).map(CollectionScope.trip) ?? scope
+    }
+
+    /// What the reads are keyed on: a trip only while the store holds it — one that is gone is read
+    /// no more — and an automatic collection always.
+    private var readScope: CollectionScope? {
+        scope.isTrip ? live.map(CollectionScope.trip) : scope
+    }
+
+    /// Whether the card's own cover and count may be drawn: only under the account it was read for.
+    private var carrying: Bool { identity == openedUnder }
+
+    /// Use as Cover writes a server collection: offered on a trip's viewers only.
+    private var coverAction: MediaViewerHostAction? {
+        scope.isTrip ? Self.useAsCover(scope.id, in: trips, manage: manage, access: access) : nil
     }
 
     var body: some View {
         // The trip as it was while its screen leaves: a delete takes it out of the store before
         // the stack has popped, and a body that dropped the grid would drop the alert on it in
         // the middle of the alert's own exit — after which the stack never popped.
-        let shown = live ?? trip
+        let shown = shownScope
         // Read here, in the body, so a drain that lands re-presents the viewer's source as well.
         let fresh = freshMembers(of: shown)
         let current = shownMembers
@@ -358,7 +536,7 @@ struct TripView: View {
             // screen nor in the accessibility tree.
             .alert(Self.deleteQuestion(shown.title), isPresented: asking(.delete)) {
                 Button(Self.deleteButton, role: .destructive) {
-                    manage.confirmDelete(trip.uid, in: trips, using: access())
+                    manage.confirmDelete(scope.id, in: trips, using: access())
                 }
                 Button("Cancel", role: .cancel) { manage.cancel() }
             } message: {
@@ -368,7 +546,7 @@ struct TripView: View {
                 Color.clear.alert(Self.renameTitle, isPresented: asking(.rename)) {
                     TextField(Self.renameTitle, text: $manage.draft)
                     Button(Self.renameButton) {
-                        manage.confirmRename(trip.uid, in: trips, using: access())
+                        manage.confirmRename(scope.id, in: trips, using: access())
                     }
                     Button("Cancel", role: .cancel) { manage.cancel() }
                 }
@@ -376,17 +554,21 @@ struct TripView: View {
             .background { Color.clear.fetchingFile(saving) }
             .background {
                 Color.clear.sheet(isPresented: $manage.showingRemoved) {
-                    NavigationStack {
-                        TripRemovedList(
-                            trip: shown, trips: trips, members: memberStore, access: access)
+                    if let removing = live ?? openedTrip {
+                        NavigationStack {
+                            TripRemovedList(
+                                trip: removing, trips: trips, members: memberStore, access: access)
+                        }
                     }
                 }
             }
             .background {
                 Color.clear.sheet(isPresented: $editingSpan) {
-                    TripSpanSheet(
-                        trip: live ?? trip, trips: trips, access: access,
-                        lastSummary: memberStore.summary(for: live ?? trip), now: now())
+                    if let dated = live ?? openedTrip {
+                        TripSpanSheet(
+                            trip: dated, trips: trips, access: access,
+                            lastSummary: memberStore.summary(for: dated), now: now())
+                    }
                 }
             }
             .navigationTitle(shown.title)
@@ -404,7 +586,7 @@ struct TripView: View {
                         if mode == .photos {
                             Button(Self.selectButton) { selection.begin() }
                         }
-                        manageMenu
+                        if scope.isTrip { manageMenu }
                     }
                 }
             }
@@ -416,7 +598,7 @@ struct TripView: View {
             }
             .gridViewer(
                 $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
-                action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
+                action: coverAction,
                 gone: memberStore.deleted
             ) {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
@@ -466,8 +648,12 @@ struct TripView: View {
             }
             .task(
                 id: DrainKey(
-                    identity: identity, id: trip.uid, tag: live?.tag, span: live?.tripSpan)
+                    identity: identity, id: scope.id, tag: readScope?.tag, span: readScope?.span)
             ) {
+                // The carried cover's lease is taken here too, on every appearance and change of
+                // account — in a task, after the change's own handlers, which retire the lease
+                // the account held — so it is the one live now; a forget on the way out retires it.
+                if !scope.isTrip { coverLease = memberStore.coverLease(for: scope) }
                 await drain()
             }
             // The store let the members go — a change to a trip moved its revision — so they are
@@ -480,7 +666,7 @@ struct TripView: View {
             // the tag changes; a load already on the wire is joined.
             .task(
                 id: JournalKey(
-                    identity: identity, id: trip.uid, tag: live?.tag, span: live?.tripSpan,
+                    identity: identity, id: scope.id, tag: readScope?.tag, span: readScope?.span,
                     shown: mode == .journal)
             ) {
                 guard mode == .journal else { return }
@@ -491,49 +677,60 @@ struct TripView: View {
             // answered from an alert that is still on its way out, and a stack asked to pop while a
             // presentation is moving refuses ("the navigation stack will not be updated") while
             // its path says it did — leaving this screen up over a path that no longer holds it.
-            .task(id: live == nil) {
-                guard live == nil else { return }
+            // A trip's alone: an automatic collection has no record to lose, and stays up through
+            // its loading and every refresh of the trips (MEMNG-817).
+            .task(id: scope.isTrip && live == nil) {
+                guard scope.isTrip, live == nil else { return }
                 try? await Task.sleep(for: Self.leavingDelay)
                 guard !Task.isCancelled else { return }
                 let ids = trips.trips.map(\.uid)
                 let kept = CollectionsPresentation.trail(trail.wrappedValue, keeping: ids)
                 if kept != trail.wrappedValue { trail.wrappedValue = kept }
             }
+            // A tag, a month or a year has no record whose removal would fence its reads, so
+            // leaving it is what retires them: a page still on the wire then writes nothing. Only
+            // once the stack no longer holds it — a screen pushed over it, or another tab, comes
+            // back to it.
+            .onDisappear {
+                guard !scope.isTrip, !trail.wrappedValue.contains(where: { $0.id == scope.id })
+                else { return }
+                memberStore.forget(scope)
+            }
     }
 
     /// The chosen mode's content: the grid, the journal, or the map.
     @ViewBuilder
-    private func modeContent(_ live: Trip) -> some View {
+    private func modeContent(_ shown: CollectionScope) -> some View {
         switch mode {
-        case .photos: grid(live)
-        case .journal: journal(live)
-        case .map: tripMap(live)
+        case .photos: grid(shown)
+        case .journal: journal(shown)
+        case .map: tripMap(shown)
         }
     }
 
     /// The trip's members that know where they were taken, on the Places map (MEMNG-719): the
     /// hero above it, so the chips stay in reach. Keyed on the account, so a change of account
     /// drops the map's markers, sheet and viewer with its store (`TripMapScreen`).
-    private func tripMap(_ live: Trip) -> some View {
+    private func tripMap(_ shown: CollectionScope) -> some View {
         TripMapScreen(
-            trip: live, members: memberStore, access: access, redrain: { await drain() },
-            viewerAction: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
-            hero: { hero(live, members: shownMembers.rows) }
+            scope: shown, members: memberStore, access: access, redrain: { await drain() },
+            viewerAction: coverAction,
+            hero: { hero(shown, members: shownMembers.rows) }
         )
         .id(identity)
     }
 
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
-    private func journal(_ live: Trip) -> some View {
-        let memos = memberStore.journal(for: live)
-        let state = memberStore.journalState(for: live)
-        let calendar = journalCalendar
+    private func journal(_ shown: CollectionScope) -> some View {
+        let memos = memberStore.journal(for: shown)
+        let state = memberStore.journalState(for: shown)
+        let calendar = journalCalendar(for: shown)
         return List {
-            hero(live, members: shownMembers.rows)
+            hero(shown, members: shownMembers.rows)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-            if let error = memberStore.journalError(for: live) {
+            if let error = memberStore.journalError(for: shown) {
                 NoticeCard(text: error, tone: .error).cardRow()
             }
             ForEach(
@@ -559,18 +756,20 @@ struct TripView: View {
             if state == .draining, memos.isEmpty {
                 ProgressView().frame(maxWidth: .infinity).cardRow()
             }
-            if let text = journalFooter(live, state: state, empty: memos.isEmpty) {
+            if let text = journalFooter(shown, state: state, empty: memos.isEmpty) {
                 TripFooter(text: text).cardRow()
             }
         }
         .listStyle(.plain)
+        // The Timeline's own gap between cards: a day's cards stood flush without it (MEMNG-820).
+        .listRowSpacing(Self.journalCardGap)
         .feedsDock(dock, on: .collections)
         // On the list, not beside the grid's viewer: one presentation per view. Its pages are
         // re-signed by reading the journal again; `memos` is read in the body, so that read
         // re-presents them with its copies.
         .gridViewer(
             $journalViewing, refresher: journalRefresher, zoom: zoom, transport: viewerTransport,
-            action: Self.useAsCover(trip.uid, in: trips, manage: manage, access: access),
+            action: coverAction,
             gone: memberStore.deleted
         ) { Self.journalViewerSource(for: $0, memos: memos) }
     }
@@ -583,10 +782,16 @@ struct TripView: View {
         }
     }
 
-    /// The day a memo falls on, cut where the screen is: its zone and its language.
-    private var journalCalendar: Calendar {
+    /// The day a memo falls on, in the screen's language: a trip's in the device's zone, a month's
+    /// or a year's in the zone its bucket was counted in, so the days head the journal the way
+    /// the card counted the period (a tag's zone is the device's, `CollectionsRootView`). A period
+    /// holds a memo by when it was written but heads it by its journal instant, its earliest
+    /// photograph's (`TripMemberStore.journalInstant(of:)`): a March memo carrying February
+    /// photographs stands in March's journal under a February day, which is accepted.
+    private func journalCalendar(for shown: CollectionScope) -> Calendar {
         var calendar = Calendar.current
         calendar.timeZone = timeZone
+        if case .automatic(let collection) = shown { calendar.timeZone = collection.zone }
         calendar.locale = locale
         return calendar
     }
@@ -594,19 +799,20 @@ struct TripView: View {
     /// What stands under the last memo: the cap note when the load stopped at the cap, else the
     /// empty line when a load answered with nothing — never over a failure, which says its own.
     private func journalFooter(
-        _ live: Trip, state: TripMemberState, empty: Bool
+        _ shown: CollectionScope, state: TripMemberState, empty: Bool
     ) -> String? {
-        // A trip of dates alone has no journal: nothing is read, and the chip says why.
-        guard live.tag != nil else { return TripMemberStore.noTagJournal }
+        // A trip of dates alone has no journal: nothing is read, and the chip says why. A month or
+        // a year has no tag either, and its journal is the memos written in it.
+        if case .trip(let trip) = shown, trip.tag == nil { return TripMemberStore.noTagJournal }
         if let note = Self.journalCapNote(state, cap: memberStore.memberCap) { return note }
         let read = state == .complete || state == .truncated
-        let failed = memberStore.journalError(for: live) != nil
-        return read && empty && !failed ? Self.journalEmptyTitle : nil
+        let failed = memberStore.journalError(for: shown) != nil
+        return read && empty && !failed ? Self.journalEmptyTitle(for: shown) : nil
     }
 
-    private func grid(_ live: Trip) -> some View {
+    private func grid(_ shown: CollectionScope) -> some View {
         let members = shownMembers.rows
-        let state = memberStore.state(for: live)
+        let state = memberStore.state(for: shown)
         return LibraryGrid(
             items: members,
             errorText: memberStore.lastError,
@@ -621,8 +827,8 @@ struct TripView: View {
             loadMore: {},
             selection: selection,
             toggle: { selection.toggle($0) },
-            above: AnyView(hero(live, members: members)),
-            below: footerText(state: state, empty: members.isEmpty).map {
+            above: AnyView(hero(shown, members: members)),
+            below: footerText(shown, state: state, empty: members.isEmpty).map {
                 AnyView(TripFooter(text: $0))
             },
             grouping: .flat
@@ -633,50 +839,95 @@ struct TripView: View {
         .feedsDock(dock, on: .collections)
     }
 
-    private func hero(_ live: Trip, members: [LibraryRow]) -> some View {
-        let summary = memberStore.summary(for: live)
+    /// The Photos-style hero (owner, 12:35 CEST 2026-10-14): the cover from edge to edge with the
+    /// title and the line under it inside the picture, over the cards' shade; under it the saving
+    /// and error lines and the chips.
+    private func hero(_ shown: CollectionScope, members: [LibraryRow]) -> some View {
+        let summary = heroSummary(shown)
+        let detail = Self.detail(
+            shown, summary: summary, carrying: carrying, locale: locale, timeZone: timeZone)
+        let cover = Self.heroCover(
+            shown, summary: summary, members: members, carrying: carrying,
+            renewed: Self.carriedUid(of: shown).flatMap { memberStore.renewedCover($0) })
         return VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
-            TripCover(cover: Self.cover(of: live, members: members))
-            Text(live.title)
-                .font(.largeTitle.bold())
-                .lineLimit(2)
-            Text(
-                CollectionsPresentation.tripDetail(
-                    live, summary: summary, locale: locale, timeZone: timeZone)
+            heroPicture(
+                cover
             )
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            if manage.isSaving {
-                HStack(spacing: DesignTokens.Space.tight) {
-                    ProgressView()
-                    Text(Self.savingLine)
+            // Its own, in every mode: neither the Journal's list nor the Map sets one, and the
+            // grid's re-drains members, which a carried picture past the cap is not.
+            .environment(\.signedURLRefresher, heroRefresher(for: cover))
+            .overlay {
+                LinearGradient(
+                    colors: [.clear, .black.opacity(CollectionCard.shade)],
+                    startPoint: .center, endPoint: .bottom
+                )
+                .accessibilityHidden(true)
+            }
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: DesignTokens.Space.tight) {
+                    Text(shown.title)
+                        .font(.largeTitle.bold())
+                        .lineLimit(2)
+                    if let detail {
+                        Text(detail)
+                            .font(.subheadline)
+                            .opacity(0.85)
+                    }
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier(Self.savingLineID)
+                .foregroundStyle(.white)
+                .padding(.horizontal, DesignTokens.Space.roomy)
+                .padding(.bottom, DesignTokens.Space.regular)
             }
-            if let failure = manage.failure ?? removeFailure {
-                Text(failure)
+            VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+                if manage.isSaving {
+                    HStack(spacing: DesignTokens.Space.tight) {
+                        ProgressView()
+                        Text(Self.savingLine)
+                    }
                     .font(.footnote)
-                    .foregroundStyle(.red)
-                    .accessibilityIdentifier(Self.errorLineID)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(Self.savingLineID)
+                }
+                if let failure = manage.failure ?? removeFailure {
+                    Text(failure)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .accessibilityIdentifier(Self.errorLineID)
+                }
+                TripModeRow(chosen: mode) { mode = $0 }
+                    .padding(.top, DesignTokens.Space.tight)
             }
-            TripModeRow(chosen: mode) { mode = $0 }
-                .padding(.top, DesignTokens.Space.tight)
+            .padding(.horizontal, DesignTokens.Space.roomy)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, DesignTokens.Space.roomy)
         .padding(.bottom, DesignTokens.Space.regular)
+    }
+
+    @ViewBuilder
+    private func heroPicture(_ cover: HeroCover) -> some View {
+        switch cover {
+        case .row(let row): TripCover(cover: row)
+        case .carried(let attachment): TripCover(carried: attachment)
+        case .none: TripCover(cover: nil)
+        }
+    }
+
+    /// The summary the hero reads: a trip's as the store holds it; an automatic collection's as
+    /// last settled under this account, kept while its members are read again.
+    private func heroSummary(_ shown: CollectionScope) -> TripMemberSummary? {
+        shown.isTrip ? memberStore.summary(for: shown) : shownMembers.summary
     }
 
     /// What stands under the last picture: the cap note when the drain stopped at the cap, else
     /// the empty line when a drain answered with nothing left — never over a failure, whose
     /// notice is the grid's own.
-    private func footerText(state: TripMemberState, empty: Bool) -> String? {
+    private func footerText(_ shown: CollectionScope, state: TripMemberState, empty: Bool)
+        -> String?
+    {
         if let note = Self.capNote(state, cap: memberStore.memberCap) { return note }
         let drained = state == .complete || state == .truncated
-        return drained && empty && memberStore.lastError == nil ? Self.emptyTitle : nil
+        return drained && empty && memberStore.lastError == nil ? Self.emptyTitle(for: shown) : nil
     }
 
     /// The one bar at the trip's foot (`AppDock.bar(on:)`). Hosted with no dock — a test that shows
@@ -694,7 +945,7 @@ struct TripView: View {
 
     /// What the screen shows (`shown`).
     private var shownMembers: TripSettledMembers {
-        let shown = live ?? trip
+        let shown = shownScope
         return Self.shown(
             shown, fresh: freshMembers(of: shown), settled: settled, identity: identity,
             in: memberStore)
@@ -705,21 +956,39 @@ struct TripView: View {
     /// through the store's `stillMembers`, so a removal the server acknowledged, or a Delete,
     /// leaves the screen and the toolbar's reach though no read after it ever lands.
     static func shown(
-        _ trip: Trip, fresh: TripSettledMembers?, settled: TripSettledMembers,
+        _ scope: CollectionScope, fresh: TripSettledMembers?, settled: TripSettledMembers,
         identity: TimelineSnapshotIdentity?, in store: TripMemberStore
     ) -> TripSettledMembers {
         if let fresh { return fresh }
-        guard settled.uid == trip.uid, settled.identity == identity else {
-            return TripSettledMembers(uid: trip.uid, identity: identity)
+        let key = settledKey(scope)
+        guard settled.key == key, settled.identity == identity else {
+            return TripSettledMembers(key: key, identity: identity)
         }
         var kept = settled
-        kept.rows = store.stillMembers(settled.rows, of: trip)
+        kept.rows = stillMembers(settled.rows, of: scope, in: store)
+        kept.summary = heldSummary(settled.summary, of: scope, kept: kept.rows, in: store)
         return kept
+    }
+
+    /// The summary kept with held members, read again over the ones still kept: an automatic
+    /// collection's under the store's own rule
+    /// (`TripMemberStore.summary(of:rows:complete:deleted:)`), so a picture Delete took while a re-read is on the wire — or after it failed — leaves the
+    /// hero's cover, count and span with its tile. A trip's hero reads the store's summary, not
+    /// this one, and nothing deleted leaves it as it was.
+    static func heldSummary(
+        _ summary: TripMemberSummary?, of scope: CollectionScope, kept rows: [LibraryRow],
+        in store: TripMemberStore
+    ) -> TripMemberSummary? {
+        guard let summary, case .automatic(let collection) = scope, !store.deleted.isEmpty else {
+            return summary
+        }
+        return TripMemberStore.summary(
+            of: collection, rows: rows, complete: summary.complete, deleted: store.deleted)
     }
 
     /// The store's settled members, only while the trip store holds this screen's account: one
     /// that has not moved yet to the account the screen shows still holds the outgoing one's.
-    private func freshMembers(of shown: Trip) -> TripSettledMembers? {
+    private func freshMembers(of shown: CollectionScope) -> TripSettledMembers? {
         guard identity != nil, trips.identity == identity else { return nil }
         return Self.settled(of: shown, in: memberStore, under: identity)
     }
@@ -739,7 +1008,8 @@ struct TripView: View {
                 share: { shareSelection() },
                 // Only the chosen pictures that are mine, as in the Library.
                 delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) },
-                remove: { removeSelection() }
+                // Remove from Trip writes the trip's exclusions: a trip's toolbar alone offers it.
+                remove: scope.isTrip ? { removeSelection() } : nil
             )
             .sharingFiles(sharing)
         }
@@ -800,8 +1070,9 @@ struct TripView: View {
     /// selection with them — select mode stays, holding nothing, as after a Delete.
     private func removeSelection() {
         let chosen = selection.rows(in: currentMembers).map(\.id)
-        guard !chosen.isEmpty, let access = access() else { return }
-        let target = live ?? trip
+        guard !chosen.isEmpty, let access = access(), let target = live ?? openedTrip else {
+            return
+        }
         Task {
             do {
                 let outcome = try await memberStore.remove(
@@ -827,7 +1098,7 @@ struct TripView: View {
     private var manageMenu: some View {
         Menu(Self.manageButton, systemImage: "ellipsis.circle") {
             Button(Self.renameButton, systemImage: "pencil") {
-                manage.askRename(current: live?.title ?? trip.title)
+                manage.askRename(current: shownScope.title)
             }
             Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
             // Offered before anything is known: its sheet computes the list when it opens.
@@ -854,9 +1125,33 @@ struct TripView: View {
         return TripURLRefresher(
             members: memberStore,
             trips: trips,
-            uid: trip.uid,
-            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL })
+            scope: scope,
+            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL }),
+            lease: coverLease
         )
+    }
+
+    /// Who re-signs the hero's picture: a drained member by the trip's read again, the card's carried
+    /// picture by a read of that picture alone.
+    private func heroRefresher(for cover: HeroCover) -> (any SignedURLRefreshing)? {
+        switch cover {
+        case .row: return refresher
+        case .carried:
+            guard let coverLease else { return nil }
+            let access = access
+            return CarriedCoverURLRefresher(
+                members: memberStore,
+                session: IssuingSession(
+                    handle: { access()?.handle }, baseURL: { access()?.baseURL }),
+                lease: coverLease)
+        case .none: return nil
+        }
+    }
+
+    /// The picture an automatic collection's card carried; nil for a trip.
+    static func carriedUid(of scope: CollectionScope) -> String? {
+        guard case .automatic(let collection) = scope else { return nil }
+        return collection.cover?.uid
     }
 
     /// Who re-signs a lapsed picture of the Journal: a read of the journal again.
@@ -865,19 +1160,20 @@ struct TripView: View {
         return TripJournalURLRefresher(
             members: memberStore,
             trips: trips,
-            uid: trip.uid,
-            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL })
+            scope: scope,
+            session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL }),
+            lease: coverLease
         )
     }
 
     private func drain() async {
-        guard let live, let access = access() else { return }
-        await memberStore.drain(live, using: access.handle, baseURL: access.baseURL)
+        guard let readScope, let access = access() else { return }
+        await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
     private func loadJournal() async {
-        guard let live, let access = access() else { return }
-        await memberStore.loadJournal(live, using: access.handle, baseURL: access.baseURL)
+        guard let readScope, let access = access() else { return }
+        await memberStore.loadJournal(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
     /// What decides whether an open viewer still fits the trip.
@@ -905,16 +1201,45 @@ struct TripView: View {
 /// The hero's picture: the trip's cover, or a placeholder until there is one.
 struct TripCover: View {
     let cover: LibraryRow?
+    /// The thumbnail an automatic collection's card carried, drawn while no drained row stands in
+    /// for it (MEMNG-817).
+    var carried: MemoAttachment? = nil
 
     static let height: CGFloat = 240
 
+    init(cover: LibraryRow?) { self.cover = cover }
+
+    init(carried: MemoAttachment) {
+        cover = nil
+        self.carried = carried
+    }
+
+    /// The width the cover is laid out at: a thumbnail's slot fits its ratio inside the frame, so
+    /// a fixed 4:3 drew a 320-point picture centred in a 402-point hero.
+    @State private var width: CGFloat = 0
+
+    /// The frame's own ratio, so a fill reaches both edges.
+    private var slot: AttachmentSlot {
+        AttachmentSlot(aspectRatio: max(width, 1) / Self.height, contentMode: .fill)
+    }
+
     var body: some View {
         Group {
-            if let cover {
+            if let carried {
+                AttachmentThumbnail(
+                    attachment: carried,
+                    tier: .thumb,
+                    slot: slot,
+                    cornerRadius: 0
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(TripView.coverLabel)
+                .accessibilityIdentifier(TripView.carriedCoverIdentifier(carried.uid))
+            } else if let cover {
                 AttachmentThumbnail(
                     attachment: cover.attachment,
                     tier: .mobile,
-                    slot: AttachmentSlot(aspectRatio: 4 / 3, contentMode: .fill),
+                    slot: slot,
                     cornerRadius: 0
                 )
                 .accessibilityElement(children: .ignore)
@@ -932,7 +1257,13 @@ struct TripCover: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: Self.height)
-        .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { measured in
+            width = measured
+        }
+        // Edge to edge, as Photos draws a collection's cover: no corner to round.
+        .clipped()
     }
 }
 
@@ -1251,10 +1582,13 @@ struct TripShareLane {
 
 /// The members a Trip screen shows: the store's once settled, held while a re-read is on the wire.
 struct TripSettledMembers: Equatable {
-    var uid: String?
+    /// Whose members these are (`TripView.settledKey`).
+    var key: String?
     /// Whose members these are: another account's screen never shows them.
     var identity: TimelineSnapshotIdentity? = nil
     var rows: [LibraryRow] = []
     /// Whether a drain of the trip had applied when these were taken.
     var loaded = false
+    /// The summary read with these members, kept with them.
+    var summary: TripMemberSummary? = nil
 }

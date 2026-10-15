@@ -427,17 +427,17 @@ struct CollectionsRootRenderTests {
     private func screen(
         _ stores: (TripStore, TripMemberStore, LibraryTagStore),
         _ wire: CollectionsWire,
-        openTag: @escaping (String) -> Void = { _ in },
         years: LibraryBucketStore? = nil,
-        openYear: @escaping (String) -> Void = { _ in },
-        now: Date = Self.now
+        now: Date = Self.now,
+        pushed: Box<[CollectionRoute]>? = nil
     ) -> some View {
         let access = wire.access
+        let trail = Binding(
+            get: { pushed?.value ?? [] }, set: { pushed?.value = $0 })
         return NavigationStack {
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: stores.2, years: years,
-                identity: alice, access: { access }, openTag: openTag, openYear: openYear,
-                now: { now })
+                identity: alice, access: { access }, now: { now }, trail: trail)
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -508,15 +508,20 @@ struct CollectionsRootRenderTests {
         return nil
     }
 
-    @Test("a tag card opens the Library narrowed to it")
-    func aTagChipOpensTheLibrary() async {
+    @Test("a tag card pushes the tag's collection")
+    func aTagCardPushesItsCollection() async {
         let wire = CollectionsWire()
-        let opened = Box<String?>(nil)
-        await CollectionsHost.with(screen(stores(), wire) { opened.value = $0 }) { screen in
+        let pushed = Box<[CollectionRoute]>([])
+        await CollectionsHost.with(screen(stores(), wire, pushed: pushed)) { screen in
             #expect(await screen.until { screen.element(labelled: "#family") != nil })
             #expect(screen.press("#family"))
         }
-        #expect(opened.value == "family")
+        guard case .automatic(let collection)? = pushed.value.last?.scope else {
+            Issue.record("no collection was pushed: \(pushed.value.map(\.id))")
+            return
+        }
+        #expect(collection.kind == .tag("family"))
+        #expect(collection.title == "#family")
     }
 
     @Test("the sheet suggests the short recent tag under Suggested, and not the long one")
@@ -698,8 +703,8 @@ struct CollectionsRootRenderTests {
         #expect(collections.trips.map(\.title) == ["Portugal 2026"], "A's trip did not return")
     }
 
-    @Test("a tag chip on the Collections root narrows the Library's grid to that tag")
-    func aTagChipReachesTheLibrary() async {
+    @Test("a tag chip on the Collections root opens the tag's collection, and the tabs stay")
+    func aTagChipOpensItsCollection() async {
         let transport = CollectionsTransport()
         let session = signedOutSession(transport)
         await session.enteredForeground()
@@ -707,46 +712,18 @@ struct CollectionsRootRenderTests {
         #expect(session.state.user?.subject == "fabian", "precondition: signed in")
         let tabs = MainTabView(opening: .collections).environment(session)
         await CollectionsHost.with(tabs) { screen in
-            #expect(await screen.until { screen.element(labelled: "#portugal2026") != nil })
-            // The control: nothing has read the grid under the tag before the press.
-            #expect(!transport.sent.contains { Self.gridRead($0, tag: "portugal2026") })
-            #expect(screen.press("#portugal2026"), "the chip took no press")
-            let reached = await screen.until(seconds: 10) {
-                transport.sent.contains { Self.gridRead($0, tag: "portugal2026") }
-            }
-            #expect(reached, "the Library never read its grid under the tag: \(transport.sent)")
-        }
-    }
-
-    @Test("the grid read a tag chip starts outlives the request being taken, and lands")
-    func aTagReadOutlivesItsRequest() async {
-        let transport = CollectionsTransport()
-        transport.hold(tag: "portugal2026")
-        let session = signedOutSession(transport)
-        await session.enteredForeground()
-        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
-        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
-        let tabs = MainTabView(opening: .collections).environment(session)
-        await CollectionsHost.with(tabs) { screen in
-            // Out of `#expect`: a closure in the macro's expansion and one beside it can be given
-            // one symbol by the compiler, which then refuses the build.
             let chip = await screen.until { screen.element(labelled: "#portugal2026") != nil }
             #expect(chip, "the chip never appeared")
+            // The control: no collection screen stands before the press.
+            #expect(screen.element(labelled: TripMode.journal.title) == nil)
             #expect(screen.press("#portugal2026"), "the chip took no press")
-            let asked = await screen.until(seconds: 10) {
-                transport.sent.contains { Self.gridRead($0, tag: "portugal2026") }
+            let opened = await screen.until(seconds: 10) {
+                screen.element(labelled: TripMode.journal.title) != nil
             }
-            #expect(asked, "the Library never read its grid under the tag: \(transport.sent)")
-            // The request was taken before that read began. Turns for the view to act on its
-            // emptied request: a read tied to the request would be cancelled here.
-            _ = await screen.until(seconds: 1.5) { false }
-            // The control: the film is the held read's alone, so nothing has shown it yet.
-            #expect(screen.element(labelled: "Video") == nil, "the film came from another read")
-            transport.release()
-            let landed = await screen.until(seconds: 10) {
-                screen.element(labelled: "Video") != nil
-            }
-            #expect(landed, "the tag's grid never reached the screen")
+            #expect(opened, "the tag's collection never opened")
+            #expect(
+                !transport.sent.contains { Self.gridRead($0, tag: "portugal2026") },
+                "the Library read its grid under the tag")
         }
     }
 
@@ -1406,18 +1383,18 @@ extension CollectionsRootRenderTests {
         }
     }
 
-    @Test("the Years row lists the scripted years with their counts, and a chip asks for its year")
+    @Test("the Years row lists the scripted years with their counts, and a chip pushes its year")
     func theYearsRow() async {
         let wire = CollectionsWire()
-        let opened = Box<String?>(nil)
+        let pushed = Box<[CollectionRoute]>([])
         let years = LibraryBucketStore()
-        let view = screen(stores(), wire, years: years) { opened.value = $0 }
+        let view = screen(stores(), wire, years: years, pushed: pushed)
         await CollectionsHost.with(view) { screen in
             #expect(await screen.until { screen.says(CollectionsScreen.yearsHeader) })
             #expect(screen.element(labelled: "2026")?.accessibilityValue == "3 items")
             #expect(screen.element(labelled: "2019")?.accessibilityValue == "40 items")
             #expect(screen.press("2019"), "the chip took no press")
-            #expect(opened.value == "2019")
+            #expect(pushed.value.map(\.id) == ["year:2019"])
             // An account change empties the store: its years leave the screen with it.
             years.sessionIdentityChanged()
             #expect(await screen.until { !screen.says(CollectionsScreen.yearsHeader) })
@@ -1442,9 +1419,9 @@ extension CollectionsRootRenderTests {
     }
 
     @Test(
-        "a year chip on the Collections root opens the Library in Months at that year",
+        "a year chip on the Collections root opens that year's collection",
         arguments: ["2026", "2019"])
-    func aYearChipReachesTheLibrary(year: String) async {
+    func aYearChipOpensItsCollection(year: String) async {
         let transport = CollectionsTransport()
         let session = signedOutSession(transport)
         await session.enteredForeground()
@@ -1454,21 +1431,14 @@ extension CollectionsRootRenderTests {
         await CollectionsHost.with(tabs) { screen in
             let chip = await screen.until { screen.element(labelled: year) != nil }
             #expect(chip, "the Years row never appeared")
-            // The control: Months narrowed to a year says so with its All Years button.
-            #expect(screen.element(labelled: "All Years") == nil)
+            // The control: no collection screen stands before the press.
+            #expect(screen.element(labelled: TripMode.journal.title) == nil)
             #expect(screen.press(year), "the chip took no press")
-            let reached = await screen.until(seconds: 10) {
-                screen.element(labelled: "All Years") != nil
+            let opened = await screen.until(seconds: 10) {
+                screen.element(labelled: TripMode.journal.title) != nil
             }
-            #expect(reached, "the Library never showed Months at \(year)")
-            // The year it landed on is the one tapped, and no other scripted year.
-            let heading = { (key: String) in
-                let id = LibraryMonthsMosaic.yearIdentifier(key)
-                return CollectionsHost.identified(id, in: screen.window)
-            }
-            #expect(heading(year), "Months is not narrowed to \(year)")
-            let other = year == "2026" ? "2019" : "2026"
-            #expect(!heading(other), "Months landed on \(other), not the tapped \(year)")
+            #expect(opened, "\(year)'s collection never opened")
+            #expect(screen.element(labelled: "All Years") == nil, "the Library opened in Months")
         }
     }
 
@@ -1709,8 +1679,7 @@ extension CollectionsRootRenderTests {
             NavigationStack {
                 CollectionsScreen(
                     trips: stores.0, members: stores.1, tags: stores.2, years: nil,
-                    identity: who, access: { access }, openTag: { _ in },
-                    openYear: { _ in }, now: { Self.now })
+                    identity: who, access: { access }, now: { Self.now })
             }
             .environment(\.locale, Locale(identifier: "en_GB"))
             .environment(\.timeZone, TimeZone(identifier: "UTC")!)

@@ -35,6 +35,15 @@ public final class TripMemberStore {
         var complete: Bool
     }
 
+    /// A screen's standing to read its automatic collection again for a lapsed signature — the
+    /// cover its card carried (`renewCover`), its members (`drain(_:under:using:baseURL:)`) and
+    /// its journal (`loadJournal(_:under:using:baseURL:)`): the scope it shows, and the token the
+    /// store minted for that showing (`coverLease(for:)`). One lease per showing covers all three.
+    public struct CoverLease: Sendable, Equatable {
+        let scope: String
+        let token: Int
+    }
+
     private struct Lineage: Equatable {
         var revision: Int
         var session: Int
@@ -66,6 +75,14 @@ public final class TripMemberStore {
     private var removedFlights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] =
         [:]
     private var nextToken = 0
+    /// The pictures automatic collections' cards carried, signed again by `renewCover`, by uid.
+    var renewedCovers: [String: MemoAttachment] = [:]
+    /// The renewal of each carried picture on the wire: its token is what lets its answer land,
+    /// its credential the generation a later ask must share to join it.
+    var coverFlights: [String: (token: Int, credential: Int, task: Task<Void, Never>)] = [:]
+    /// The live lease of each automatic collection on screen, by scope id (`coverLease(for:)`):
+    /// what a lapsed signature's re-read of its cover, members or journal must still hold.
+    var coverLeases: [String: Int] = [:]
 
     /// Test seam: awaited as a Removed read starts executing, before it reads anything.
     @ObservationIgnored var onRemovedStart: (@MainActor (String) async -> Void)?
@@ -213,7 +230,20 @@ public final class TripMemberStore {
         }
         guard let request = Self.request(for: scope), let held = held(scope.id, request: request)
         else { return nil }
-        let rows = members(for: scope)
+        return Self.summary(
+            of: collection, rows: members(for: scope), complete: held.complete, deleted: deleted)
+    }
+
+    /// `summary(for:)`'s rule for an automatic collection, over `rows` — its members as far as this
+    /// app knows, every picture Delete took already left out — read by a drain that did or did not
+    /// reach the end (`complete`). A screen that holds the members of an earlier drain while it
+    /// reads again asks the same rule of what it still holds, so a picture deleted meanwhile
+    /// leaves its cover, its count and its span at once. A card's picture that `deleted` names is
+    /// carried no more: the cover falls to the newest row, or to none.
+    public static func summary(
+        of collection: AutomaticCollection, rows: [LibraryRow], complete: Bool,
+        deleted: Set<String>
+    ) -> TripMemberSummary {
         let dates = rows.compactMap(\.takenAt)
         let carried = collection.cover.flatMap { cover in rows.first { $0.id == cover.uid } }
         var cover = rows.last
@@ -221,18 +251,51 @@ public final class TripMemberStore {
         if let carried {
             cover = carried
             coverUid = carried.id
-        } else if let card = collection.cover, !held.complete {
+        } else if let card = collection.cover, !complete, !deleted.contains(card.uid) {
             cover = nil
             coverUid = card.uid
         }
         return TripMemberSummary(
-            count: held.complete ? rows.count : collection.count,
+            count: complete ? rows.count : collection.count,
             firstTaken: dates.min(),
             lastTaken: dates.max(),
             cover: cover,
             coverUid: coverUid,
-            complete: held.complete
+            complete: complete
         )
+    }
+
+    /// A lapsed signature's re-read of `scope`'s members, for the showing `lease` was minted for.
+    /// Nothing starts — no join, no flight — unless `lease` is still the scope's live one, asked
+    /// synchronously before `drain(_:using:baseURL:)` takes or joins a slot: a callback the media
+    /// table held through its cooldown past the scope's forget, or past a new showing of it, reads
+    /// nothing, so no answer can repopulate the members that forget let go.
+    public func drain(
+        _ scope: CollectionScope, under lease: CoverLease, using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        guard leaseIsLive(lease, for: scope) else {
+            MemosLog.api.info("a collection's members were asked for under a retired lease")
+            return
+        }
+        await drain(scope, using: handle, baseURL: baseURL)
+    }
+
+    /// A lapsed signature's re-read of `scope`'s journal, fenced as the leased drain is.
+    public func loadJournal(
+        _ scope: CollectionScope, under lease: CoverLease, using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        guard leaseIsLive(lease, for: scope) else {
+            MemosLog.api.info("a collection's journal was asked for under a retired lease")
+            return
+        }
+        await loadJournal(scope, using: handle, baseURL: baseURL)
+    }
+
+    /// Whether `lease` names `scope` and is still the live lease of it.
+    func leaseIsLive(_ lease: CoverLease, for scope: CollectionScope) -> Bool {
+        lease.scope == scope.id && coverLeases[lease.scope] == lease.token
     }
 
     /// Reads a scope's members: a trip's through `drain(_:using:baseURL:)`, an automatic
@@ -591,12 +654,119 @@ public final class TripMemberStore {
     /// walk reads no further page. A member revision calls `invalidate(uid:)` alone and leaves
     /// the journal standing — a trip's is fenced by its record's rule, an automatic one's by its
     /// own — but an automatic collection has no record whose removal would fence it, so leaving
-    /// a scope is this call.
+    /// a scope is this call. It retires the showing's lease too, so a lapsed signature's callback
+    /// held past it — cover, members or journal — starts no read at all.
     public func forget(_ scope: CollectionScope) {
         invalidate(uid: scope.id)
         journals[scope.id] = nil
         journalErrors[scope.id] = nil
         journalFlights[scope.id] = nil
+        if case .automatic(let collection) = scope, let uid = collection.cover?.uid {
+            renewedCovers[uid] = nil
+            coverFlights[uid] = nil
+        }
+        coverLeases[scope.id] = nil
+    }
+
+    // MARK: - A carried cover (MEMNG-817)
+
+    /// `uid` signed again by `renewCover`, while nothing has forgotten it since; nil before.
+    public func renewedCover(_ uid: String) -> MemoAttachment? { renewedCovers[uid] }
+
+    /// What lets a screen showing `scope` renew its carried cover, and read its members and its
+    /// journal again for a lapsed signature: the live lease of the scope,
+    /// minted on the first ask and the same one after, until a forget of the scope or a change of
+    /// identity retires it. A screen opened again after that is handed a new one, so an ask that
+    /// was taken under the old one — a signature callback the media table held back through its
+    /// cooldown — can never start a read the scope's forget let go.
+    public func coverLease(for scope: CollectionScope) -> CoverLease {
+        if let token = coverLeases[scope.id] { return CoverLease(scope: scope.id, token: token) }
+        nextToken += 1
+        coverLeases[scope.id] = nextToken
+        return CoverLease(scope: scope.id, token: nextToken)
+    }
+
+    /// Reads the picture an automatic collection's card carried by itself, for a fresh signature.
+    /// The card's picture may lie past the member cap, where no drain ever reaches it, so a drain
+    /// cannot re-sign it. Nothing starts unless `lease` is still its scope's live one, asked
+    /// before any slot is taken. A renewal of the same picture under the same credential is
+    /// joined, never doubled; its answer, a success or a failure alike, lands only while it still
+    /// owns its slot, which a change of identity (`sessionIdentityChanged`) or a forget of the
+    /// scope takes away, and while the credential that issued it is still the session's.
+    public func renewCover(
+        uid: String, under lease: CoverLease, using handle: SessionHandle, baseURL: URL
+    ) async {
+        guard coverLeases[lease.scope] == lease.token else {
+            MemosLog.api.info("a carried cover was asked for under a lease that has been retired")
+            return
+        }
+        guard credentialCurrent(handle) else { return }
+        if let running = coverFlights[uid], running.credential == handle.generation {
+            await running.task.value
+            return
+        }
+        nextToken += 1
+        let token = nextToken
+        let task = Task { await self.runCoverRenewal(uid, token: token, handle, baseURL) }
+        coverFlights[uid] = (token, handle.generation, task)
+        await task.value
+    }
+
+    private func runCoverRenewal(
+        _ uid: String, token: Int, _ handle: SessionHandle, _ baseURL: URL
+    ) async {
+        defer { if ownsCover(uid, token) { coverFlights[uid] = nil } }
+        do {
+            let fresh = try await Self.attachment(handle.client, uid: uid, baseURL: baseURL)
+            guard ownsCover(uid, token), credentialCurrent(handle) else {
+                MemosLog.api.info("a carried cover answered for a read that was let go; dropped")
+                return
+            }
+            renewedCovers[uid] = fresh
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
+        } catch {
+            // A read the scope's forget let go reports nothing: not to the session's decision,
+            // not to the transport's health.
+            guard ownsCover(uid, token) else {
+                MemosLog.api.info("a carried cover failed for a read that was let go; dropped")
+                return
+            }
+            await say(error, issuedUnder: handle, lane: .silent) { self.ownsCover(uid, token) }
+        }
+    }
+
+    /// Whether the renewal holding `token` still owns `uid`'s slot.
+    private func ownsCover(_ uid: String, _ token: Int) -> Bool {
+        coverFlights[uid]?.token == token
+    }
+
+    /// One picture's own record, its URLs signed now.
+    static func attachment(_ client: any APIProtocol, uid: String, baseURL: URL) async throws
+        -> MemoAttachment
+    {
+        let input = Operations.AttachmentMetaApiAttachmentsUidGet.Input(path: .init(uid: uid))
+        switch try await client.attachmentMetaApiAttachmentsUidGet(input) {
+        case .ok(let ok):
+            let meta = try ok.body.json
+            return MemoAttachment(
+                uid: meta.uid,
+                mime: meta.mime,
+                status: AttachmentStatus(meta.status),
+                blurhash: meta.blurhash,
+                width: meta.width,
+                height: meta.height,
+                duration: meta.duration,
+                captureInstant: meta.captureInstant,
+                thumbnailURL: URL(string: meta.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
+                previewURL: URL(string: meta.previewUrl, relativeTo: baseURL)?.absoluteURL,
+                webURL: URL(string: meta.webUrl, relativeTo: baseURL)?.absoluteURL,
+                posterURL: URL(string: meta.posterUrl, relativeTo: baseURL)?.absoluteURL,
+                downloadURL: URL(string: meta.downloadUrl, relativeTo: baseURL)?.absoluteURL
+            )
+        case .unprocessableContent: throw APIError.server(status: 422)
+        case .serviceUnavailable: throw APIError.fromStatus(503)
+        case .undocumented(let status, _): throw APIError.fromStatus(status)
+        }
     }
 
     // MARK: - Helpers

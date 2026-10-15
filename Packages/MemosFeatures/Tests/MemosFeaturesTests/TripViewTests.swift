@@ -102,7 +102,7 @@ struct TripManageTests {
     @Test("a trip that left the store leaves the stack, with everything pushed above it")
     func theTrailKeepsWhatExists() async {
         let (_, made, _) = await three()
-        let routes = made.map(TripRoute.init)
+        let routes = made.map { CollectionRoute($0) }
         let ids = made.map(\.uid)
         #expect(CollectionsPresentation.trail(routes, keeping: ids) == routes)
         #expect(CollectionsPresentation.trail(routes, keeping: [ids[0], ids[2]]) == [routes[0]])
@@ -911,8 +911,9 @@ struct TripScreenRenderTests {
         #expect(wire.transport.listReads.count == 3, "precondition: one drain")
         let access = wire.access
         let refresher = TripURLRefresher(
-            members: stores.1, trips: stores.0, uid: record.uid,
-            session: IssuingSession(handle: { access.handle }, baseURL: { access.baseURL }))
+            members: stores.1, trips: stores.0, scope: .trip(record),
+            session: IssuingSession(handle: { access.handle }, baseURL: { access.baseURL }),
+            lease: nil)
         let sameOwner = ObjectIdentifier(refresher.owner) == ObjectIdentifier(stores.1)
         #expect(sameOwner, "the refresher answers for the trip store")
         refresher.signatureExpired(uid: "p1")
@@ -934,7 +935,7 @@ struct TripScreenRenderTests {
         let view = TripStack(log: stack) { trail in
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
-                access: { access }, openTag: { _ in }, trail: trail, tripManage: { manage })
+                access: { access }, trail: trail, tripManage: { manage })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -1001,7 +1002,7 @@ struct TripScreenRenderTests {
             CollectionsRootView.stack(trail: trail) {
                 CollectionsScreen(
                     trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
-                    access: { access }, openTag: { _ in }, trail: trail)
+                    access: { access }, trail: trail)
             }
         }
         .environment(dock)
@@ -1036,7 +1037,7 @@ struct TripScreenRenderTests {
         let view = NavigationStack {
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
-                access: { access }, openTag: { _ in })
+                access: { access })
         }
         await CollectionsHost.with(view, height: 3000) { screen in
             _ = await screen.until { wire.transport.listReads.count == 1 }
@@ -1164,7 +1165,7 @@ struct TripScreenRenderTests {
         let view = TripStack(log: stack) { trail in
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
-                access: { access }, openTag: { _ in }, trail: trail)
+                access: { access }, trail: trail)
         }
         .environment(dock)
         .environment(\.locale, Locale(identifier: "en_GB"))
@@ -1226,8 +1227,8 @@ struct TripScreenRenderTests {
 /// A stack whose path the test's screen is handed, as the Collections tab hands its own.
 struct TripStack<Root: View>: View {
     var log = TripStackLog()
-    @ViewBuilder let root: (Binding<[TripRoute]>) -> Root
-    @State private var trail: [TripRoute] = []
+    @ViewBuilder let root: (Binding<[CollectionRoute]>) -> Root
+    @State private var trail: [CollectionRoute] = []
 
     var body: some View {
         NavigationStack(path: $trail) { root($trail) }
@@ -1238,8 +1239,8 @@ struct TripStack<Root: View>: View {
 /// A trail the test's root makes its own stack over, as the Collections tab owns its own.
 struct TrailHost<Root: View>: View {
     var log = TripStackLog()
-    @ViewBuilder let root: (Binding<[TripRoute]>) -> Root
-    @State private var trail: [TripRoute] = []
+    @ViewBuilder let root: (Binding<[CollectionRoute]>) -> Root
+    @State private var trail: [CollectionRoute] = []
 
     var body: some View {
         root($trail)
@@ -1250,7 +1251,7 @@ struct TrailHost<Root: View>: View {
 /// Every path the test's stack has held, in order.
 @MainActor
 final class TripStackLog {
-    var paths: [[TripRoute]] = []
+    var paths: [[CollectionRoute]] = []
 }
 
 @MainActor
@@ -1807,6 +1808,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var films: Set<String> = []
     private nonisolated(unsafe) var deleted: [String] = []
     private nonisolated(unsafe) var sent: [String] = []
+    private nonisolated(unsafe) var metas: [String] = []
+    private nonisolated(unsafe) var edged = false
     /// The trips the server holds. A trip's members are its tag's listing below; its count is
     /// that listing's pictures less those removed from the trip or deleted.
     nonisolated let trips = TripRows()
@@ -1831,6 +1834,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated var listReads: [[String: String]] { lock.withLock { reads } }
     /// Every memo list read so far, as its query.
     nonisolated var memoReads: [[String: String]] { lock.withLock { journalReads } }
+    /// Every single picture's record read so far, as its uid.
+    nonisolated var metaReads: [String] { lock.withLock { metas } }
     /// Every DELETE sent so far, as its path.
     nonisolated var deletes: [String] { lock.withLock { deleted } }
     /// Every request sent so far that is not a read, as its method and operation.
@@ -1848,6 +1853,9 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func release() { lock.withLock { held = false } }
     /// What every URL read from here on is signed with.
     nonisolated func resign(_ next: String) { lock.withLock { signature = next } }
+    /// The first picture and the first memo move to 10:30 UTC on 28 February, which is 00:30 on
+    /// 1 March at UTC+14 and 22:30 on 27 February at UTC-12 (MEMNG-817).
+    nonisolated func edge() { lock.withLock { edged = true } }
     /// The trip's tag leaves every picture: from here on its reads answer empty.
     nonisolated func empty() { lock.withLock { emptied = true } }
     /// The trip's pictures name no original: nothing to share, so "Show Memo" is the viewer's one
@@ -1882,6 +1890,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             return try await listing(query)
         case "attachment_tags_api_attachments_tags_get":
             return Self.json("[]", next: nil)
+        case "attachment_meta_api_attachments__uid__get":
+            let uid = String((request.path ?? "").split(separator: "/").last ?? "")
+            lock.withLock { metas.append(uid) }
+            while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
+            return Self.json(Self.meta(uid), next: nil)
         case "delete_attachment_api_attachments__uid__delete":
             let path = request.path ?? ""
             lock.withLock {
@@ -1897,10 +1910,31 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 journalReads.append(query)
                 return (pictured, signature)
             }
-            return Self.memoPage(query, pictures: pictures, signed: sig)
+            if query["created_after"] != nil,
+                let past = pastCeiling({ $0.journalReads }, "created_after")
+            {
+                return past
+            }
+            return Self.memoPage(
+                query, pictures: pictures, signed: sig, edged: lock.withLock { edged })
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
+    }
+
+    /// The most reads a walk over a month's or a year's pages may send in one test, as
+    /// `CollectionScopeDrainTests.ceiling` holds the Core walk: a walk that never ends is a
+    /// recorded issue and a refusal, never a hang (MEMNG-817).
+    nonisolated static let ceiling = 16
+
+    /// A refusal, and the issue recorded, once the reads naming `field` pass the ceiling.
+    private nonisolated func pastCeiling(
+        _ log: (TripTransport) -> [[String: String]], _ field: String
+    ) -> (HTTPResponse, HTTPBody?)? {
+        let count = lock.withLock { log(self).filter { $0[field] != nil }.count }
+        guard count > Self.ceiling else { return nil }
+        Issue.record("\(count) reads by \(field), past the ceiling of \(Self.ceiling)")
+        return (HTTPResponse(status: .internalServerError), nil)
     }
 
     /// A list read — the Library's, or a trip's member route asking for its tag — answered as
@@ -1909,27 +1943,32 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         HTTPResponse, HTTPBody?
     ) {
         lock.withLock { reads.append(query) }
+        if query["bucket"] != nil, let past = pastCeiling({ $0.reads }, "bucket") { return past }
         while lock.withLock({ held }) { try await Task.sleep(for: .milliseconds(20)) }
         if lock.withLock({ failing }) {
             return (HTTPResponse(status: .internalServerError), nil)
         }
         if lock.withLock({ emptied }) { return Self.json("[]", next: nil) }
-        let (sig, gone, bare, theirs, clips) = lock.withLock {
-            (signature, dropped, unoriginal, others, films)
+        let (sig, gone, bare, theirs, clips, edge) = lock.withLock {
+            (signature, dropped, unoriginal, others, films, edged)
         }
         return Self.page(
-            query, signed: sig, without: gone, bare: bare, theirs: theirs, films: clips)
+            query, signed: sig, without: gone, bare: bare, theirs: theirs, films: clips,
+            edged: edge)
     }
 
     private nonisolated static func page(
         _ query: [String: String], signed sig: String, without gone: Set<String>,
-        bare: Bool = false, theirs: Set<String> = [], films: Set<String> = []
+        bare: Bool = false, theirs: Set<String> = [], films: Set<String> = [], edged: Bool = false
     ) -> (HTTPResponse, HTTPBody?) {
         if query["tag"] == "spain2025" {
             return json("[\(item("s0", taken: "2025-05-01T12:00:00Z", sig: sig))]", next: nil)
         }
-        if query["tag"] != "portugal2026" { return json("[]", next: nil) }
-        let days = ["12", "14", "16", "18", "20"].map { "2026-03-\($0)T12:00:00Z" }
+        // March 2026's month and year buckets hold the same five pictures (MEMNG-817).
+        let bucketed = ["2026-03", "2026"].contains(query["bucket"] ?? "")
+        if query["tag"] != "portugal2026", !bucketed { return json("[]", next: nil) }
+        var days = ["12", "14", "16", "18", "20"].map { "2026-03-\($0)T12:00:00Z" }
+        if edged { days[0] = Self.edgeStamp }
         let rows = days.enumerated().map { day -> String? in
             let uid = "p\(day.offset)"
             if gone.contains(uid) { return nil }
@@ -1955,17 +1994,20 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// A page of `portugal2026`'s memos, two at a time, in the order the query's `sort` asks for:
     /// oldest first under `created_at`, newest first under anything else — the server's default.
     private nonisolated static func memoPage(
-        _ query: [String: String], pictures: Bool, signed sig: String
+        _ query: [String: String], pictures: Bool, signed sig: String, edged: Bool = false
     ) -> (HTTPResponse, HTTPBody?) {
-        let all = query["tag"] == "portugal2026" ? journal : []
+        // A month's or a year's journal asks from its start, with no tag (MEMNG-817).
+        let dated = query["tag"] == nil && query["created_after"] != nil
+        let all = query["tag"] == "portugal2026" || dated ? journal : []
         let ordered = query["sort"] == "created_at" ? all : all.reversed()
         let rows = ordered.map { memo in
+            let stamp = edged && memo.uid == "j0" ? Self.edgeStamp : memo.stamp
             let uids = pictures && memo.uid == "j1" ? ["p1", "p3"] : []
             let attached = uids.map { reference($0, sig: sig) }
             return """
                 {"uid":"\(memo.uid)","owner":"fabian","mine":true,"content":"\(memo.text)",\
-                "visibility":"PRIVATE","pinned":false,"created_at":"\(memo.stamp)",\
-                "updated_at":"\(memo.stamp)","archived_at":null,"tags":["portugal2026"],\
+                "visibility":"PRIVATE","pinned":false,"created_at":"\(stamp)",\
+                "updated_at":"\(stamp)","archived_at":null,"tags":["portugal2026"],\
                 "attachments":[\(attached.joined(separator: ","))]}
                 """
         }
@@ -1975,6 +2017,26 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         let items = picked.joined(separator: ",")
         let body = "{\"items\":[\(items)],\"nextCursor\":\(next),\"totalCount\":null}"
         return json(body, next: nil)
+    }
+
+    /// Where `edge()` moves the first picture and the first memo.
+    nonisolated static let edgeStamp = "2026-02-28T10:30:00Z"
+
+    /// One picture's own record (`AttachmentMeta`), signed `new` with an `exp` far ahead.
+    private nonisolated static func meta(_ uid: String) -> String {
+        let query = "?exp=4000000000&scope=1&sig=new"
+        return """
+            {"uid":"\(uid)","mime":"image/jpeg","size":1024,"sha256":null,"status":"ready",\
+            "width":1000,"height":800,"duration":null,"blurhash":null,"captured_at":null,\
+            "capture_instant":null,"capture_civil":null,"capture_source":null,"mine":true,\
+            "hasPrint":false,"hasLegacyPrint":false,"hasPoster":false,"renditions":[],\
+            "webReady":true,"downloadUrl":"/api/attachments/\(uid)/original",\
+            "printUrl":"/api/attachments/\(uid)/print",\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\
+            "previewUrl":"/api/attachments/\(uid)/mobile\(query)",\
+            "webUrl":"/api/attachments/\(uid)/web\(query)",\
+            "posterUrl":"/api/attachments/\(uid)/poster\(query)"}
+            """
     }
 
     /// A memo's own picture, as the memo read carries it (`AttachmentRef`), signed as `item`'s.
@@ -2620,9 +2682,9 @@ extension TripScreenRenderTests {
         wire.transport.resign("v2")
         let session = IssuingSession(handle: { access.handle }, baseURL: { access.baseURL })
         let journal = TripJournalURLRefresher(
-            members: stores.1, trips: stores.0, uid: record.uid, session: session)
+            members: stores.1, trips: stores.0, scope: .trip(record), session: session, lease: nil)
         let grid = TripURLRefresher(
-            members: stores.1, trips: stores.0, uid: record.uid, session: session)
+            members: stores.1, trips: stores.0, scope: .trip(record), session: session, lease: nil)
         // The loader's own dispatcher, its cooldown real: an ask it defers waits a minute.
         let table = MediaFetchTable(currentGeneration: { 0 })
         let key = MediaFetchTable.Key(

@@ -25,8 +25,16 @@ nonisolated enum TripMapPresentation {
     static func memberUids(of trip: Trip, in members: TripMemberStore)
         -> Set<String>?
     {
-        switch members.state(for: trip) {
-        case .complete, .truncated: Set(members.members(for: trip).map(\.id))
+        memberUids(of: .trip(trip), in: members)
+    }
+
+    /// The same for any collection (MEMNG-817): a tag's, a month's or a year's drained members.
+    @MainActor
+    static func memberUids(of scope: CollectionScope, in members: TripMemberStore)
+        -> Set<String>?
+    {
+        switch members.state(for: scope) {
+        case .complete, .truncated: Set(members.members(for: scope).map(\.id))
         case .draining, .notLoaded: nil
         }
     }
@@ -116,8 +124,9 @@ nonisolated enum TripMapPresentation {
 /// (`PlacesPresenting.keep`): a deleted trip's membership is unknown again, so everything open
 /// closes and the map waits while the screen leaves the stack.
 struct TripMapScreen<Hero: View>: View {
-    /// The trip as the screen draws it — the live one, or the snapshot on its way out.
-    let trip: Trip
+    /// The collection as the screen draws it — a trip live, or its snapshot on its way out; or a
+    /// tag, a month or a year (MEMNG-817).
+    let scope: CollectionScope
     let members: TripMemberStore
     let access: () -> CollectionsAccess?
     /// Reads the trip's membership again, for Try Again after a drain that failed.
@@ -136,9 +145,9 @@ struct TripMapScreen<Hero: View>: View {
     @Environment(\.placesStageProbe) private var probe
 
     var body: some View {
-        let uids = TripMapPresentation.memberUids(of: trip, in: members)
+        let uids = TripMapPresentation.memberUids(of: scope, in: members)
         let markers = TripMapPresentation.markers(places?.markers ?? [], of: uids)
-        let membership = members.state(for: trip)
+        let membership = members.state(for: scope)
         let status = TripMapPresentation.state(
             places: places?.status ?? .pending, membership: membership,
             membershipError: members.lastError, shown: markers.count)
@@ -213,7 +222,7 @@ struct TripMapScreen<Hero: View>: View {
 
     /// Try Again: the membership when it could not be read, and the markers.
     private func retry() async {
-        if members.state(for: trip) == .notLoaded { await redrain() }
+        if members.state(for: scope) == .notLoaded { await redrain() }
         await load()
     }
 }

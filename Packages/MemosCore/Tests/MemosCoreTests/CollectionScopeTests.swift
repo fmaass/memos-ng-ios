@@ -111,4 +111,34 @@ struct CollectionScopeTests {
         #expect(Self.automatic(.tag("x")).period == nil)
         #expect(Self.automatic(.month("2026-09")).period != nil, "control: a good key has one")
     }
+
+    /// What a screen holding an earlier drain's members asks of what it still holds: the store's
+    /// own rule, so a picture Delete took leaves the cover, the count and the span (MEMNG-817).
+    @MainActor
+    @Test("an automatic summary over the kept rows drops a deleted cover, its count and its span")
+    func summaryOverKeptRows() {
+        func row(_ uid: String, _ day: String) -> LibraryRow {
+            LibraryRow(
+                attachment: MemoAttachment(uid: uid, mime: "image/jpeg", status: .ready),
+                takenAt: Self.instant("2026-03-\(day)T12:00:00Z"), mine: true,
+                filename: "\(uid).jpg")
+        }
+        let kept = [row("p0", "12"), row("p2", "16"), row("p3", "18")]
+        let card = CollectionCover(uid: "c9", thumbnailURL: nil)
+        let tag = Self.automatic(.tag("lisbon"), count: 9, cover: card)
+        let complete = TripMemberStore.summary(
+            of: tag, rows: kept, complete: true, deleted: ["p1", "p4"])
+        #expect(complete.count == 3, "a complete drain counts the rows still kept")
+        #expect(complete.cover?.id == "p3", "the newest kept row is the cover")
+        #expect(complete.firstTaken == Self.instant("2026-03-12T12:00:00Z"))
+        #expect(complete.lastTaken == Self.instant("2026-03-18T12:00:00Z"))
+        // Short of the end, the card's own picture stays the cover until it is deleted itself.
+        let carried = TripMemberStore.summary(of: tag, rows: kept, complete: false, deleted: [])
+        #expect(carried.cover == nil && carried.coverUid == "c9", "control: the card's picture")
+        let gone = TripMemberStore.summary(of: tag, rows: kept, complete: false, deleted: ["c9"])
+        let fell = String(describing: gone.coverUid)
+        #expect(gone.coverUid == "p3", "a deleted card picture stood: \(fell)")
+        let empty = TripMemberStore.summary(of: tag, rows: [], complete: false, deleted: ["c9"])
+        #expect(empty.cover == nil && empty.coverUid == nil, "nothing kept, no cover")
+    }
 }

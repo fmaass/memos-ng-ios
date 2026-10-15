@@ -207,14 +207,25 @@ extension MediaViewerSource {
 final class TripURLRefresher: SignedURLRefreshing {
     let members: TripMemberStore
     let trips: TripStore
-    let uid: String
+    /// The collection read again: a trip is looked up when the ask arrives, so a trip deleted
+    /// meanwhile is not read; a tag, a month or a year is read as it was opened (MEMNG-817).
+    let scope: CollectionScope
     let session: IssuingSession
+    /// The showing this refresher was made for, an automatic collection's: a callback the media
+    /// table runs after the scope was let go — or after it was opened again — carries a retired
+    /// lease, and the store starts nothing for it. Nil reads nothing for an automatic collection;
+    /// a trip's reads are fenced by its record instead.
+    let lease: TripMemberStore.CoverLease?
 
-    init(members: TripMemberStore, trips: TripStore, uid: String, session: IssuingSession) {
+    init(
+        members: TripMemberStore, trips: TripStore, scope: CollectionScope,
+        session: IssuingSession, lease: TripMemberStore.CoverLease?
+    ) {
         self.members = members
         self.trips = trips
-        self.uid = uid
+        self.scope = scope
         self.session = session
+        self.lease = lease
     }
 
     var owner: AnyObject { members }
@@ -222,11 +233,45 @@ final class TripURLRefresher: SignedURLRefreshing {
     /// The session is read in the turn that enters the store, for `MemoURLRefresher`'s reason.
     /// `uid` is the picture whose signature lapsed; the trip read again is this refresher's own.
     func signatureExpired(uid: String) {
-        Task { [members, trips, tripUid = self.uid, session] in
-            guard let trip = trips.trips.first(where: { $0.uid == tripUid }),
-                let handle = session.handle(), let baseURL = session.baseURL()
-            else { return }
-            await members.drain(trip, using: handle, baseURL: baseURL)
+        Task { [members, trips, scope = self.scope, session, lease] in
+            guard let handle = session.handle(), let baseURL = session.baseURL() else { return }
+            switch scope {
+            case .trip(let opened):
+                guard let trip = trips.trips.first(where: { $0.uid == opened.uid }) else { return }
+                await members.drain(trip, using: handle, baseURL: baseURL)
+            case .automatic:
+                guard let lease else { return }
+                await members.drain(scope, under: lease, using: handle, baseURL: baseURL)
+            }
+        }
+    }
+}
+
+/// The picture an automatic collection's card carried into its hero, re-signed by reading that
+/// picture alone (MEMNG-817). The card's picture can lie past the member cap, where the trip
+/// refresher's drain never reaches it, so the hero that DREW it is the one that asks.
+@MainActor
+final class CarriedCoverURLRefresher: SignedURLRefreshing {
+    let members: TripMemberStore
+    let session: IssuingSession
+    /// The showing this refresher was made for: a callback the media table runs after the scope
+    /// was let go carries a retired lease, and the store starts nothing for it.
+    let lease: TripMemberStore.CoverLease
+
+    init(members: TripMemberStore, session: IssuingSession, lease: TripMemberStore.CoverLease) {
+        self.members = members
+        self.session = session
+        self.lease = lease
+    }
+
+    /// The member store: the cooldown is kept per picture, and the carried one is no member.
+    var owner: AnyObject { members }
+
+    /// The session is read in the turn that enters the store, for `MemoURLRefresher`'s reason.
+    func signatureExpired(uid: String) {
+        Task { [members, session, lease] in
+            guard let handle = session.handle(), let baseURL = session.baseURL() else { return }
+            await members.renewCover(uid: uid, under: lease, using: handle, baseURL: baseURL)
         }
     }
 }
@@ -242,14 +287,22 @@ final class TripURLRefresher: SignedURLRefreshing {
 final class TripJournalURLRefresher: SignedURLRefreshing {
     let members: TripMemberStore
     let trips: TripStore
-    let uid: String
+    /// The collection read again: a trip is looked up when the ask arrives, so a trip deleted
+    /// meanwhile is not read; a tag, a month or a year is read as it was opened (MEMNG-817).
+    let scope: CollectionScope
     let session: IssuingSession
+    /// The showing this refresher was made for, as `TripURLRefresher.lease` is.
+    let lease: TripMemberStore.CoverLease?
 
-    init(members: TripMemberStore, trips: TripStore, uid: String, session: IssuingSession) {
+    init(
+        members: TripMemberStore, trips: TripStore, scope: CollectionScope,
+        session: IssuingSession, lease: TripMemberStore.CoverLease?
+    ) {
         self.members = members
         self.trips = trips
-        self.uid = uid
+        self.scope = scope
         self.session = session
+        self.lease = lease
     }
 
     /// The journal's own cooldown owner, never the member store itself: a journal read re-signs
@@ -259,11 +312,16 @@ final class TripJournalURLRefresher: SignedURLRefreshing {
 
     /// `uid` is the picture whose signature lapsed; the journal read again is this trip's own.
     func signatureExpired(uid: String) {
-        Task { [members, trips, tripUid = self.uid, session] in
-            guard let trip = trips.trips.first(where: { $0.uid == tripUid }),
-                let handle = session.handle(), let baseURL = session.baseURL()
-            else { return }
-            await members.loadJournal(trip, using: handle, baseURL: baseURL)
+        Task { [members, trips, scope = self.scope, session, lease] in
+            guard let handle = session.handle(), let baseURL = session.baseURL() else { return }
+            switch scope {
+            case .trip(let opened):
+                guard let trip = trips.trips.first(where: { $0.uid == opened.uid }) else { return }
+                await members.loadJournal(trip, using: handle, baseURL: baseURL)
+            case .automatic:
+                guard let lease else { return }
+                await members.loadJournal(scope, under: lease, using: handle, baseURL: baseURL)
+            }
         }
     }
 }
