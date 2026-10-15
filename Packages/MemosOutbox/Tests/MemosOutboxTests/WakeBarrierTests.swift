@@ -891,23 +891,22 @@ struct WakePilotChecklistTests {
     }
 
     /// Line 13: A signs out, and before the cancel it owes is issued B signs in and captures. The
-    /// cancel, issued late, reaches A's upload only; B's capture goes and becomes a memo.
-    @Test(
-        "line 13: a capture made while the last account's cancel is delayed still goes",
-        .disabled(
-            "MEMNG-673: a delayed cancel for the signed-out account also cancels the new account's capture task"
-        )
-    )
+    /// cancel, issued late, reaches A's uploads only; B's capture goes and becomes a memo.
+    ///
+    /// A's job has two tasks by then, both of this launch: task 7, listed at the start, and the
+    /// one the first drain minted under epoch 0, before the sign-out moved the epoch to 3. Both
+    /// predate the withdrawal and both are cancelled, so the cancellation is judged by whose job
+    /// each cancelled task names, never by a count of one (MEMNG-673): every cancelled task is A's,
+    /// and B's, minted under the epoch the withdrawal moved to, is not among them.
+    @Test("line 13: a capture made while the last account's cancel is delayed still goes")
     func captureDuringDelayedCancelRecovers() async throws {
         let harness = try await Harness.make(http: Self.server())
         defer { harness.cleanUp() }
         let launch = UUID()
         let never = TestGate()
         let box = OutboxBackgroundCompletion(fallback: { await never.pass() })
-        let composed = compose(
-            harness, listing: [listing(7, harness.job, launch: launch, epoch: 2)], launch: launch,
-            box: box
-        )
+        let parked = listing(7, harness.job, launch: launch, epoch: 2)
+        let composed = compose(harness, listing: [parked], launch: launch, box: box)
         try await becameActive(composed.outbox)
         // A's sign-out: recorded at the epoch it moved to, its cancel not yet issued.
         composed.outbox.recordWithdrawal(at: 3)
@@ -934,7 +933,27 @@ struct WakePilotChecklistTests {
         // The delayed cancel is issued now, with B's upload already listed beside A's.
         await composed.outbox.finishWithdrawal()
 
-        #expect(composed.session.cancelledIdentifiers == [7], "B's upload was cancelled with A's")
+        let cancelled = composed.session.cancelledIdentifiers
+        #expect(!cancelled.contains(sent.taskIdentifier), "B's upload was cancelled with A's")
+        #expect(cancelled.contains(7), "A's listed upload was left to send")
+        var descriptions: [Int: String?] = [parked.taskIdentifier: parked.taskDescription]
+        for created in composed.session.createdTasks {
+            descriptions[created.taskIdentifier] = created.description
+        }
+        for identifier in cancelled {
+            let identity = try #require(
+                WholeTaskIdentity(taskDescription: descriptions[identifier] ?? nil),
+                "cancelled task \(identifier) names no whole-task identity"
+            )
+            #expect(identity.jobID == harness.job.id, "task \(identifier), not A's, was cancelled")
+        }
+        let minted = composed.session.createdTasks.filter {
+            WholeTaskIdentity(taskDescription: $0.description)?.jobID == harness.job.id
+        }
+        #expect(!minted.isEmpty, "the premise: A's drain minted a task before the sign-out")
+        for task in minted {
+            #expect(cancelled.contains(task.taskIdentifier), "A's minted upload was left to send")
+        }
         try await answersSettled(composed.outbox, box: box, delegate: composed.delegate) {
             composed.delegate.deliver(try success(sent, of: capture))
         }
