@@ -68,6 +68,19 @@ final class DayMarkers {
 
     func remove(_ id: String) { byID[id] = nil }
 
+    /// The first of `ids`, down the page, that still reaches below `y` — the band at the top of
+    /// the screen (MEMNG-818). An element ends where the next built one starts, because the stack
+    /// builds a run of rows with nothing missing between them; and the run reaches above and below
+    /// the screen, so the first built element is not the first one seen.
+    func first(reaching y: Double, among ids: Set<String>) -> String? {
+        let down = byID.map { (id: $0.key, top: $0.value.marker.top) }.sorted { $0.top < $1.top }
+        for (place, element) in down.enumerated() where ids.contains(element.id) {
+            let end = place + 1 < down.count ? down[place + 1].top : .infinity
+            if end > y + 1 { return element.id }
+        }
+        return nil
+    }
+
     /// In the page's order. A band as well as a heading marks its day, so a long day whose heading
     /// the lazy stack has let go of above the screen is still the day at the top.
     var inOrder: [DayMarker] {

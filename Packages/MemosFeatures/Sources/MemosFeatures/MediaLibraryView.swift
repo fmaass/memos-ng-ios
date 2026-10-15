@@ -56,7 +56,8 @@ struct MediaLibraryView: View {
     @Namespace private var mediaZoom
     /// Which direction this device reads the library in, across launches. Read once, when the
     /// store is built, and written whenever the menu is used — the store is what the screen reads
-    /// the current direction FROM, so there is only ever one answer on screen.
+    /// the current direction FROM, so there is only ever one answer on screen. Group by Day is
+    /// read here directly, on every drawing of All: it cuts the rows, it reads none.
     private let preferences = LibraryPreferences.shared
 
     /// The scope row's Library icon, which gives the tabs back (`LeadingMainBar`).
@@ -444,7 +445,9 @@ struct MediaLibraryView: View {
                     answering: store.loadedRequest
                 )
             },
-            showMonth: { choice.showMonth($0) }
+            showMonth: { choice.showMonth($0) },
+            // Select mode and Show Selected draw the same tiles in the same cut (MEMNG-818).
+            grouping: preferences.allGrouping
         )
         // The Library's scroll is what swaps the tab bar for the scope toolbar (MEMNG-679), on
         // each of its three scroll views.
@@ -493,7 +496,9 @@ struct MediaLibraryView: View {
         ) {
             LibraryFilterMenuContent(
                 filter: filterBinding(library),
-                order: sortBinding(library)
+                order: sortBinding(library),
+                groupByDay: groupByDayBinding,
+                tileLayout: tileLayoutBinding
             )
         }
     }
@@ -524,6 +529,24 @@ struct MediaLibraryView: View {
                 library.setOrder(chosen)
                 Task { await load() }
             }
+        )
+    }
+
+    /// View Options → Group by Day (MEMNG-818): the device's choice and nothing else. The grid is
+    /// re-cut from the rows the store already holds — no reload, the cursor where it was.
+    private var groupByDayBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.groupByDay },
+            set: { preferences.select(groupByDay: $0) }
+        )
+    }
+
+    /// View Options → Mixed Sizes / Square Grid (MEMNG-821): written here, read by every grid
+    /// itself, so this screen passes nothing on. No reload either.
+    private var tileLayoutBinding: Binding<LibraryTileLayout> {
+        Binding(
+            get: { preferences.tileLayout },
+            set: { preferences.select(tileLayout: $0) }
         )
     }
 
@@ -742,6 +765,21 @@ final class RowsOnScreen {
     var rows: Set<String> = []
 }
 
+/// What a `LibraryGrid` is drawn in: its grouping and the device's tile layout, re-cut together.
+struct LibraryGridCut: Equatable {
+    let grouping: LibraryGridGrouping
+    let tiles: LibraryTileLayout
+}
+
+/// The file a grid keeps at the line until the reader's hand moves: a landing's, held by its day's
+/// heading in a grouped grid and by its band in a flat one, or the picture a re-cut kept, by its
+/// band. `listGeneration` is the list it was taken in.
+struct HeldFile: Equatable {
+    let file: String
+    let byHeading: Bool
+    let listGeneration: Int
+}
+
 /// How a `LibraryGrid` cuts its list (MEMNG-740).
 enum LibraryGridGrouping {
     /// The Library's All: a header per month, a heading per day, a block per day.
@@ -794,6 +832,10 @@ struct LibraryGrid: View {
     /// Days with their headings, or one block with none — a trip's (MEMNG-740). The same tiles,
     /// zoom, tap and long press either way: only the rows the stack is cut into differ.
     var grouping = LibraryGridGrouping.byDay
+    /// The device's View Options, of which the grid reads the tile layout itself (MEMNG-821): All
+    /// and the trip and collection screens follow it with nothing passed on. A test hands in its
+    /// own, over a scratch suite.
+    var preferences = LibraryPreferences.shared
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -806,12 +848,20 @@ struct LibraryGrid: View {
     /// The landing this grid has brought its scroll to: a width measured again afterwards must not
     /// bring the reader back to it.
     @State private var scrolledTo: LibraryLanding?
-    /// The heading a landing brought to the line, held there until the reader's own hand moves
-    /// the scroll. Each time the lazy stack measures rows it has not built yet, the scroll is put
-    /// back where its estimate says — for a heading on the first screen, the top of the page — so
-    /// reaching the line once does not keep it there. It belongs to the list it landed in
-    /// (`listGeneration`): a next page keeps it, any other list lets it go.
-    @State private var holding: (heading: String, listGeneration: Int)?
+    /// The heading a landing brought to the line — or, in a flat grid and after a re-cut, the band
+    /// holding the file — held there until the reader's own hand moves the scroll. Each time the
+    /// lazy stack measures rows it has not built yet, the scroll is put back where its estimate
+    /// says — for a heading on the first screen, the top of the page — so reaching the line once
+    /// does not keep it there. It belongs to the list it landed in (`listGeneration`): a next page
+    /// keeps it, any other list lets it go. What is held is the FILE, its row found again at each
+    /// hold: a next page keeps the list but may re-cut the file's day, and a band is named by its
+    /// first file, so the band a file sat in before the page may no longer exist after it.
+    @State private var holding: HeldFile?
+    /// The cut the stack is drawn in now: the grouping and the tile layout as they were when the
+    /// grid last re-cut itself. Kept apart from both so a change of either is answered while the
+    /// old cut is still drawn and measured — the one moment the picture at the top of the screen
+    /// can be read (MEMNG-818, MEMNG-821).
+    @State private var drawnCut: LibraryGridCut?
     /// The rows the lazy stack has built now, the ones on or beside the screen. A reference rather
     /// than observed state on purpose: it changes with every row scrolled past, and observing it
     /// would re-solve the whole library each time.
@@ -842,6 +892,9 @@ struct LibraryGrid: View {
                 // may already be there — and again whenever the landing or the measured width
                 // moves, because before the width is known no row exists to scroll to.
                 .onChange(of: readiness, initial: true) { bring(proxy) }
+                // Group by Day re-cuts the rows in place: the store's list and cursor stay, and
+                // the picture at the top of the screen is the one the reader is shown after it.
+                .onChange(of: wantedCut, initial: true) { _, new in recut(to: new, proxy) }
                 // Narrowing leaves a band or two at the top of a page still scrolled to where the
                 // pictures were chosen, which then shows nothing; widening puts back everything
                 // above them. Either way the chosen pictures are brought into view (MEMNG-819).
@@ -899,11 +952,17 @@ struct LibraryGrid: View {
             landing: landing, width: contentWidth, laidOut: laidOut, built: built)
     }
 
-    /// Scrolls to the landing's day heading, again as often as asked until the lazy stack has built
-    /// it: each ask lands nearer, and only a built heading's place is exact rather than estimated.
+    /// Scrolls to the landing's day heading — in a flat grid, which has none, to the band holding
+    /// the file the store found — again as often as asked until the lazy stack has built it: each
+    /// ask lands nearer, and only a built row's place is exact rather than estimated.
     private func bring(_ proxy: ScrollViewProxy) {
-        guard let landing, landing != scrolledTo, let heading = headingID(holding: landing.rowID)
-        else { return }
+        guard let landing, landing != scrolledTo else { return }
+        let target: String? =
+            switch cut.grouping {
+            case .byDay: headingID(holding: landing.rowID)
+            case .flat: tileID(holding: landing.rowID, in: cut)
+            }
+        guard let heading = target else { return }
         // A new landing takes over from the one held before it, and from a press's reveal.
         holding = nil
         revealing = nil
@@ -916,13 +975,22 @@ struct LibraryGrid: View {
         // can move, so being built alone does not say the scroll went there.
         if onScreen.rows.contains(heading), markers.reached(heading) {
             settle(landing)
-            holding = (heading, listGeneration())
+            holding = HeldFile(
+                file: landing.rowID, byHeading: cut.grouping == .byDay,
+                listGeneration: listGeneration())
         }
     }
 
     /// Brings the held heading back to the line whenever a layout has moved the scroll off it.
     private func hold(_ proxy: ScrollViewProxy) {
-        guard let holding, !markers.reached(holding.heading) else { return }
+        guard let holding else { return }
+        // Found in the rows drawn now, not remembered: see `holding`. A file no longer in them has
+        // nothing left to hold.
+        guard let row = heldRow(holding) else {
+            self.holding = nil
+            return
+        }
+        guard !markers.reached(row) else { return }
         // Judged against the list it was taken in, asked of the store here, with nothing between
         // the question and the scroll: after a filter, tag or order change the store has dropped
         // the landing, and the same day in the new list is not the reader's to be brought back to.
@@ -930,7 +998,70 @@ struct LibraryGrid: View {
             self.holding = nil
             return
         }
-        proxy.scrollTo(holding.heading, anchor: .top)
+        proxy.scrollTo(row, anchor: .top)
+    }
+
+    /// The row a held file is kept at in the cut drawn now: its day's heading, or its band.
+    private func heldRow(_ held: HeldFile) -> String? {
+        held.byHeading ? headingID(holding: held.file) : tileID(holding: held.file, in: cut)
+    }
+
+    /// Re-cuts the stack into `new` and keeps the reader's picture in view (MEMNG-818). The first
+    /// file reaching below the line is read from the markers of the cut still drawn, then the band
+    /// holding that file in the new cut is scrolled to the line and held there like a landing's
+    /// heading, so the lazy stack re-measuring the rows it builds cannot carry it off. At the top
+    /// of the page the top stays the top: there is nothing above to keep.
+    private func recut(to new: LibraryGridCut, _ proxy: ScrollViewProxy) {
+        guard let drawn = drawnCut else {
+            drawnCut = new
+            return
+        }
+        guard drawn != new else { return }
+        // The re-cut takes over from whatever was held: the reader's picture is the one kept now.
+        holding = nil
+        let bands = Set(rows(in: drawn).compactMap(Self.bandID))
+        let anchor =
+            markers.line.y > 1 ? markers.first(reaching: markers.line.y, among: bands) : nil
+        drawnCut = new
+        guard let anchor, let row = tileID(holding: anchor, in: new) else { return }
+        holding = HeldFile(file: anchor, byHeading: false, listGeneration: listGeneration())
+        // The app's own move, as a landing's is: the dock counts it as no reader's scroll.
+        dock?.askedToJump()
+        proxy.scrollTo(row, anchor: .top)
+    }
+
+    /// The cut asked for now: the host's grouping and the device's tile layout.
+    private var wantedCut: LibraryGridCut {
+        LibraryGridCut(grouping: grouping, tiles: preferences.tileLayout)
+    }
+
+    /// The cut the stack is drawn in, before its first re-cut the one it was built with.
+    private var cut: LibraryGridCut { drawnCut ?? wantedCut }
+
+    /// The lazy stack's rows in a cut, its tile layout included: a band's files depend on it.
+    private func rows(in cut: LibraryGridCut) -> [LibraryAllRow] {
+        switch cut.grouping {
+        case .byDay:
+            MediaLibraryPresentation.daySections(for: items, tiles: cut.tiles).flatMap(\.rows)
+        case .flat: MediaLibraryPresentation.flatRows(for: items, tiles: cut.tiles)
+        }
+    }
+
+    private static func bandID(_ row: LibraryAllRow) -> String? {
+        guard case .band(let band, _) = row else { return nil }
+        return band.id
+    }
+
+    /// The band a file sits in, in a cut — what a flat landing and a re-cut scroll to. A band is
+    /// named by its FIRST file, so the file is looked for among each band's pictures: in the other
+    /// cut it may well be a band's second or third.
+    private func tileID(holding fileID: String, in cut: LibraryGridCut) -> String? {
+        for row in rows(in: cut) {
+            if case .band(let band, _) = row, band.pictures.contains(where: { $0.id == fileID }) {
+                return band.id
+            }
+        }
+        return nil
     }
 
     /// Brings the band holding the press's file to the top, again as the lazy stack measures, until
@@ -958,16 +1089,10 @@ struct LibraryGrid: View {
     }
 
     /// The band of the grid as drawn now that holds `fileID`: in a flat grid as in a grid by day.
+    /// Read from the cut the stack is drawn in, its tile layout included — under Square Grid the
+    /// bands are rows of three, so the mixed layout's bands name rows that are not drawn.
     private func bandID(holding fileID: String) -> String? {
-        let rows =
-            grouping == .byDay
-            ? sections.flatMap(\.rows) : MediaLibraryPresentation.flatRows(for: items)
-        for row in rows {
-            if case .band(let band, _) = row, band.pictures.contains(where: { $0.id == fileID }) {
-                return row.id
-            }
-        }
-        return nil
+        tileID(holding: fileID, in: cut)
     }
 
     /// The landing's heading is built and scrolled to: the landing is done with, here and in the
@@ -983,7 +1108,7 @@ struct LibraryGrid: View {
     /// day that holds the row the store found.
     private func headingID(holding fileID: String) -> String? {
         // A flat grid has no heading to land on.
-        guard grouping == .byDay else { return nil }
+        guard cut.grouping == .byDay else { return nil }
         for month in sections {
             if let day = month.days.first(where: { $0.pictures.contains { $0.id == fileID } }) {
                 return day.headingID
@@ -1040,7 +1165,7 @@ struct LibraryGrid: View {
     /// bands with no header and no heading among them (MEMNG-740).
     private var gallery: some View {
         LazyVStack(spacing: 0) {
-            switch grouping {
+            switch cut.grouping {
             case .byDay:
                 ForEach(sections) { month in
                     // The header title's 16 pt edge, which the day heading shares (MEMNG-756).
@@ -1056,7 +1181,7 @@ struct LibraryGrid: View {
                     }
                 }
             case .flat:
-                ForEach(MediaLibraryPresentation.flatRows(for: items)) { row in
+                ForEach(MediaLibraryPresentation.flatRows(for: items, tiles: cut.tiles)) { row in
                     element(row)
                 }
             }
@@ -1129,7 +1254,7 @@ struct LibraryGrid: View {
 
     private var sections: [LibraryAllMonth] {
         // The library's one calendar, never the device's (`libraryTimeZone`).
-        MediaLibraryPresentation.daySections(for: items)
+        MediaLibraryPresentation.daySections(for: items, tiles: cut.tiles)
     }
 
     /// The gallery's identity in the page, for a scroll to reach it while the page has not built it.

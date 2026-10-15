@@ -118,7 +118,8 @@ struct HeaderGlassCircle: View {
 
 /// The round filter button's menu, in the Photos app's shape (MEMNG-779, WPN-12 phase 1): the
 /// kinds as an inline Picker under the heading "Filter", which is what draws the checkmark on the
-/// chosen row; a divider; then a nested "Sort By" menu whose label says the order in force.
+/// chosen row; a divider; then a nested "Sort By" menu whose label says the order in force, and a
+/// nested "View Options" menu holding Group by Day (MEMNG-818) and the tile layout (MEMNG-821).
 ///
 /// The tags are not here — they are reached from Collections — and neither is clearing the media
 /// cache, which is the Settings app's Storage group (MEMNG-781).
@@ -128,6 +129,8 @@ struct LibraryFilterMenuContent: View {
 
     @Binding var filter: MediaLibraryFilter
     @Binding var order: MediaLibraryOrder
+    @Binding var groupByDay: Bool
+    @Binding var tileLayout: LibraryTileLayout
 
     var body: some View {
         Picker("Filter", selection: $filter) {
@@ -138,6 +141,7 @@ struct LibraryFilterMenuContent: View {
         .pickerStyle(.inline)
         Divider()
         SortByMenu(order: $order)
+        ViewOptionsMenu(groupByDay: $groupByDay, tileLayout: $tileLayout)
     }
 }
 
@@ -182,6 +186,39 @@ struct SortByMenuContent: View {
         Picker("Sort By", selection: $order) {
             ForEach(Self.orders) { order in
                 Text(order.label).tag(order)
+            }
+        }
+        .pickerStyle(.inline)
+        .labelsHidden()
+    }
+}
+
+/// The filter menu's nested "View Options" menu, as Photos names it: Group by Day (MEMNG-818),
+/// then the tile layout (MEMNG-821). Two options only: a third is a decision of its own, not a row
+/// to add here.
+struct ViewOptionsMenu: View {
+    @Binding var groupByDay: Bool
+    @Binding var tileLayout: LibraryTileLayout
+
+    var body: some View {
+        Menu("View Options") {
+            ViewOptionsMenuContent(groupByDay: $groupByDay, tileLayout: $tileLayout)
+        }
+    }
+}
+
+/// View Options' two groups: a toggle, which a menu draws as a row with a checkmark while it is
+/// on; a divider; then Mixed Sizes and Square Grid as an inline Picker, the one in force ticked.
+struct ViewOptionsMenuContent: View {
+    @Binding var groupByDay: Bool
+    @Binding var tileLayout: LibraryTileLayout
+
+    var body: some View {
+        Toggle("Group by Day", isOn: $groupByDay)
+        Divider()
+        Picker("Tile Layout", selection: $tileLayout) {
+            ForEach(LibraryTileLayout.allCases) { layout in
+                Text(layout.label).tag(layout)
             }
         }
         .pickerStyle(.inline)

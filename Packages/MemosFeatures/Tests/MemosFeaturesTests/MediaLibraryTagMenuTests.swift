@@ -129,10 +129,33 @@ struct LibraryFilterMenuRenderTests {
     private struct FilterHarness: View {
         @State var filter: MediaLibraryFilter
         @State var order: MediaLibraryOrder
+        @State var groupByDay = true
+        @State var tileLayout = LibraryTileLayout.mixed
 
         var body: some View {
             List {
-                LibraryFilterMenuContent(filter: $filter, order: $order)
+                LibraryFilterMenuContent(
+                    filter: $filter, order: $order, groupByDay: $groupByDay,
+                    tileLayout: $tileLayout)
+            }
+        }
+    }
+
+    /// The View Options menu's row and, under it, its one item, bound to the device's preference
+    /// as the screen binds it (MEMNG-818).
+    private struct ViewOptionsHarness: View {
+        let preferences: LibraryPreferences
+
+        var body: some View {
+            let grouped = Binding(
+                get: { preferences.groupByDay },
+                set: { preferences.select(groupByDay: $0) })
+            let tiles = Binding(
+                get: { preferences.tileLayout },
+                set: { preferences.select(tileLayout: $0) })
+            List {
+                ViewOptionsMenu(groupByDay: grouped, tileLayout: tiles)
+                ViewOptionsMenuContent(groupByDay: grouped, tileLayout: tiles)
             }
         }
     }
@@ -221,7 +244,9 @@ struct LibraryFilterMenuRenderTests {
     /// The nested menu's row reads "Sort By" and then the order in force.
     private static func isSortBy(_ label: String) -> Bool { label.hasPrefix("Sort By") }
 
-    @Test("the filter menu lists Filter, its three kinds, a divider and Sort By, nothing else")
+    @Test(
+        "the filter menu lists Filter, its three kinds, a divider, Sort By and View Options, nothing else"
+    )
     func filterMenuRows() async {
         let window = Self.host(FilterHarness(filter: .all, order: .newestFirst))
         defer {
@@ -230,12 +255,14 @@ struct LibraryFilterMenuRenderTests {
         }
         let found = await Self.settle(window) { rows in
             rows.contains { Self.isSortBy($0.label) } && rows.contains { $0.label == "Videos" }
+                && rows.contains { $0.label == "View Options" }
         }
 
-        // Exactly these, in this order: no tag row, no "Clear media cache", no second sort group.
+        // Exactly these, in this order: no tag row, no "Clear media cache", no second sort group,
+        // and View Options last (MEMNG-818).
         let drawn = found.map { Self.isSortBy($0.label) ? "Sort By" : $0.label }
         #expect(
-            drawn == ["Filter", "All Items", "Photos", "Videos", "Sort By"],
+            drawn == ["Filter", "All Items", "Photos", "Videos", "Sort By", "View Options"],
             "the menu draws \(found.map(\.label))")
         let ticked = found.filter(\.selected).map(\.label)
         #expect(ticked == ["All Items"], "ticked: \(ticked)")
@@ -255,17 +282,103 @@ struct LibraryFilterMenuRenderTests {
         }
 
         // The divider between the kinds and Sort By: a list draws a Divider as nothing it reads
-        // out, so it is read from the menu's own body — the picker, the Divider, then the nested
-        // menu, in that order and nothing between.
+        // out, so it is read from the menu's own body — the picker, the Divider, the nested Sort
+        // By menu, then the nested View Options menu, in that order and nothing between.
         let content = LibraryFilterMenuContent(
-            filter: .constant(.all), order: .constant(.newestFirst))
+            filter: .constant(.all), order: .constant(.newestFirst), groupByDay: .constant(true),
+            tileLayout: .constant(.mixed))
         let parts =
             Mirror(reflecting: content.body).descendant("value").map { tuple in
                 Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
             } ?? []
-        #expect(parts.count == 3, "the menu's body is \(type(of: content.body))")
-        #expect(parts.count == 3 && parts[1] == "Divider", "no divider second: \(parts)")
-        #expect(parts.last == "SortByMenu", "the nested menu is not last: \(parts)")
+        #expect(parts.count == 4, "the menu's body is \(type(of: content.body))")
+        #expect(parts.count == 4 && parts[1] == "Divider", "no divider second: \(parts)")
+        #expect(parts.count == 4 && parts[2] == "SortByMenu", "Sort By is not third: \(parts)")
+        #expect(parts.last == "ViewOptionsMenu", "View Options is not last: \(parts)")
+
+        // View Options' own two groups (MEMNG-821): the toggle, a divider, then the layout pair.
+        let options = ViewOptionsMenuContent(
+            groupByDay: .constant(true), tileLayout: .constant(.mixed))
+        let groups =
+            Mirror(reflecting: options.body).descendant("value").map { tuple in
+                Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
+            } ?? []
+        #expect(groups.count == 3, "View Options' body is \(type(of: options.body))")
+        #expect(groups.first?.hasPrefix("Toggle") == true, "no toggle first: \(groups)")
+        #expect(groups.count == 3 && groups[1] == "Divider", "no divider second: \(groups)")
+    }
+
+    /// MEMNG-818: the one item under View Options turns Group by Day off and on again, and what it
+    /// turns is the device's stored choice, not a copy of it.
+    @Test("View Options holds Group by Day and the layout pair, each moving the stored value")
+    func groupByDayItemTogglesTheStoredValue() async throws {
+        let name = "memosng.library.tests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let preferences = LibraryPreferences(defaults: defaults)
+        let window = Self.host(ViewOptionsHarness(preferences: preferences))
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let found = await Self.settle(window) { rows in
+            rows.contains { $0.label == "View Options" }
+                && rows.contains { $0.label == "Group by Day" }
+                && rows.contains { $0.label == "Square Grid" }
+        }
+        #expect(
+            found.map(\.label) == ["View Options", "Group by Day", "Mixed Sizes", "Square Grid"],
+            "View Options draws \(found.map(\.label))")
+        let pair: Set = ["Mixed Sizes", "Square Grid"]
+        let ticked = found.filter { $0.selected && pair.contains($0.label) }.map(\.label)
+        #expect(ticked == ["Mixed Sizes"], "ticked with nothing chosen: \(ticked)")
+        let before = found.first { $0.label == "Group by Day" }?.value
+
+        #expect(Self.activate("Group by Day", in: window), "the item took no press")
+        #expect(!preferences.groupByDay, "the press left Group by Day on")
+        #expect(defaults.object(forKey: LibraryPreferences.groupByDayKey) as? Bool == false)
+        // The item reflects what is stored: its value moved with the press.
+        let off = await Self.settle(window) { rows in
+            rows.contains { $0.label == "Group by Day" && $0.value != before }
+        }
+        #expect(
+            off.first { $0.label == "Group by Day" }?.value != before,
+            "the item still reads \(String(describing: before)) with the choice off")
+
+        #expect(Self.activate("Group by Day", in: window), "the item took no second press")
+        #expect(preferences.groupByDay, "the second press left Group by Day off")
+        #expect(LibraryPreferences(defaults: defaults).groupByDay, "the store kept it off")
+
+        // The second group: Square Grid chosen is stored, and ticked in Mixed Sizes' place.
+        #expect(Self.activate("Square Grid", in: window), "Square Grid took no press")
+        #expect(preferences.tileLayout == .square, "the press left Mixed Sizes chosen")
+        #expect(defaults.string(forKey: LibraryPreferences.tileLayoutKey) == "square")
+        let square = await Self.settle(window) { rows in
+            rows.contains { $0.selected && $0.label == "Square Grid" }
+        }
+        let now = square.filter { $0.selected && pair.contains($0.label) }.map(\.label)
+        #expect(now == ["Square Grid"], "ticked under Square Grid: \(now)")
+        #expect(preferences.groupByDay, "choosing a layout moved Group by Day")
+    }
+
+    /// Presses the switch reading `label` as VoiceOver would, or — when the hosted list's element
+    /// took no activation — flips its `UISwitch` and sends the event a tap sends.
+    private static func activate(_ label: String, in window: UIWindow) -> Bool {
+        var stack: [Any] = [window]
+        var target: NSObject?
+        var control: UISwitch?
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject else { continue }
+            if target == nil, object.accessibilityLabel == label { target = object }
+            if control == nil, let flip = object as? UISwitch { control = flip }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        if target?.accessibilityActivate() == true { return true }
+        guard let control else { return false }
+        control.setOn(!control.isOn, animated: false)
+        control.sendActions(for: .valueChanged)
+        return true
     }
 
     @Test("Sort By ticks the store's order and its label says it, as the order changes")

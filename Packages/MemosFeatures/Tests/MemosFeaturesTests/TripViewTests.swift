@@ -301,6 +301,10 @@ struct TripScreenRenderTests {
     /// a tile of one block, and no day heading over any of them.
     @Test("the grid is one block of every member, with no day heading over any of them")
     func theGridHasNoDays() async {
+        // The device's Group by Day (MEMNG-818) on, as on a device that never chose — set here,
+        // not assumed, so a value an earlier run stored cannot decide the case: a trip grid that
+        // read it would draw the Library's days here. It never reads the key.
+        LibraryPreferences.shared.select(groupByDay: true)
         let wire = TripWire()
         let stores = stores()
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")

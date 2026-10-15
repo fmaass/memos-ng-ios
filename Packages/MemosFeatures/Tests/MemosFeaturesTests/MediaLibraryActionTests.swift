@@ -773,6 +773,68 @@ struct LibraryPreferencesTests {
         #expect(LibraryPreferences.order(fromStored: "newestFirst") == .newestFirst)
     }
 
+    /// MEMNG-818: All is grouped by day until this device says otherwise — decision 13 stays the
+    /// default — and a value this version cannot read is the default too.
+    @Test("Group by Day reads on for an absent or unknown value and the stored value otherwise")
+    func groupByDayDefaultAndStored() {
+        #expect(LibraryPreferences.groupByDay(fromStored: nil))
+        #expect(LibraryPreferences.groupByDay(fromStored: "flat"))
+        #expect(LibraryPreferences.groupByDay(fromStored: ["byDay"]))
+        // The control: the two it DOES know are read back.
+        #expect(!LibraryPreferences.groupByDay(fromStored: false))
+        #expect(LibraryPreferences.groupByDay(fromStored: true))
+
+        let (defaults, name) = scratch()
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let fresh = LibraryPreferences(defaults: defaults)
+        #expect(fresh.groupByDay, "a device that never chose is not grouped by day")
+        #expect(fresh.allGrouping == .byDay)
+
+        defaults.set("sideways", forKey: LibraryPreferences.groupByDayKey)
+        #expect(LibraryPreferences(defaults: defaults).groupByDay, "an unknown value stuck")
+
+        fresh.select(groupByDay: false)
+        #expect(!fresh.groupByDay)
+        #expect(fresh.allGrouping == .flat)
+        #expect(defaults.object(forKey: LibraryPreferences.groupByDayKey) as? Bool == false)
+        // A second store over the SAME suite is what the next launch is; the order is untouched.
+        let relaunched = LibraryPreferences(defaults: defaults)
+        #expect(!relaunched.groupByDay, "the choice did not survive the next launch")
+        #expect(relaunched.allGrouping == .flat)
+        #expect(relaunched.order == .newestFirst)
+
+        relaunched.select(groupByDay: true)
+        #expect(LibraryPreferences(defaults: defaults).groupByDay)
+    }
+
+    /// MEMNG-821: Mixed Sizes until this device says otherwise, and a name this version does not
+    /// know is Mixed Sizes too.
+    @Test("the tile layout reads Mixed Sizes for an absent or unknown value, else the stored one")
+    func tileLayoutDefaultAndStored() {
+        #expect(LibraryPreferences.tileLayout(fromStored: nil) == .mixed)
+        #expect(LibraryPreferences.tileLayout(fromStored: "") == .mixed)
+        #expect(LibraryPreferences.tileLayout(fromStored: "hexagons") == .mixed)
+        // The control: the two it DOES know are read back.
+        #expect(LibraryPreferences.tileLayout(fromStored: "square") == .square)
+        #expect(LibraryPreferences.tileLayout(fromStored: "mixed") == .mixed)
+        #expect(LibraryTileLayout.allCases.map(\.label) == ["Mixed Sizes", "Square Grid"])
+
+        let (defaults, name) = scratch()
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let fresh = LibraryPreferences(defaults: defaults)
+        #expect(fresh.tileLayout == .mixed, "a device that never chose is not on Mixed Sizes")
+        fresh.select(tileLayout: .square)
+        #expect(fresh.tileLayout == .square)
+        #expect(defaults.string(forKey: LibraryPreferences.tileLayoutKey) == "square")
+        // The next launch reads it; Group by Day and the order are untouched by it.
+        let relaunched = LibraryPreferences(defaults: defaults)
+        #expect(relaunched.tileLayout == .square, "the choice did not survive the next launch")
+        #expect(relaunched.groupByDay)
+        #expect(relaunched.order == .newestFirst)
+        relaunched.select(tileLayout: .mixed)
+        #expect(LibraryPreferences(defaults: defaults).tileLayout == .mixed)
+    }
+
     /// The menu's two rows and what each of them asks the server for.
     @Test("both directions are offered, under Photos' own words")
     func menuRows() {

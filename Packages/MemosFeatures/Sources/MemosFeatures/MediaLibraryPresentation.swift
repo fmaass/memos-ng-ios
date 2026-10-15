@@ -109,6 +109,34 @@ public struct LibraryBandPlace: Equatable, Sendable {
     public let last: Bool
 }
 
+/// View Options' second group (MEMNG-821): the grid's frames as the mosaic cycles them, or every
+/// picture a square. The device's choice (`LibraryPreferences.tileLayout`), read by every
+/// `LibraryGrid`; the Months view's busiest-days mosaic is not a grid of pictures and keeps its own.
+public enum LibraryTileLayout: String, CaseIterable, Identifiable, Sendable {
+    case mixed
+    case square
+
+    public var id: String { rawValue }
+
+    /// The menu's words, Photos' own.
+    public var label: String {
+        switch self {
+        case .mixed: "Mixed Sizes"
+        case .square: "Square Grid"
+        }
+    }
+
+    /// The frames for `count` pictures: the mosaic's own, or as many squares. Replaced BEFORE the
+    /// bands are cut, so `mosaicBands` makes rows of three and a band is still named by its first
+    /// file.
+    func slots(_ count: Int, mosaic: (Int) -> [MosaicSlot]) -> [MosaicSlot] {
+        switch self {
+        case .mixed: mosaic(count)
+        case .square: Array(repeating: .square, count: count)
+        }
+    }
+}
+
 /// One row of the All view's lazy stack: a day's heading, or one band of its block.
 public enum LibraryAllRow: Identifiable, Equatable, Sendable {
     case heading(LibraryDayGroup)
@@ -207,9 +235,11 @@ public enum MediaLibraryPresentation {
     ///
     /// A day's index counts days across the WHOLE list, so the cycle runs on over a month boundary,
     /// and every picture keeps its index in the whole list — the number the paging trigger is
-    /// measured in — rather than its place in its day.
+    /// measured in — rather than its place in its day. Under `.square` every frame is a square
+    /// (MEMNG-821), so the bands are rows of three.
     public static func daySections(
-        for items: [LibraryRow], timeZone: String = libraryTimeZone
+        for items: [LibraryRow], timeZone: String = libraryTimeZone,
+        tiles: LibraryTileLayout = .mixed
     ) -> [LibraryAllMonth] {
         // Rows are unique by file (`MediaLibraryStore.merged`), so a uid names one place.
         let position = Dictionary(
@@ -220,7 +250,7 @@ public enum MediaLibraryPresentation {
         return groupByMonth(items, timeZone: timeZone).map { month in
             let days = groupByDay(month.items, timeZone: timeZone).map { day in
                 defer { dayIndex += 1 }
-                let slots = daySlots(day.items.count, dayIndex: dayIndex)
+                let slots = tiles.slots(day.items.count) { daySlots($0, dayIndex: dayIndex) }
                 let pictures = zip(day.items, slots).map { row, slot in
                     LibraryDayPicture(
                         attachment: row.attachment, index: position[row.id] ?? 0, slot: slot)
@@ -244,9 +274,10 @@ public enum MediaLibraryPresentation {
     /// picture keeps its index in the whole list as `daySections` gives it. Each band still names
     /// the day its first picture was taken on, which only the date pill reads.
     public static func flatRows(
-        for items: [LibraryRow], timeZone: String = libraryTimeZone
+        for items: [LibraryRow], timeZone: String = libraryTimeZone,
+        tiles: LibraryTileLayout = .mixed
     ) -> [LibraryAllRow] {
-        let slots = daySlots(items.count)
+        let slots = tiles.slots(items.count) { daySlots($0) }
         let pictures = zip(items, slots).enumerated().map { index, placed in
             LibraryDayPicture(attachment: placed.0.attachment, index: index, slot: placed.1)
         }
