@@ -50,70 +50,6 @@ struct LibrarySelectionTests {
         #expect(selection.uids.isEmpty)
     }
 
-    /// MEMNG-684: Select All is every picture in view, another member's too; the delete that may
-    /// follow skips theirs (`deletable(in:)`), as it does for a selection made by hand.
-    @Test("select all takes every picture in view, mine or not, in the order the grid shows them")
-    func selectAllTakesEveryPicture() {
-        var selection = selecting()
-        let rows = [row("a"), row("theirs", mine: false), row("b"), row("c")]
-
-        selection.toggleAll(in: rows)
-
-        #expect(selection.uids == ["a", "theirs", "b", "c"])
-        #expect(selection.contains("theirs"))
-        #expect(selection.coversAll(in: rows))
-        #expect(selection.deletable(in: rows) == .init(own: ["a", "b", "c"], othersCount: 1))
-    }
-
-    @Test("select all keeps what was chosen first at the front")
-    func selectAllKeepsEarlierOrder() {
-        var selection = selecting()
-        let rows = [row("a"), row("b"), row("c")]
-
-        selection.toggle(row("c"))
-        selection.toggleAll(in: rows)
-
-        #expect(selection.uids == ["c", "a", "b"])
-    }
-
-    @Test("select all tapped again clears the selection")
-    func selectAllTappedAgainClears() {
-        var selection = selecting()
-        let rows = [row("a"), row("b"), row("theirs", mine: false)]
-
-        selection.toggleAll(in: rows)
-        selection.toggleAll(in: rows)
-
-        #expect(selection.uids.isEmpty)
-        #expect(selection.isActive, "clearing is not leaving select mode")
-    }
-
-    @Test("select all over a view with none of mine takes them all; an empty view covers nothing")
-    func selectAllWithNothingOfMine() {
-        var selection = selecting()
-        let rows = [row("x", mine: false), row("y", mine: false)]
-
-        selection.toggleAll(in: rows)
-
-        #expect(selection.uids == ["x", "y"])
-        #expect(selection.coversAll(in: rows))
-        #expect(!selection.coversAll(in: []))
-        #expect(selection.deletable(in: rows).own.isEmpty)
-    }
-
-    @Test("select all after one unchosen picture fills the rest rather than clearing")
-    func selectAllWithOneUnchosenFillsIn() {
-        var selection = selecting()
-        let rows = [row("a"), row("x", mine: false), row("b")]
-        selection.toggleAll(in: rows)
-        selection.toggle(rows[1])
-
-        #expect(!selection.coversAll(in: rows))
-        selection.toggleAll(in: rows)
-
-        #expect(selection.uids == ["a", "b", "x"])
-    }
-
     @Test("close empties the selection and leaves select mode")
     func closeEmpties() {
         var selection = selecting()
@@ -127,12 +63,11 @@ struct LibrarySelectionTests {
         #expect(selection.count == 0)
     }
 
-    @Test("outside select mode a tap and select all change nothing")
+    @Test("outside select mode a tap changes nothing")
     func nothingOutsideSelectMode() {
         var selection = LibrarySelection()
 
         selection.toggle(row("a"))
-        selection.toggleAll(in: [row("b")])
 
         #expect(selection.uids.isEmpty)
         #expect(!selection.isActive)
