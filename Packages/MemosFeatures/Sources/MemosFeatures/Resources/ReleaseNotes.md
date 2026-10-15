@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (48)
+
+- Show Selected no longer turns the screen black when the selection has pictures from more than one day.
+- The Library's filter menu has View Options: Group by Day, which is on, and a choice between Mixed Sizes and a Square Grid of three to a row; turning Group by Day off shows one flat grid without day headings, and either switch keeps the picture I was looking at in view.
+- The choice is kept, so the grid opens the way I left it.
+- Please select pictures from two different days and tap Show Selected, then open the Library's filter, turn Group by Day off and on, and switch between Mixed Sizes and Square Grid while scrolled into the middle of the grid.
+
 ## 2.4.0 (47)
 
 - The Library's round button is now a filter: All items, Photos or Videos, with Sort By underneath, laid out like the Photos app.
