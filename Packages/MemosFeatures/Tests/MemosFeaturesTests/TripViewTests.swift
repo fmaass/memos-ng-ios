@@ -2704,3 +2704,180 @@ extension TripScreenRenderTests {
         #expect(journalKept, "the journal lost p1's new signature")
     }
 }
+
+// MARK: - The trip on the system bar (MEMNG-780)
+
+/// The trip's chrome is the system navigation bar's (WPN-12 phase 2): Filter, the ellipsis menu
+/// and Select in that order; in select mode the shared actions menu with the one destructive
+/// "Remove N pictures from trip…", asked through a dialog; the shared select bar's Show Selected.
+/// A hosted window opens no menu, so a menu's rows are read off the bar item that holds it and a
+/// row is pressed through its own action (`TripMenuProbe`).
+extension TripScreenRenderTests {
+    @Test("the trip's bar holds Filter, the ellipsis menu and Select in that order; its rows")
+    func theTripBarInOrder() async {
+        await selectingTrip(TripWire()) { screen, _ in
+            let labels = [TripView.filterButton, TripView.manageButton, TripView.selectButton]
+            let drawn = await screen.until {
+                labels.allSatisfy { screen.element(labelled: $0) != nil }
+            }
+            #expect(drawn, "the bar lacks \(labels): \(TripProbe.labels(in: screen.window))")
+            let xs = labels.map { screen.element(labelled: $0)?.accessibilityFrame.minX ?? -1 }
+            #expect(xs == xs.sorted() && Set(xs).count == 3, "not in that order: \(xs)")
+            let manage = TripMenuProbe.rows(of: TripView.manageButton, in: screen.window)
+            #expect(
+                manage == [TripView.renameButton, TripView.spanButton, TripView.deleteButton],
+                "the ellipsis menu's rows: \(manage)")
+            let filter = TripMenuProbe.rows(of: TripView.filterButton, in: screen.window)
+            #expect(filter.contains(TripView.removedRowButton), "the filter menu: \(filter)")
+            #expect(filter.contains("Videos") && filter.contains("Oldest First"), "\(filter)")
+        }
+    }
+
+    @Test("Remove with three chosen asks first; only the dialog's Remove sends the one removal")
+    func removeAsksFirst() async {
+        for confirm in [true, false] {
+            let wire = TripWire()
+            await selectingTrip(wire) { screen, _ in
+                let entered = await pressBar("Select", on: screen) {
+                    screen.says(LibrarySelectionPresentation.showSelectedText(0))
+                }
+                #expect(entered, "Select stood no toolbar")
+                let photos = TripProbe.photos(in: screen.window)
+                for index in 0..<3 {
+                    #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[index]))
+                }
+                #expect(await screen.until { screen.says("Show Selected (3)") })
+                let row = TripView.removeRowTitle(3)
+                #expect(row == "Remove 3 pictures from trip…")
+                #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
+                let asked = await screen.until { TripMenuProbe.alert(over: screen.host) != nil }
+                let alert = TripMenuProbe.alert(over: screen.host)
+                #expect(asked, "no dialog")
+                #expect(alert?.title == "Remove 3 pictures from Portugal 2026?")
+                #expect(alert?.message == "They stay in your library.")
+                #expect(wire.transport.writes.isEmpty, "a write before the answer")
+                let answer = confirm ? TripView.removeConfirmButton : "Cancel"
+                #expect(TripProbe.pressAlert(answer, in: screen.host), "\(answer) took no press")
+                if confirm {
+                    // One call into the store's remove: one exclusion per picture on the wire.
+                    let sent = await screen.until { wire.transport.writes.count == 3 }
+                    #expect(sent, "the removal wrote \(wire.transport.writes)")
+                    #expect(
+                        wire.transport.trips.rows.first?.exclusions.sorted() == ["p0", "p1", "p2"])
+                } else {
+                    await screen.settle(turns: 6)
+                    #expect(wire.transport.writes.isEmpty, "Cancel wrote \(wire.transport.writes)")
+                }
+            }
+        }
+    }
+
+    @Test("the Removed from trip row presents the Removed sheet, and Add Back works in it")
+    func theRemovedRowPresentsTheSheet() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p3"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 4 }
+            let row = TripView.removedRowButton
+            #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
+            let listed = await screen.until {
+                screen.element(labelled: TripRemovedList.addBackButton) != nil
+            }
+            #expect(listed, "no Removed sheet: \(TripProbe.labels(in: screen.window))")
+            #expect(screen.press(TripRemovedList.addBackButton), "Add Back took no press")
+            let back = await screen.until { wire.transport.trips.rows.first?.exclusions == [] }
+            #expect(back, "Add Back left the picture removed")
+        }
+    }
+
+    @Test("the trip's select bar narrows the grid to the chosen pictures and back")
+    func showSelectedOnATrip() async {
+        await selectingTrip(TripWire()) { screen, _ in
+            _ = await pressBar("Select", on: screen) {
+                screen.says(LibrarySelectionPresentation.showSelectedText(0))
+            }
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[1]))
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[3]))
+            #expect(screen.press("Show Selected (2)"), "Show Selected took no press")
+            let narrowed = await screen.until {
+                TripProbe.tiles(in: screen.window) == ["p1", "p3"]
+            }
+            #expect(narrowed, "narrowed to \(TripProbe.tiles(in: screen.window))")
+            #expect(screen.press("Show Selected (2)"), "the second press took none")
+            #expect(await screen.until { TripProbe.tiles(in: screen.window) == Self.files })
+        }
+    }
+
+    @Test("a filter reads the member route with its type and order; the hero keeps every member")
+    func aFilterReadsTheServer() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            let before = wire.transport.trips.calls(TripRows.members).count
+            manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
+            let read = await screen.until {
+                wire.transport.trips.calls(TripRows.members).dropFirst(before).contains {
+                    TripRows.query($0.path, "type") == "image"
+                        && TripRows.query($0.path, "order") == "taken_desc"
+                }
+            }
+            #expect(read, "no filtered read: \(wire.transport.trips.calls(TripRows.members))")
+            #expect(screen.says("5 photos"), "the hero lost members to a filter")
+            #expect(stores.1.members(for: record).count == 5, "the members moved with a filter")
+        }
+    }
+}
+
+/// A navigation bar's menus, read and pressed without opening them: SwiftUI hands a bar item's
+/// menu over as deferred elements (`CollectionScreenTests.provided(by:)`), and a row's own
+/// `UIAction` is performed as the menu would perform it.
+@MainActor
+enum TripMenuProbe {
+    /// The leaf rows, in order, of the menu the bar item or button labelled `label` holds.
+    static func rows(of label: String, in window: UIWindow) -> [String] {
+        let holders = CollectionScreenTests.menuHolders(in: window)
+        guard let menu = holders.first(where: { $0.name.hasSuffix(" \(label)") && $0.menu != nil })
+        else { return [] }
+        return leaves(menu.menu).map(title)
+    }
+
+    /// Performs the first row titled `title` of any menu under `window`.
+    static func perform(_ title: String, in window: UIWindow) -> Bool {
+        for holder in CollectionScreenTests.menuHolders(in: window) {
+            for case let action as UIAction in leaves(holder.menu) where action.title == title {
+                action.performWithSender(nil, target: nil)
+                return true
+            }
+        }
+        return false
+    }
+
+    /// The alert presented over `host`, anywhere in its chain of presentations.
+    static func alert(over host: UIViewController) -> UIAlertController? {
+        var next = host.presentedViewController
+        while let controller = next, !(controller is UIAlertController) {
+            next = controller.presentedViewController
+        }
+        return next as? UIAlertController
+    }
+
+    private static func leaves(_ element: UIMenuElement?) -> [UIMenuElement] {
+        guard let element else { return [] }
+        if let menu = element as? UIMenu { return menu.children.flatMap(leaves) }
+        if let deferred = element as? UIDeferredMenuElement {
+            return CollectionScreenTests.provided(by: deferred).flatMap(leaves)
+        }
+        return [element]
+    }
+
+    private static func title(_ element: UIMenuElement) -> String {
+        (element as? UIAction)?.title ?? (element as? UICommand)?.title ?? "?"
+    }
+}

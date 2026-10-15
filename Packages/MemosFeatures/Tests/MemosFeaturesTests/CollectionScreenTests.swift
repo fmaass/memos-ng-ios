@@ -201,7 +201,7 @@ struct CollectionScreenTests {
     /// menu opens: SwiftUI hands a bar item's menu over as one deferred element, built on demand.
     /// The element keeps its provider in an object of its own (`_elementProvider`), which holds
     /// the block; only an instance variable that is a block (`@?`) is ever called.
-    private static func provided(by deferred: UIDeferredMenuElement) -> [UIMenuElement] {
+    static func provided(by deferred: UIDeferredMenuElement) -> [UIMenuElement] {
         typealias Completion = @convention(block) ([UIMenuElement]) -> Void
         typealias Provider = @convention(block) (@escaping Completion) -> Void
         guard let found = ivar(named: "_elementProvider", of: deferred) else { return [] }
@@ -220,13 +220,13 @@ struct CollectionScreenTests {
     }
 
     /// `object`'s object instance variable `name`, looked up on its class and its superclasses.
-    private static func ivar(named name: String, of object: AnyObject) -> Any? {
+    static func ivar(named name: String, of object: AnyObject) -> Any? {
         guard let ivar = class_getInstanceVariable(type(of: object), name) else { return nil }
         return object_getIvar(object, ivar)
     }
 
     /// A class's own instance variables: name and type encoding.
-    private static func ivarList(of type: AnyClass) -> [(name: String, encoding: String)] {
+    static func ivarList(of type: AnyClass) -> [(name: String, encoding: String)] {
         var count: UInt32 = 0
         guard let ivars = class_copyIvarList(type, &count) else { return [] }
         defer { free(ivars) }
@@ -239,7 +239,7 @@ struct CollectionScreenTests {
 
     /// What may hold a menu: every bar button item of the navigation bars under `window`, and every
     /// button.
-    private static func menuHolders(in window: UIWindow) -> [(menu: UIMenu?, name: String)] {
+    static func menuHolders(in window: UIWindow) -> [(menu: UIMenu?, name: String)] {
         var found: [(menu: UIMenu?, name: String)] = []
         var views: [UIView] = [window]
         while let view = views.popLast() {
