@@ -87,7 +87,13 @@
 # projects that gate on the host.
 #
 # Environment:
-#   MAC_GATE_HOST        (required) ssh alias/host of the Mac build host
+#   MAC_GATE_HOST        (required) ssh alias/host of the Mac build host, or `auto`: the run
+#                        picks the host itself from MAC_GATE_ESTATE_LOCKS — the first whose lock
+#                        is free and which answers ssh, in map order; with every host busy, a
+#                        blocking wait on the host whose lane last ran this branch (the
+#                        <artifacts>/lane-host marker, under 24 h old), else the first. The choice
+#                        and its reason are the log's `route` line; host= is on the SUMMARY and
+#                        quick lines and in the ledger's 13th field. Not for bin/testflight-cut.sh.
 #   MAC_GATE_BRANCH      override the branch that names the gate directory (default: current)
 #   MAC_GATE_SIMULATOR   run on this EXISTING, shared device by name instead of a private one.
 #                        Only for reproducing a device-specific failure — it gives up the
@@ -105,6 +111,13 @@
 #                        refuses the run (exit 15). Never set it under an outside `flock` on the
 #                        same path: the gate's own open is a second lock on that file, and it waits
 #                        forever for the wrapper that is waiting for the gate.
+#   MAC_GATE_ESTATE_LOCKS the per-host lock map, name=lock,name=lock in preference order (names:
+#                        merkur, mars). Read by `auto`, and by an explicit host when
+#                        MAC_GATE_ESTATE_LOCK is unset (it takes its own entry). An unknown name,
+#                        or `auto` without the map, refuses the run (exit 15) before any lock.
+#                        Every run that builds also holds <artifacts>/.run.lock (flock, fd 7) from
+#                        before its estate lock until it exits, so two runs of one worktree never
+#                        overlap, whatever host each one is on.
 #   MAC_GATE_RUNS_LEDGER the run ledger every run past its log's creation appends ONE row to
 #                        (default /home/fabian/projects/worktrees/gate-runs.tsv).
 #   MAC_GATE_RUNS_LOGS   where that row's durable copy of this run's complete log goes, as
@@ -144,8 +157,10 @@
 #                 (admit=13 or slot=13);
 #            14 = slot=14, in the build host's log only: its controller's ssh went away before the
 #                 slot was claimed, so it stopped waiting instead of testing for nobody;
-#            15 = MAC_GATE_ESTATE_LOCK names a lock this run could not open or take (nothing was
-#                 copied, run or written to the run ledger);
+#            15 = MAC_GATE_ESTATE_LOCK(S) names a lock this run could not open or take, the map
+#                 is missing or names an unknown host, no host of the map can take the run, or
+#                 the worktree run lock could not be taken (nothing was copied, run or written
+#                 to the run ledger);
 #            16 = mount=16: the build host's build root is not proven to be that host's designated
 #                 build image (the guard refused, or its answer could not be read), and no
 #                 valid pending marker allowed the refusal to be reported instead; nothing was
@@ -218,18 +233,176 @@ die_estate_lock() {
   printf 'mac-gate: REFUSED: %s\n' "$1" >&2
   exit 15
 }
+# --- host routing (MEMNG-824) ---------------------------------------------------------------------
+# MAC_GATE_ESTATE_LOCKS=name=lock,name=lock maps each build host to its estate lock, in preference
+# order. MAC_GATE_HOST=auto picks the host here, in the bootstrap, because the lock IS the choice
+# and it has to be held before the copy is made. The names it may hold are the mount guard's
+# profiles (scripts/gate-mount-guard.sh), and tests/gate/host-routing-test.sh holds this list to
+# them: a host without a profile is refused by the guard anyway, so it is refused here before any
+# lock is touched.
+GATE_ROUTE_HOSTS="merkur mars"
+GATE_ROUTE_NAMES=()
+GATE_ROUTE_LOCKS=()
+GATE_ROUTE_HOST=""
+GATE_ROUTE_REASON=""
+# What the bootstrap hands the copy: the route's reason, the worktree run lock's path and its wait.
+GATE_HOST_ROUTE=""
+GATE_RUN_LOCK_FILE=""
+GATE_RUN_LOCK_WAIT=""
+gate_route_parse_map() { # $1 = MAC_GATE_ESTATE_LOCKS; refuses (exit 15) before any lock is touched
+  local entry name path
+  local -a entries=()
+  GATE_ROUTE_NAMES=()
+  GATE_ROUTE_LOCKS=()
+  IFS=, read -r -a entries <<< "$1"
+  [ "${#entries[@]}" -gt 0 ] || die_estate_lock "MAC_GATE_ESTATE_LOCKS names no host (name=lock,name=lock)"
+  for entry in "${entries[@]}"; do
+    name="${entry%%=*}"
+    path="${entry#*=}"
+    [ "$entry" != "$name" ] && [ -n "$name" ] && [ -n "$path" ] \
+      || die_estate_lock "MAC_GATE_ESTATE_LOCKS entry '$entry' is not name=lock"
+    case " $GATE_ROUTE_HOSTS " in
+      *" $name "*) ;;
+      *) die_estate_lock "MAC_GATE_ESTATE_LOCKS names $name, which is not a build host this gate knows ($GATE_ROUTE_HOSTS)" ;;
+    esac
+    case " ${GATE_ROUTE_NAMES[*]} " in
+      *" $name "*) die_estate_lock "MAC_GATE_ESTATE_LOCKS names $name twice" ;;
+    esac
+    GATE_ROUTE_NAMES+=("$name")
+    GATE_ROUTE_LOCKS+=("$path")
+  done
+}
+gate_route_lock_of() { # $1 = host; its lock on stdout, non-zero when the map does not name it
+  local i
+  for i in "${!GATE_ROUTE_NAMES[@]}"; do
+    [ "${GATE_ROUTE_NAMES[$i]}" = "$1" ] || continue
+    printf '%s' "${GATE_ROUTE_LOCKS[$i]}"
+    return 0
+  done
+  return 1
+}
+# A free lock on a Mac that is off proves nothing, so "free" means free AND answering.
+gate_route_probe() { # $1 = host
+  timeout 30 ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$1" true </dev/null >/dev/null 2>&1 9>&- 7>&-
+}
+# The host whose lane last ran this branch from this worktree, when that was under 24 hours ago
+# (the lane reaper's own age bound): its DerivedData is likely still warm. Consulted only when
+# every host is busy, so a wrong guess costs one cold build and never a queue.
+gate_route_warm_host() { # $1 = artifacts directory, $2 = branch
+  local m_host="" m_branch="" m_time="" m_token="" then now
+  [ -n "$1" ] || return 1
+  { read -r m_host m_branch m_time m_token < "$1/lane-host"; } 2>/dev/null || return 1
+  [ -n "$m_host" ] && [ -n "$2" ] && [ "$m_branch" = "$2" ] || return 1
+  then="$(date -u -d "$m_time" +%s 2>/dev/null)" \
+    || then="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$m_time" +%s 2>/dev/null)" || return 1
+  now="$(date -u +%s)" || return 1
+  case "$then:$now" in [0-9]*:[0-9]*) ;; *) return 1 ;; esac
+  case "$then$now" in *[!0-9]*) return 1 ;; esac
+  [ $((now - then)) -ge 0 ] && [ $((now - then)) -lt 86400 ] || return 1
+  printf '%s' "$m_host"
+}
+# Leaves descriptor 9 holding the chosen host's estate lock, and sets GATE_ROUTE_HOST and
+# GATE_ROUTE_REASON. Runs in the bootstrap's own shell, never in a subshell: the lock it takes is
+# the run's. Its `exec 9>&-` lines give up a host's lock in this shell and close nothing else —
+# descriptor 7, the worktree run lock, stays open for the whole run.
+#   (a) each host in map order: flock -n; free and answering is taken at once; free but silent is
+#       let go as unreachable; held is let go as busy (a held lock is never read as a dead host);
+#   (b) no host taken: each busy host is probed; busy and answering form the wait set;
+#   (c) an empty wait set refuses (exit 15), naming every host's state;
+#   (d) the warm lane's host when it is in the set, else the first in map order;
+#   (e) a blocking flock on it — as long as its holder needs; the other host freeing meanwhile
+#       does not move the run;
+#   (f) after the take one more probe: a host that went away during the wait is let go, dropped
+#       from the set, and the choice is made again (each host can be dropped once, so this ends).
+gate_route_auto() { # $1 = artifacts directory, $2 = branch
+  local i h l pick why warm kept="" busy_names="" unreachable="" lost="" states="" n_busy=0
+  local -a state=() waitset=() rest=()
+  for i in "${!GATE_ROUTE_NAMES[@]}"; do
+    h="${GATE_ROUTE_NAMES[$i]}"
+    l="${GATE_ROUTE_LOCKS[$i]}"
+    { exec 9>>"$l"; } 2>/dev/null \
+      || die_estate_lock "cannot open the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
+    if flock -n 9 7>&-; then
+      if gate_route_probe "$h"; then
+        kept="$h"
+        break
+      fi
+      exec 9>&-
+      state[$i]=unreachable
+      unreachable="$unreachable${unreachable:+, }$h unreachable"
+    else
+      exec 9>&-
+      state[$i]=busy
+      busy_names="$busy_names${busy_names:+,}$h"
+      n_busy=$((n_busy + 1))
+    fi
+  done
+  if [ -n "$kept" ]; then
+    GATE_ROUTE_HOST="$kept"
+    states="$busy_names"
+    [ -z "$states" ] || states="${states//,/ held, } held"
+    [ -z "$unreachable" ] || states="$states${states:+, }$unreachable"
+    GATE_ROUTE_REASON="free:$kept${states:+ ($states)}"
+    return 0
+  fi
+  for i in "${!GATE_ROUTE_NAMES[@]}"; do
+    [ "${state[$i]:-}" = busy ] || continue
+    if gate_route_probe "${GATE_ROUTE_NAMES[$i]}"; then
+      waitset+=("$i")
+    else
+      state[$i]=busy-unreachable
+      unreachable="$unreachable${unreachable:+, }${GATE_ROUTE_NAMES[$i]} unreachable"
+    fi
+  done
+  warm="$(gate_route_warm_host "$1" "$2")" || warm=""
+  while :; do
+    if [ "${#waitset[@]}" -eq 0 ]; then
+      states=""
+      for i in "${!GATE_ROUTE_NAMES[@]}"; do states="$states ${GATE_ROUTE_NAMES[$i]}=${state[$i]:-unprobed}"; done
+      die_estate_lock "no build host can take this run:$states (MAC_GATE_ESTATE_LOCKS)"
+    fi
+    pick="${waitset[0]}"
+    why="first in order"
+    for i in "${waitset[@]}"; do
+      if [ -n "$warm" ] && [ "${GATE_ROUTE_NAMES[$i]}" = "$warm" ]; then pick="$i"; why="warm lane"; fi
+    done
+    h="${GATE_ROUTE_NAMES[$pick]}"
+    l="${GATE_ROUTE_LOCKS[$pick]}"
+    printf 'mac-gate: every build host is busy; waiting for %s (%s)\n' "$h" "$why" >&2
+    { exec 9>>"$l"; } 2>/dev/null \
+      || die_estate_lock "cannot open the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
+    flock 9 7>&- \
+      || die_estate_lock "cannot take the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
+    gate_route_probe "$h" && break
+    exec 9>&-
+    state[$pick]=unreachable-after-wait
+    lost="$lost${lost:+, }$h unreachable after the wait"
+    rest=()
+    for i in "${waitset[@]}"; do [ "$i" = "$pick" ] || rest+=("$i"); done
+    waitset=("${rest[@]+"${rest[@]}"}")
+  done
+  GATE_ROUTE_HOST="$h"
+  if [ "$n_busy" -eq "${#GATE_ROUTE_NAMES[@]}" ] && [ "$n_busy" -eq 2 ]; then busy_names=both; fi
+  states="$unreachable"
+  [ -z "$lost" ] || states="$states${states:+, }$lost"
+  GATE_ROUTE_REASON="busy:$busy_names${states:+ ($states)} -> waited on $h ($why)"
+}
 {
 if gate_run_copy_is_own; then
   if [ -n "${MAC_GATE_ESTATE_LOCK_STAMPS:-}" ]; then
     GATE_ESTATE_LOCK_REQUESTED="${MAC_GATE_ESTATE_LOCK_STAMPS%% *}"
     GATE_ESTATE_LOCK_ACQUIRED="${MAC_GATE_ESTATE_LOCK_STAMPS#* }"
   fi
+  GATE_HOST_ROUTE="${MAC_GATE_HOST_ROUTE:-}"
+  GATE_RUN_LOCK_FILE="${MAC_GATE_RUN_LOCK:-}"
+  GATE_RUN_LOCK_WAIT="${MAC_GATE_RUN_LOCK_WAIT:-}"
   # The bootstrap's lint verdict, which the candidate removal below needs before the copy's own
   # locallint step reads it again.
   { read -r GATE_LOCALLINT_RC _ < "$MAC_GATE_RUN_COPY/locallint.rc"; } 2>/dev/null || GATE_LOCALLINT_RC=""
-  unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS
+  unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCK_STAMPS MAC_GATE_ESTATE_LOCKS \
+    MAC_GATE_HOST_ROUTE MAC_GATE_RUN_LOCK MAC_GATE_RUN_LOCK_WAIT
 else
-  unset MAC_GATE_ESTATE_LOCK_STAMPS
+  unset MAC_GATE_ESTATE_LOCK_STAMPS MAC_GATE_HOST_ROUTE MAC_GATE_RUN_LOCK MAC_GATE_RUN_LOCK_WAIT
   # The local lint (MEMNG-807, scripts/local-lint.sh) comes before the estate lock is requested,
   # or it saves nothing: a formatting error used to wait out the whole queue only to fail the
   # build host's first step (41 minutes, 2026-10-13). It runs here, in the original text, because
@@ -268,13 +441,81 @@ $gate_lint_none"
       [0-9]*:[0-9]*) GATE_LOCALLINT_SECS=$((gate_lint_t1 - gate_lint_t0)) ;;
     esac
   fi
-  if [ -n "${MAC_GATE_ESTATE_LOCK:-}" ] && [ "$GATE_LOCALLINT_RC" != 1 ]; then
+  # Which estate lock this run takes. MAC_GATE_ESTATE_LOCK, when set, is taken exactly as it always
+  # was, by every run; the map is read only by a run that builds (not --help, --classify-only or a
+  # run without a host): auto routes over it, an explicit host takes its own entry. auto ignores
+  # MAC_GATE_ESTATE_LOCK, which names no host. Every refusal here comes before any lock is taken.
+  gate_route_source=none
+  gate_route_lock=""
+  if [ "$GATE_LOCALLINT_RC" != 1 ]; then
+    if [ "$gate_lint_wanted" -eq 1 ] && [ "$MAC_GATE_HOST" = auto ]; then
+      [ -n "${MAC_GATE_ESTATE_LOCKS:-}" ] \
+        || die_estate_lock "MAC_GATE_HOST=auto needs MAC_GATE_ESTATE_LOCKS (name=lock,name=lock, in preference order)"
+      gate_route_parse_map "$MAC_GATE_ESTATE_LOCKS"
+      gate_route_source=auto
+    elif [ -n "${MAC_GATE_ESTATE_LOCK:-}" ]; then
+      gate_route_source=MAC_GATE_ESTATE_LOCK
+      gate_route_lock="$MAC_GATE_ESTATE_LOCK"
+    elif [ "$gate_lint_wanted" -eq 1 ] && [ -n "${MAC_GATE_ESTATE_LOCKS:-}" ]; then
+      gate_route_parse_map "$MAC_GATE_ESTATE_LOCKS"
+      if gate_route_lock="$(gate_route_lock_of "$MAC_GATE_HOST")"; then
+        gate_route_source=MAC_GATE_ESTATE_LOCKS
+      else
+        gate_route_lock=""
+      fi
+    fi
+  fi
+  # lock_requested is stamped BEFORE the worktree run lock, so the ledger's wait includes a wait
+  # for an earlier run of this worktree as well as the estate's queue; the route line separates them.
+  if [ "$gate_route_source" != none ]; then
     GATE_ESTATE_LOCK_REQUESTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || GATE_ESTATE_LOCK_REQUESTED="?"
     [ -n "$GATE_ESTATE_LOCK_REQUESTED" ] || GATE_ESTATE_LOCK_REQUESTED="?"
-    { exec 9>>"$MAC_GATE_ESTATE_LOCK"; } 2>/dev/null \
-      || die_estate_lock "cannot open the estate lock $MAC_GATE_ESTATE_LOCK (MAC_GATE_ESTATE_LOCK)"
-    flock 9 \
-      || die_estate_lock "cannot take the estate lock $MAC_GATE_ESTATE_LOCK (MAC_GATE_ESTATE_LOCK)"
+  fi
+  # The worktree run lock, taken by every run that builds or tests, whatever its host. The lane
+  # lock is per host, so without it two runs of this worktree could hold merkur's and mars's locks
+  # at once over one artifacts directory — and the later one's startup deletes the earlier one's
+  # test-count candidate, its copyback every incoming-* folder. A kernel flock on descriptor 7,
+  # which the exec below hands to the copy like 9: the kernel frees it however the run ends,
+  # SIGKILL included, so there is no owner to judge and nothing to reclaim. Children close 7
+  # wherever they close 9 (`9>&- 7>&-`), or a child that outlives the run would hold it — the
+  # estate-lock `flock 9` children too (`flock 9 7>&-`), which wait on 9 and so cannot close it.
+  if [ "$gate_lint_wanted" -eq 1 ] && [ "$GATE_LOCALLINT_RC" != 1 ]; then
+    gate_wt_root="$(git rev-parse --show-toplevel 2>/dev/null)" || gate_wt_root=""
+    case "${MAC_GATE_ARTIFACTS:-}" in
+      /*) gate_wt_art="$MAC_GATE_ARTIFACTS" ;;
+      "") gate_wt_art="${gate_wt_root:+$gate_wt_root/.gate-artifacts}" ;;
+      *) gate_wt_art="${gate_wt_root:+$gate_wt_root/$MAC_GATE_ARTIFACTS}" ;;
+    esac
+    if [ -n "$gate_wt_art" ]; then
+      { mkdir -p "$gate_wt_art" && exec 7>>"$gate_wt_art/.run.lock"; } 2>/dev/null \
+        || die_estate_lock "cannot open the worktree run lock $gate_wt_art/.run.lock"
+      gate_wt_t0="$(date +%s)"
+      flock -x 7 \
+        || die_estate_lock "cannot take the worktree run lock $gate_wt_art/.run.lock"
+      gate_wt_t1="$(date +%s)"
+      gate_wt_wait="?"
+      case "$gate_wt_t0:$gate_wt_t1" in
+        [0-9]*:[0-9]*) gate_wt_wait=$((gate_wt_t1 - gate_wt_t0)) ;;
+      esac
+      export MAC_GATE_RUN_LOCK="$gate_wt_art/.run.lock" MAC_GATE_RUN_LOCK_WAIT="$gate_wt_wait"
+    fi
+    if [ "$gate_route_source" = auto ]; then
+      gate_route_auto "${gate_wt_art:-}" "${MAC_GATE_BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
+      export MAC_GATE_HOST="$GATE_ROUTE_HOST"
+      export MAC_GATE_HOST_ROUTE="$GATE_ROUTE_REASON"
+    elif [ "$gate_route_source" = none ]; then
+      export MAC_GATE_HOST_ROUTE="explicit:no-estate-lock"
+    else
+      export MAC_GATE_HOST_ROUTE="explicit:$gate_route_source"
+    fi
+  fi
+  if [ -n "$gate_route_lock" ]; then
+    { exec 9>>"$gate_route_lock"; } 2>/dev/null \
+      || die_estate_lock "cannot open the estate lock $gate_route_lock ($gate_route_source)"
+    flock 9 7>&- \
+      || die_estate_lock "cannot take the estate lock $gate_route_lock ($gate_route_source)"
+  fi
+  if [ "$gate_route_source" != none ]; then
     GATE_ESTATE_LOCK_ACQUIRED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || GATE_ESTATE_LOCK_ACQUIRED="?"
     [ -n "$GATE_ESTATE_LOCK_ACQUIRED" ] || GATE_ESTATE_LOCK_ACQUIRED="?"
     export MAC_GATE_ESTATE_LOCK_STAMPS="$GATE_ESTATE_LOCK_REQUESTED $GATE_ESTATE_LOCK_ACQUIRED"
@@ -552,7 +793,7 @@ gate_classify() {
   # the full gate, because then nothing is known about what changed.
   local fetch_note=""
   # Pruning makes deleted branches disappear from the local inventory used by the lane reaper.
-  if git fetch --quiet --prune origin 2>/dev/null 9>&-; then
+  if git fetch --quiet --prune origin 2>/dev/null 9>&- 7>&-; then
     ORIGIN_FETCHED=1
   else
     fetch_note=" (origin could not be fetched — the origin/main already on disk was used)"
@@ -739,7 +980,7 @@ remove_gate_device() {
     "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH
      export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
      xcrun simctl shutdown '$name' >/dev/null 2>&1
-     xcrun simctl delete '$name' >/dev/null 2>&1" 9>&- \
+     xcrun simctl delete '$name' >/dev/null 2>&1" 9>&- 7>&- \
     && say "simulator   : removed the leftover device $DEVICE_NAME from the build host"
   return 0
 }
@@ -758,7 +999,7 @@ release_gate_lock() {
 [ -d "$lock" ] || exit 0
 if [ "$(cat "$lock/owner" 2>/dev/null)" = "$owner" ]; then rm -rf "$lock"; fi
 REL_EOF
-  } 9>&- | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1 9>&-
+  } 9>&- 7>&- | timeout 90 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' >/dev/null 2>&1 9>&- 7>&-
   return 0
 }
 
@@ -768,7 +1009,7 @@ die_locked() {
   # A quick run that never got the lock built nothing, so it reports nothing built — but it still
   # reports, on its own line, because that line is what the caller reads.
   [ "${QUICK:-0}" -eq 0 ] \
-    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- locallint=%s | exit=3\n' "${GATE_LOCALLINT_FIELD:--}" | tee -a "$log"
+    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- host=%s locallint=%s | exit=3\n' "${host:--}" "${GATE_LOCALLINT_FIELD:--}" | tee -a "$log"
   exit 3
 }
 
@@ -922,12 +1163,15 @@ gate_ledger_append() { # $1 = the run's exit code
     || { gate_ledger_skip "cannot lock the run ledger $GATE_RUNS_LEDGER"; return 1; }
   # Its failure is reported by the function and changes only which log the row names.
   gate_ledger_keep_log
-  row="$row${t}$(gate_ledger_field "$GATE_LEDGER_LOG_PATH")" \
+  row="$row${t}$(gate_ledger_field "$GATE_LEDGER_LOG_PATH")${t}$(gate_ledger_field "${host:-}")" \
     || { gate_ledger_skip "cannot compose the row"; return 1; }
-  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" = 12 ] \
-    || { gate_ledger_skip "the row does not have 12 fields"; return 1; }
+  [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" = 13 ] \
+    || { gate_ledger_skip "the row does not have 13 fields"; return 1; }
+  # The header is written only into a new or empty ledger. An existing one keeps its 12-name header
+  # and its rows: nothing here rewrites the ledger, so a reader takes the host from field 13 when a
+  # row has one, and from its log's "host        :" line otherwise.
   if [ ! -s "$GATE_RUNS_LEDGER" ]; then
-    printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path\n' >&8 \
+    printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path\thost\n' >&8 \
       || { gate_ledger_skip "cannot write the header of $GATE_RUNS_LEDGER"; return 1; }
   fi
   printf '%s\n' "$row" >&8 \
@@ -947,7 +1191,7 @@ gate_on_exit() {
   if gate_run_initialized; then remove_gate_device; release_gate_lock; fi
   remove_run_copy
   gate_run_initialized || exit "$rc"
-  ( exec 9>&-
+  ( exec 9>&- 7>&-
     gate_ledger_done=0
     trap '[ "$gate_ledger_done" -eq 1 ] || gate_ledger_skip "the ledger append stopped before it finished"' EXIT
     gate_ledger_append "$rc"
@@ -965,6 +1209,17 @@ open_run_log
 if [ -n "$GATE_ESTATE_LOCK_REQUESTED" ]; then
   say "estate lock : lock_requested=$GATE_ESTATE_LOCK_REQUESTED (taken by this run before its copy was made)"
   say "estate lock : lock_acquired=$GATE_ESTATE_LOCK_ACQUIRED"
+fi
+# Informational, never read to decide anything: the kernel's flock is the ownership.
+if [ -n "$GATE_RUN_LOCK_FILE" ]; then
+  printf 'pid=%s token=%s host=%s\n' "$$" "$RUN_TOKEN" "$host" > "$GATE_RUN_LOCK_FILE" 2>/dev/null \
+    || say "worktree lock: cannot write this run's line into $GATE_RUN_LOCK_FILE (informational only)"
+  say "worktree lock: wait=${GATE_RUN_LOCK_WAIT}s ($GATE_RUN_LOCK_FILE)"
+fi
+if [ -n "$GATE_HOST_ROUTE" ]; then
+  gate_wt_shown="-"
+  [ -z "$GATE_RUN_LOCK_WAIT" ] || gate_wt_shown="${GATE_RUN_LOCK_WAIT}s"
+  say "route       : host=$host reason=$GATE_HOST_ROUTE worktree_wait=$gate_wt_shown pid=$$ token=$RUN_TOKEN"
 fi
 
 # --- (5) provenance ---------------------------------------------------------------------------
@@ -1002,7 +1257,7 @@ record() {
 summary_and_exit() {
   local line="mac-gate SUMMARY:" i
   for i in "${!STEP_NAMES[@]}"; do line="$line ${STEP_NAMES[$i]}=${STEP_RCS[$i]}"; done
-  line="$line$SUMMARY_INFO locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
+  line="$line$SUMMARY_INFO host=${host:--} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
   say "run log     : $log"
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   say "$line"
@@ -1022,7 +1277,7 @@ quick_summary_and_exit() {
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   # The iteration count is part of what the line claims, so it rides on the line itself: a pasted
   # "tests=0" is then never mistaken for N runs when it was one, or for one when it was N.
-  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} host=${host:--} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
 }
@@ -1040,7 +1295,7 @@ say "--- step: locallint ---"
 GATE_LOCALLINT_FIELD=-
 if [ -r "$GATE_RUN_COPY/locallint.rc" ]; then
   read -r gate_lint_rc gate_lint_secs < "$GATE_RUN_COPY/locallint.rc"
-  tee -a "$log" < "$GATE_RUN_COPY/locallint.txt" 9>&-
+  tee -a "$log" < "$GATE_RUN_COPY/locallint.txt" 9>&- 7>&-
   case "${gate_lint_rc:-}" in 0|1) GATE_LOCALLINT_FIELD="$gate_lint_rc" ;; esac
   say "locallint   : locallint=$GATE_LOCALLINT_FIELD — ran on $(hostname -s) before the estate lock was requested (${gate_lint_secs:-?}s)"
   if [ "$GATE_LOCALLINT_FIELD" = 1 ]; then
@@ -1061,15 +1316,16 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These eleven must be there (the local lint's two among them: a lint that stopped
+# directory. These twelve must be there (the local lint's two among them: a lint that stopped
 # refusing would only cost the queue time it exists to save, and nothing else would notice): the main-bar freeze's (ADR-0008 is the owner's, and a freeze
 # whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
 # exactly like a green one), the TestFlight cut's (the one other write path to the Mac) and the
-# release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497).
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
+# release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497) and
+# the host router's (MAC_GATE_HOST=auto and the worktree run lock, MEMNG-824).
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
-    "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
+    "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
     [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
   else
     say "the gate's own test $selftest_script is missing or not executable"
@@ -1079,10 +1335,10 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh|host-routing-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
-  "$selftest_script" 2>&1 9>&- | tee -a "$log" 9>&-
+  "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
   [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
 done
 record selftest "$selftest_rc"
@@ -1216,7 +1472,7 @@ else
   # pass as two (Codex, 2026-10-06). The file keeps every byte the host sent.
   mount_answer="$GATE_RUN_COPY/mount-answer.txt"
   (
-    exec 9>&-
+    exec 9>&- 7>&-
     { cat "$GATE_MOUNT_GUARD_SELF"; printf '%s\n' 'gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work'; } \
       | timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' > "$mount_answer" 2>&1
   )
@@ -1270,7 +1526,7 @@ if [ "$ORIGIN_FETCHED" -eq 1 ]; then
       -e 's#^refs/remotes/origin/##' | sort -u)"
 fi
 preflight_out="$(
-  exec 9>&-
+  exec 9>&- 7>&-
   {
     printf "branch='%s'\n" "$(esc "$branch")"
     printf "lock_owner='%s'\n" "$(esc "$LOCK_OWNER")"
@@ -1441,7 +1697,7 @@ else
   # about this branch proves nothing), once about this branch.
   branch_re="$(printf '%s' "$branch" | sed 's/[.[]/\\&/g')"
   probe_out="$(
-    exec 9>&-
+    exec 9>&- 7>&-
     {
       printf "lock='%s'\n" "$(esc "$lockdir")"
       printf "branch_re='%s'\n" "$(esc "$branch_re")"
@@ -1490,7 +1746,7 @@ PROBE_EOF
   # so exactly one of them carries the old lock away and the other finds it gone. rm -rf followed
   # by mkdir is not — the second run's rm would delete the first run's fresh lock.
   takeover_out="$(
-    exec 9>&-
+    exec 9>&- 7>&-
     {
       printf "lock='%s'\n" "$(esc "$lockdir")"
       printf "owner='%s'\n" "$(esc "$LOCK_OWNER")"
@@ -1555,16 +1811,16 @@ GATE_ADMISSION_SELF="$GATE_RUN_COPY/scripts/gate-admission.sh"
 gate_say() { say "$@"; }
 # The admission's poll sleep is a child of this run as well (GATE_SLEEP, set by the helper).
 gate_admission_sleep_cmd="$GATE_SLEEP"
-gate_admission_sleep() { "$gate_admission_sleep_cmd" "$@" 9>&-; }
+gate_admission_sleep() { "$gate_admission_sleep_cmd" "$@" 9>&- 7>&-; }
 GATE_SLEEP=gate_admission_sleep
 gate_host_available_kb() {
   local out free own
   # The admission calls this inside its own command substitution, a subshell that waits on the
   # ssh below: it lets the estate lock go there. Never in this run's own shell, whose copy IS the
   # lock (BASHPID equals $$ only there, and the fallback keeps it so where BASHPID is unknown).
-  [ "${BASHPID:-$$}" = "$$" ] || exec 9>&-
+  [ "${BASHPID:-$$}" = "$$" ] || exec 9>&- 7>&-
   out="$(
-    exec 9>&-
+    exec 9>&- 7>&-
     {
       cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
       cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
@@ -1605,12 +1861,22 @@ rsync -a --delete \
   --exclude '*.xcresult' \
   --exclude '.gate-artifacts' \
   -e ssh \
-  "$repo_root"/ "$host:$target/" 2>&1 9>&- | tee -a "$log" 9>&-
+  "$repo_root"/ "$host:$target/" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
 record rsync "${PIPESTATUS[0]}"
 [ "$first_fail" -eq 0 ] || end_run
 
 # --- (4) the ordered, fail-fast checks on the build host --------------------------------------
 say "--- step: remote ---"
+# The warm-lane marker the router reads when every host is busy: this branch's lane on this host
+# now holds DerivedData. A marker that cannot be written costs that hint and nothing else.
+if printf '%s %s %s %s\n' "$host" "$branch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_TOKEN" \
+     > "$artifacts/.lane-host.$RUN_TOKEN" 2>/dev/null \
+   && mv -f "$artifacts/.lane-host.$RUN_TOKEN" "$artifacts/lane-host" 2>/dev/null; then
+  :
+else
+  rm -f "${artifacts:?}/.lane-host.${RUN_TOKEN:?}" 2>/dev/null
+  say "lane-host   : cannot write $artifacts/lane-host (the warm-lane hint only)"
+fi
 # Where the remote's own output starts in the log: the run ledger reads the remote's clock from
 # here on, and from nothing printed before it.
 GATE_REMOTE_LOG_OFFSET="$(wc -c < "$log" | tr -d ' ')" || GATE_REMOTE_LOG_OFFSET="?"
@@ -3207,7 +3473,7 @@ gate_remote_clock_end
 echo "MAC_GATE_REMOTE_SUMMARY:$summary wall=$(gate_remote_wall) | exit=$first_fail"
 exit "$first_fail"
 REMOTE_EOF
-} 9>&- | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1 9>&- | tee -a "$log" 9>&-
+} 9>&- 7>&- | ssh -o BatchMode=yes "$host" 'bash -s' 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
 remote_rc="${PIPESTATUS[1]}"
 record remote "$remote_rc"
 # The slot's fields, as the build host printed them after its close. A field that is not a run of
@@ -3271,14 +3537,14 @@ for abandoned in "$artifacts"/incoming-*; do
     [ "$copyback_rc" -ne 0 ] || copyback_rc=1
   fi
 done
-rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/incoming-$RUN_TOKEN/" 2>&1 9>&- | tee -a "$log" 9>&-
+rsync -a -e ssh "$host:$target/.gate-artifacts/" "$artifacts/incoming-$RUN_TOKEN/" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
 rsync_rc="${PIPESTATUS[0]}"
 [ "$copyback_rc" -ne 0 ] || copyback_rc="$rsync_rc"
 staging="$artifacts/incoming-$RUN_TOKEN"
 say "copyback: staged in $staging (rsync exit $rsync_rc)"
 candidate_owner="$GATE_RUN_COPY/scripts/testcount-candidate-owner.sh"
 if [ -x "$candidate_owner" ]; then
-  "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 9>&- | tee -a "$log" 9>&-
+  "$candidate_owner" "$staging" "$artifacts" "$RUN_TOKEN" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
   owner_rc="${PIPESTATUS[0]}"
   [ "$copyback_rc" -ne 0 ] || copyback_rc="$owner_rc"
 else

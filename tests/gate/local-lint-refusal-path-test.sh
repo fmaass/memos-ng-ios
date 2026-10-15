@@ -200,7 +200,7 @@ if [ "$RC" -eq 1 ]; then ok "lint failure: exit 1, the lint's own code"; else ba
 if cmp -s "$tmp/candidate-before.tsv" "$tmp/case-refuse/artifacts/testcount-baseline.tsv"; then
   ok "lint failure: a test-count candidate present before the run is byte-identical after it (no lock, nothing cleared)"
 else bad "lint failure: the candidate at the documented path was removed or changed by a run that held no estate lock"; fi
-if [ "$(summary)" = "mac-gate SUMMARY: locallint=1 | exit=1" ]; then ok "lint failure: the run ends with 'mac-gate SUMMARY: locallint=1 | exit=1'"
+if [ "$(summary)" = "mac-gate SUMMARY: host=stub-host locallint=1 | exit=1" ]; then ok "lint failure: the run ends with 'mac-gate SUMMARY: host=stub-host locallint=1 | exit=1'"
 else bad "lint failure: SUMMARY [$(summary)]"; show "$OUT"; fi
 if [ -z "$CALLS" ]; then ok "lint failure: no ssh and no rsync — the build host was never contacted"
 else bad "lint failure: the build host was called as [$(printf '%s' "$CALLS" | tr '\n' ',')]"; fi
@@ -218,8 +218,8 @@ else bad "lint failure: the row says mode=[$(row_field 8)] exit=[$(row_field 9)]
 
 # --- 2: the same on a quick run ------------------------------------------------------------------------
 STUB_LINT_RC=1 STUB_LINT_OUT="$ERR_LINE" run_gate refuse-quick "$w" --quick
-if [ "$RC" -eq 1 ] && [ "$(quick)" = "MAC_GATE_QUICK: lint=- build=- tests=- locallint=1 | exit=1" ] && [ -z "$CALLS" ]; then
-  ok "lint failure, quick: exit 1, 'MAC_GATE_QUICK: lint=- build=- tests=- locallint=1 | exit=1', no host contact"
+if [ "$RC" -eq 1 ] && [ "$(quick)" = "MAC_GATE_QUICK: lint=- build=- tests=- host=stub-host locallint=1 | exit=1" ] && [ -z "$CALLS" ]; then
+  ok "lint failure, quick: exit 1, 'MAC_GATE_QUICK: lint=- build=- tests=- host=stub-host locallint=1 | exit=1', no host contact"
 else bad "lint failure, quick: exit $RC, line [$(quick)], calls [$(printf '%s' "$CALLS" | tr '\n' ',')]"; show "$OUT"; fi
 if [ "$(row_field 8)" = refused ] && [ "$(row_field 9)" = 1 ]; then ok "lint failure, quick: the run ledger says mode=refused exit=1"
 else bad "lint failure, quick: the row says mode=[$(row_field 8)] exit=[$(row_field 9)]"; fi
@@ -235,7 +235,7 @@ hold_lock "$lock3" "$tmp/case-pass/order" || bad "the lock holder never took the
 ( sleep 3; : > "$tmp/release" ) &
 ESTATE_LOCK="$lock3" STUB_LINT_RC=0 run_gate pass "$w"
 release_lock
-if [ "$RC" -eq 16 ] && [ "$(summary)" = "mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced locallint=0 | exit=16" ]; then
+if [ "$RC" -eq 16 ] && [ "$(summary)" = "mac-gate SUMMARY: selftest=0 classify=0 mount=16 mountguard=enforced host=stub-host locallint=0 | exit=16" ]; then
   ok "lint pass: the run goes on to the mount step, and the SUMMARY carries locallint=0 before '| exit='"
 else bad "lint pass: exit $RC, SUMMARY [$(summary)]"; show "$OUT"; fi
 if [ "$(tr '\n' ' ' < "$tmp/case-pass/order")" = "lint released " ]; then
@@ -251,7 +251,7 @@ else bad "lint pass: the row says mode=[$(row_field 8)] exit=[$(row_field 9)]"; 
 
 # --- 4: no tool: the run falls through and says so ---------------------------------------------------
 STUB_SWIFT=absent run_gate fallthrough "$w" --quick
-if [ "$RC" -eq 16 ] && [ "$(quick)" = "MAC_GATE_QUICK: lint=- build=- tests=- locallint=- | exit=16" ] && in_log "fell through"; then
+if [ "$RC" -eq 16 ] && [ "$(quick)" = "MAC_GATE_QUICK: lint=- build=- tests=- host=stub-host locallint=- | exit=16" ] && in_log "fell through"; then
   ok "fall-through: the run goes on as before, 'locallint=-' on the quick line, and the log says it fell through"
 else bad "fall-through: exit $RC, line [$(quick)]"; show "$OUT"; fi
 if [ -z "$SWIFT_CALLS" ]; then ok "fall-through: no lint ran"; else bad "fall-through: swift was asked [$SWIFT_CALLS]"; fi

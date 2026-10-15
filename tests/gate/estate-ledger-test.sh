@@ -41,7 +41,7 @@ ok()   { cases=$((cases + 1)); echo "ok   $1"; }
 bad()  { cases=$((cases + 1)); fails=$((fails + 1)); echo "FAIL $1"; }
 show() { printf '%s\n' "$1" | sed 's/^/     | /'; }
 
-HEADER="$(printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path')"
+HEADER="$(printf 'lock_requested_utc\tlock_acquired_utc\tremote_start_utc\tremote_end_utc\trepo\tbranch\trun_token\tmode\texit\twall_s\tslot_wait_s\tlog_path\thost')"
 ISO_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 SUMMARY_RE='^mac-gate SUMMARY: .* \| exit=[0-9]+$'
 
@@ -69,7 +69,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh; do
     cat > "$work/tests/gate/$stub" <<STUB_EOF
 #!/usr/bin/env bash
 echo "selftest" >> "\${STUB_DIR:-/nonexistent}/calls"
@@ -279,13 +279,13 @@ expect_row() { # $1 = label, then name=value pairs; "~iso" means an ISO-8601 UTC
   if [ "$n" -ne 1 ]; then bad "$label: expected one ledger row, found $n"; show "$(cat "$LEDGER" 2>/dev/null)"; return; fi
   if [ "$(head -n1 "$LEDGER")" != "$HEADER" ]; then bad "$label: the ledger's first line is not the header"; show "$(head -n1 "$LEDGER")"; return; fi
   row="$(rows)"
-  if [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" -ne 12 ]; then bad "$label: the row does not have 12 tab fields"; show "$row"; return; fi
+  if [ "$(printf '%s\n' "$row" | awk -F '\t' '{ print NF }')" -ne 13 ]; then bad "$label: the row does not have 13 tab fields"; show "$row"; return; fi
   for pair in "$@"; do
     key="${pair%%=*}"; want="${pair#*=}"
     case "$key" in
       lock_requested) idx=1 ;; lock_acquired) idx=2 ;; remote_start) idx=3 ;; remote_end) idx=4 ;;
       repo) idx=5 ;; branch) idx=6 ;; run_token) idx=7 ;; mode) idx=8 ;; exit) idx=9 ;;
-      wall) idx=10 ;; slot_wait) idx=11 ;; log) idx=12 ;;
+      wall) idx=10 ;; slot_wait) idx=11 ;; log) idx=12 ;; host) idx=13 ;;
       *) bad "$label: unknown field $key"; return ;;
     esac
     got="$(field "$row" "$idx")"
@@ -295,7 +295,7 @@ expect_row() { # $1 = label, then name=value pairs; "~iso" means an ISO-8601 UTC
       bad "$label: $key is [$got], expected [$want]"; show "$row"; return
     fi
   done
-  ok "$label: one 12-field row under the header ($*)"
+  ok "$label: one 13-field row under the header ($*)"
 }
 # The row's token and log must be this run's: the log exists, is named for the token, and holds the
 # summary line the run printed.
@@ -336,13 +336,13 @@ MAC_GATE_REMOTE_SUMMARY: xcodegen=0 xcodebuild=0 wall=77 | exit=0
 EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR"
 summary="$(printf '%s\n' "$OUT" | grep '^mac-gate SUMMARY:')"
-if [ "$RC" -eq 0 ] && printf '%s\n' "$summary" | grep -Eq "$SUMMARY_RE" && printf '%s\n' "$summary" | grep -q ' slot_wait=42 locallint=- | exit=0$'; then
+if [ "$RC" -eq 0 ] && printf '%s\n' "$summary" | grep -Eq "$SUMMARY_RE" && printf '%s\n' "$summary" | grep -q ' slot_wait=42 host=stub-host locallint=- | exit=0$'; then
   ok "full pass: exit 0, and the verdict line still ends '| exit=0' with t= and wall= in the remote's text"
 else
   bad "full pass: exit $RC or a verdict line that does not parse: [$summary]"; show "$OUT"
 fi
 expect_row "full pass" lock_requested=- lock_acquired=- remote_start="$(utc_of "$T0")" remote_end="$(utc_of $((T0 + 77)))" \
-  repo=memos-ng-ios branch=fix/ledger-src mode=full exit=0 wall=77 slot_wait=42
+  repo=memos-ng-ios branch=fix/ledger-src mode=full exit=0 wall=77 slot_wait=42 host=stub-host
 expect_own_log "full pass"
 if grep -q '^MAC_GATE_STEP xcodebuild 0 t=70$' "$(field "$(rows)" 12)" && grep -q '^MAC_GATE_REMOTE_SUMMARY: .* wall=77 | exit=0$' "$(field "$(rows)" 12)"; then
   ok "full pass: the run log keeps the step's t= and the remote summary's wall="
@@ -438,7 +438,7 @@ MAC_GATE_QUICK_REMOTE: lint=0 build=0 tests=0
 MAC_GATE_REMOTE_CLOCK end=$((T0 + 203))
 EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR" --quick
-if [ "$RC" -eq 0 ] && has "MAC_GATE_QUICK: lint=0 build=0 tests=0 locallint=- | exit=0"; then
+if [ "$RC" -eq 0 ] && has "MAC_GATE_QUICK: lint=0 build=0 tests=0 host=stub-host locallint=- | exit=0"; then
   ok "quick: exit 0, and the quick line still reads its three numbers through t="
 else
   bad "quick: exit $RC or the quick line changed"; show "$OUT"
@@ -534,7 +534,7 @@ if wait_for_file "$CASE_DIR/held" "$HOLDER_PID"; then
   second="$(sed -n 3p "$LEDGER")"
   if [ "$RC" -eq 0 ] && [ "$(grep -c . "$LEDGER")" -eq 3 ] && [ "$(sed -n 1p "$LEDGER")" = "$HEADER" ] \
      && [ "$(sed -n 2p "$LEDGER" | cut -f1)" = A ] && [ "$(field "$second" 8)" = fastpath ] \
-     && [ "$(printf '%s\n' "$second" | awk -F '\t' '{ print NF }')" -eq 12 ]; then
+     && [ "$(printf '%s\n' "$second" | awk -F '\t' '{ print NF }')" -eq 13 ]; then
     ok "race: after A lets go, B's row follows A's, one header, both rows whole"
   else
     bad "race: the ledger after both writers is wrong (B exit $RC)"; show "$(cat "$LEDGER")"
@@ -604,7 +604,10 @@ ESTATE="$ESTATE" PAUSE="$PAUSE" start_gate "$d" "$CASE_DIR/a" "$CASE_DIR/a/out.t
 unset PAUSE
 if wait_for_file "$CASE_DIR/a/pause/paused" "$PID_A"; then
   ESTATE="$ESTATE" start_gate "$d" "$CASE_DIR/b" "$CASE_DIR/b/out.txt"; PID_B=$PID
-  if wait_blocked "$PID_B" && [ -z "$(ls -A "$CASE_DIR/b/tmp")" ] && [ ! -e "$CASE_DIR/b/artifacts" ]; then
+  # B's artifacts directory may already hold its worktree run lock (.run.lock, taken before the
+  # estate lock since MEMNG-824) and nothing else: no log, no copy.
+  if wait_blocked "$PID_B" && [ -z "$(ls -A "$CASE_DIR/b/tmp")" ] \
+     && [ -z "$(ls -A "$CASE_DIR/b/artifacts" 2>/dev/null | grep -vx '.run.lock')" ]; then
     ok "contention: B is blocked on the estate lock before its private copy and its log exist"
   else
     bad "contention: B was not blocked before starting its run"; show "$(cat "$CASE_DIR/b/out.txt"; ls -A "$CASE_DIR/b/tmp")"
@@ -834,10 +837,15 @@ new_case init-term
 make_fault_stubs "$CASE_DIR"
 printf '#!/bin/sh\necho " de ad be ef 00 11 22 33"\n' > "$CASE_DIR/bin/od"
 hold_log="$CASE_DIR/artifacts/mac-gate-docs-ledger-docs-deadbeef00112233.log"
+# The first `mkdir -p` of the artifacts directory is the bootstrap's, for the worktree run lock
+# (MEMNG-824); the second is the log's creation, the one this case holds.
 cat > "$CASE_DIR/bin/mkdir" <<MKDIR_EOF
 #!/usr/bin/env bash
 "$(command -v mkdir)" "\$@" || exit \$?
-if [ "\$*" = "-p $CASE_DIR/artifacts" ] && [ ! -e "$CASE_DIR/hold/held" ]; then
+if [ "\$*" = "-p $CASE_DIR/artifacts" ]; then
+  n="\$(cat "$CASE_DIR/hold/n" 2>/dev/null)"; n=\$((\${n:-0} + 1)); echo "\$n" > "$CASE_DIR/hold/n"
+fi
+if [ "\$*" = "-p $CASE_DIR/artifacts" ] && [ "\$n" -eq 2 ] && [ ! -e "$CASE_DIR/hold/held" ]; then
   : > "$hold_log"
   : > "$CASE_DIR/hold/held"
   read -r _ < "$CASE_DIR/hold/release"

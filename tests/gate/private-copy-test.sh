@@ -89,7 +89,7 @@ new_repo() {
   } > "$work/project.yml"
   # The stubs report what they inherited: neither the pause nor the copy's own marker may reach a
   # child, or a gate run BY a selftest would pause, or trust a copy that is not its own.
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok pause=[${MAC_GATE_SELFTEST_PAUSE_DIR:-}] copy=[${MAC_GATE_RUN_COPY:-}]"\nexit 0\n' \
       "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"

@@ -129,7 +129,7 @@ new_repo() {
     printf '      MARKETING_VERSION: "9.9.9"\n'
     printf '      CURRENT_PROJECT_VERSION: "999"\n'
   } > "$work/project.yml"
-  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh; do
+  for stub in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh; do
     printf '#!/bin/sh\necho "%s stub ok"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
     chmod +x "$work/tests/gate/$stub"
   done
@@ -236,9 +236,9 @@ STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=0 run_gate "$w" "$CASE_DIR
 if [ "$RC" -eq 0 ]; then ok "a passing quick run exits 0"
 else bad "a passing quick run exits 0 (got $RC)"; printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 locallint=- \| exit=0$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 host=stub-host locallint=- \| exit=0$')"
 if [ "$n" -eq 1 ]; then quick_line_seen=1; ok "it prints exactly one MAC_GATE_QUICK line"
-else bad "expected exactly one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 locallint=- | exit=0' line, found $n"
+else bad "expected exactly one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 host=stub-host locallint=- | exit=0' line, found $n"
      printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 
 n="$(count_lines "$OUT" "$SUMMARY_RE")"
@@ -462,9 +462,9 @@ STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=65 run_gate "$w" "$CASE_DI
 
 if [ "$RC" -eq 65 ]; then ok "a failing build exits with the build's own code"
 else bad "a failing build should exit 65, got $RC"; printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=65 tests=- locallint=- \| exit=65$')"
-if [ "$n" -eq 1 ]; then ok "a failing build reports lint=0 build=65 tests=- locallint=- | exit=65"
-else bad "expected 'MAC_GATE_QUICK: lint=0 build=65 tests=- locallint=- | exit=65', found $n such line(s)"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=65 tests=- host=stub-host locallint=- \| exit=65$')"
+if [ "$n" -eq 1 ]; then ok "a failing build reports lint=0 build=65 tests=- host=stub-host locallint=- | exit=65"
+else bad "expected 'MAC_GATE_QUICK: lint=0 build=65 tests=- host=stub-host locallint=- | exit=65', found $n such line(s)"
      printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 n="$(count_lines "$OUT" "$SUMMARY_RE")"
 [ "$n" -eq 0 ] && ok "a failing quick run still prints no verdict line" \
@@ -483,11 +483,11 @@ MAC_GATE_QUICK_REMOTE: lint=1 build=- tests=-
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=1 run_gate "$w" "$CASE_DIR" --quick
 
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=1 build=- tests=- locallint=- \| exit=1$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=1 build=- tests=- host=stub-host locallint=- \| exit=1$')"
 if [ "$RC" -eq 1 ] && [ "$n" -eq 1 ]; then
-  ok "a failing lint reports lint=1 build=- tests=- locallint=- | exit=1"
+  ok "a failing lint reports lint=1 build=- tests=- host=stub-host locallint=- | exit=1"
 else
-  bad "expected exit 1 and one 'lint=1 build=- tests=- locallint=- | exit=1' line, got exit $RC and $n line(s)"
+  bad "expected exit 1 and one 'lint=1 build=- tests=- host=stub-host locallint=- | exit=1' line, got exit $RC and $n line(s)"
   printf '%s\n' "$OUT" | sed 's/^/     | /'
 fi
 n="$(count_lines "$OUT" "$SUMMARY_RE")"
@@ -502,11 +502,11 @@ cat > "$CASE_DIR/remote.txt" <<'REMOTE_EOF'
 remote: the gate lock of this run was taken over while it was starting
 REMOTE_EOF
 STUB_REMOTE_OUT="$CASE_DIR/remote.txt" STUB_REMOTE_RC=4 run_gate "$w" "$CASE_DIR" --quick
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=- build=- tests=- locallint=- \| exit=4$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=- build=- tests=- host=stub-host locallint=- \| exit=4$')"
 if [ "$RC" -eq 4 ] && [ "$n" -eq 1 ]; then
-  ok "a remote that reported no step reads lint=- build=- tests=- locallint=- | exit=4"
+  ok "a remote that reported no step reads lint=- build=- tests=- host=stub-host locallint=- | exit=4"
 else
-  bad "expected exit 4 and one 'lint=- build=- tests=- locallint=- | exit=4' line, got exit $RC and $n line(s)"
+  bad "expected exit 4 and one 'lint=- build=- tests=- host=stub-host locallint=- | exit=4' line, got exit $RC and $n line(s)"
   printf '%s\n' "$OUT" | sed 's/^/     | /'
 fi
 
@@ -552,9 +552,9 @@ if grep -Eq '^[[:space:]]*\[ -z "\$GATE_QUICK_ITERATIONS" \] \|\| set -- "\$@" -
 else
   bad "the remote quick test command does not append -test-iterations and -run-tests-until-failure"
 fi
-n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 locallint=- \| exit=0$')"
+n="$(count_lines "$OUT" '^MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 host=stub-host locallint=- \| exit=0$')"
 if [ "$n" -eq 1 ]; then ok "the quick line names the iteration count it ran with"
-else bad "expected one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 locallint=- | exit=0' line, found $n"
+else bad "expected one 'MAC_GATE_QUICK: lint=0 build=0 tests=0 iterations=50 host=stub-host locallint=- | exit=0' line, found $n"
      printf '%s\n' "$OUT" | sed 's/^/     | /'; fi
 # Without the option nothing changes: no iterations field, an empty count sent.
 if grep -q "GATE_QUICK_ITERATIONS=''" "$tmp/case-scope/remote-script.txt" 2>/dev/null; then
