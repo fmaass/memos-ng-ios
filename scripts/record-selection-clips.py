@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-781, MEMNG-783) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -34,6 +34,7 @@ SCENES = [
     "779b-library-select-show-selected",
     "781a-collections-retap",
     "783-collection-cards",
+    "822-collection-modes-bar",
 ]
 ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
 
@@ -83,6 +84,21 @@ class Driver:
                 return hits[-1] if lowest else hits[0]
             time.sleep(0.5)
         raise RuntimeError("no element labelled %r on screen (scene %s)" % (label, self.scene))
+
+    def find_id(self, identifier, attempts=10):
+        for _ in range(attempts):
+            hits = [e for e in self.elements() if e.get("AXUniqueId") == identifier]
+            if hits:
+                return hits[0]
+            time.sleep(0.5)
+        raise RuntimeError("no element identified %r on screen (scene %s)" % (identifier, self.scene))
+
+    def tap_segment(self, identifier, index, count, why):
+        """A segment of a segmented control by its place: idb's describe-all stops at the
+        control (a TabGroup carrying the identifier) and lists none of its segments."""
+        frame = self.find_id(identifier)["frame"]
+        x = frame["x"] + frame["width"] * (index + 0.5) / count
+        self.tap_at(x, frame["y"] + frame["height"] / 2, why)
 
     def tap_at(self, x, y, why):
         log("tap %s at %.0f,%.0f" % (why, x, y))
@@ -142,11 +158,61 @@ class Driver:
         time.sleep(2)
 
     def scene_781a(self):
+        # MEMNG-822 amends the re-tap: over a trip it returns the modes row, and Back reaches
+        # the root. The bar's lowest "Collections" is the modes row's icon, then the tab.
         time.sleep(2)
         self.tap("Portugal")
         time.sleep(3.5)
         self.tap("Collections", lowest=True)
+        time.sleep(3)
+        self.tap("Collections", lowest=True)
+        time.sleep(3)
+        self.back()
         time.sleep(3.5)
+
+    def scene_822(self):
+        # A tag card once Phase 2 lands; until then the one trip card opens the same screen.
+        time.sleep(2)
+        self.tap("Portugal")
+        time.sleep(3.5)
+        # Photos | Journal | Map in the capsule (CollectionModePicker.identifier).
+        self.tap_segment("collection-modes", 1, 3, "'Journal' segment")
+        time.sleep(3)
+        self.tap_segment("collection-modes", 0, 3, "'Photos' segment")
+        time.sleep(3)
+        self.fold()
+        time.sleep(3)
+        self.tap_id("main-bar-folded", "the folded icon")   # the modes row again
+        time.sleep(3)
+        self.tap_id("collection-modes-show-tabs", "the row's Collections icon")   # full capsule
+        time.sleep(3)
+        self.tap("Timeline", lowest=True)
+        time.sleep(3)
+        self.tap("Collections", lowest=True)   # back on Collections: the modes row
+        time.sleep(3)
+        self.swipe(200, 400, 200, 700, 0.6)   # to the top first: the trip has little travel left
+        time.sleep(2.5)
+        self.fold()
+        time.sleep(3)
+        self.find_id("main-bar-folded")   # folded before Back, or the scene stops here
+        self.back()
+        time.sleep(3.5)
+
+    def fold(self):
+        """A short drag down that stays inside the trip's few points of travel: a longer one
+        overshoots the end, and the bounce back counts as travel up, which unfolds the bar."""
+        self.swipe(200, 600, 200, 545, 1.0)
+
+    def tap_id(self, identifier, why):
+        x, y = self.centre(self.find_id(identifier))
+        self.tap_at(x, y, why)
+
+    def back(self):
+        """The navigation bar's Back, by its label, else where iOS draws it."""
+        try:
+            self.tap("Back")
+        except RuntimeError:
+            self.tap_at(32, 80, "Back by place")
 
     def scene_783(self):
         time.sleep(2.5)

@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (51)
+
+- When a trip, tag, month or year is open, the Photos, Journal and Map tabs now sit in the bottom capsule, where the Library's Years, Months and All tabs are, instead of in a row under the cover picture. Photos is chosen when the collection opens, and the grid starts right under the cover.
+- Scrolling the grid folds the capsule down to the four icons. Tapping the Collections icon brings the three tabs back, and Back returns to the Collections list with the four icons.
+- Select mode's toolbar takes the bar's place as before, and the three tabs return when Select ends.
+- Please open a trip and a tag card, switch between the three tabs, scroll down, tap the Collections icon, and go back.
+
 ## 2.4.0 (50)
 
 - A tag, month or year card on the Collections tab now opens its own collection screen, with the card's cover picture and name on top and the Photos, Journal and Map tabs below, instead of jumping to the Library.

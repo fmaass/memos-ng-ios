@@ -31,8 +31,9 @@ struct CollectionsRootView: View {
     }
 
     /// The tab's stack over `root`: the trips pushed on `trail`, the main bar's room at the root's
-    /// foot, and a press on Collections while it shows taking the stack back to the root
-    /// (MEMNG-781). A press on another tab, or the one that comes back here, keeps the trail.
+    /// foot, and a press on Collections while the root shows clearing the stack (MEMNG-781) —
+    /// over a collection that press brings back its modes row instead (MEMNG-822). The dock is
+    /// told the path itself on every change, the one authority for which collection is on top.
     static func stack(
         trail: Binding<[CollectionRoute]>, @ViewBuilder root: () -> some View
     ) -> some View {
@@ -42,6 +43,7 @@ struct CollectionsRootView: View {
                 .leadingFootBar(on: .collections)
         }
         .onTabReselected(.collections) { trail.wrappedValue = [] }
+        .modifier(CollectionTrailReport(trail: trail.wrappedValue))
     }
 
     @ViewBuilder
@@ -498,5 +500,18 @@ struct CollectionsScreen: View {
         let identity: TimelineSnapshotIdentity?
         let ids: [String]
         let revision: Int
+    }
+}
+
+/// Tells the dock the Collections stack's path as it stands, from the first frame (MEMNG-822): a
+/// reconciliation with the path, never a log of each assignment, and never an appearance.
+private struct CollectionTrailReport: ViewModifier {
+    let trail: [CollectionRoute]
+    @Environment(AppDock.self) private var dock: AppDock?
+
+    func body(content: Content) -> some View {
+        content.onChange(of: trail, initial: true) { _, now in
+            dock?.collectionTrail(now.map { AnyHashable($0) })
+        }
     }
 }
