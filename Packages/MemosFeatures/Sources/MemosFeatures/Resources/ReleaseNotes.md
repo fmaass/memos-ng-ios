@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (50)
+
+- A tag, month or year card on the Collections tab now opens its own collection screen, with the card's cover picture and name on top and the Photos, Journal and Map tabs below, instead of jumping to the Library.
+- Photos lists that collection's pictures newest first, in the same grid as a trip, and they can be selected, shared and deleted from there.
+- Journal shows the memos of the collection: every memo carrying the tag, or every memo from that month or year.
+- Map shows the places of the collection's pictures.
+- Trip-only actions such as renaming, changing the dates or removing a picture stay off these automatic collections.
+- In a trip's Journal, two memos from the same day now have a gap between them, as the Timeline has.
+- Please open a tag card, a month card and a year card, try the three tabs on each, and open the Journal of a trip that has two memos on one day.
+
 ## 2.4.0 (49)
 
 - A memo whose pictures have all finished uploading is created right away instead of waiting for the next cold start of the app.
