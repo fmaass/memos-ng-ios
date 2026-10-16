@@ -210,8 +210,22 @@ enum LibraryMenuProbe {
 
     private static func menu(of holder: Holder) -> UIMenu? {
         typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
-        if let menu = (holder.view as? UIButton)?.menu, !leaves(menu).isEmpty { return menu }
+        let button = holder.view as? UIButton
+        if let menu = button?.menu, !leaves(menu).isEmpty { return menu }
+        // A button that builds its menu as it is about to open hears this event first, as UIKit
+        // sends it on the tap that opens the menu.
+        button?.sendActions(for: .menuActionTriggered)
+        if let menu = button?.menu, !leaves(menu).isEmpty { return menu }
         guard let configuration = configuration(of: holder) else { return nil }
+        if let interaction = holder.interaction, let button {
+            // Or as the menu is displayed: told, read, then told it ended.
+            interaction.delegate?.contextMenuInteraction?(
+                interaction, willDisplayMenuFor: configuration, animator: nil)
+            let shown = button.menu
+            interaction.delegate?.contextMenuInteraction?(
+                interaction, willEndFor: configuration, animator: nil)
+            if let shown, !leaves(shown).isEmpty { return shown }
+        }
         var type: AnyClass? = Swift.type(of: configuration)
         while let next = type, next != NSObject.self {
             for (name, encoding) in CollectionScreenTests.ivarList(of: next) {
