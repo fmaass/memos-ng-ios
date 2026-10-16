@@ -79,6 +79,14 @@ public final class TripMemberStore {
     /// The filtered read on the wire, per trip: its query and the token that owns the slot. A read
     /// of another query takes the slot; the one it took lands nothing.
     private var filteredFlights: [String: FilteredFlight] = [:]
+    /// The query the grid last chose for each trip, set in the turn that asks for it: what a
+    /// renewal asked under an earlier choice is measured against (`renewFiltered`). An
+    /// invalidation keeps it — the grid still shows that choice.
+    private var activeQueries: [String: TripMemberQuery] = [:]
+    /// The filtered read that failed, per trip: its query and lineage. Apart from "not read", so
+    /// the grid does not take a failure for an invalidation and ask again by itself; a new read,
+    /// an invalidation or another lineage ends it.
+    private var filteredFailures: [String: (lineage: Lineage, query: TripMemberQuery)] = [:]
 
     private struct FilteredFlight {
         let lineage: Lineage
@@ -475,6 +483,7 @@ public final class TripMemberStore {
     public func drainFiltered(
         _ trip: Trip, query: TripMemberQuery, using handle: SessionHandle, baseURL: URL
     ) async {
+        activeQueries[trip.uid] = query
         guard !query.isUnfiltered else {
             filteredFlights[trip.uid] = nil
             return
@@ -486,12 +495,31 @@ public final class TripMemberStore {
             await running.task.value
             return
         }
+        filteredFailures[trip.uid] = nil
         nextToken += 1
         let token = nextToken
         let task = Task { await self.runFiltered(lineage, query, token: token, handle, baseURL) }
         filteredFlights[trip.uid] = FilteredFlight(
             lineage: lineage, query: query, token: token, task: task)
         await task.value
+    }
+
+    /// A renewal of the filtered read for fresh signatures, asked under `query` (the signed-URL
+    /// refresher's, after its unfiltered drain): read only while `query` is still the one the
+    /// grid chose, checked in this turn, so a choice made while the drain was out is never
+    /// overwritten by the one it replaced. Nothing for the unfiltered query.
+    public func renewFiltered(
+        _ trip: Trip, query: TripMemberQuery, using handle: SessionHandle, baseURL: URL
+    ) async {
+        guard !query.isUnfiltered, activeQueries[trip.uid] == query else { return }
+        await drainFiltered(trip, query: query, using: handle, baseURL: baseURL)
+    }
+
+    /// Whether the grid's read of `query` failed under the current lineage and nothing has asked
+    /// again since: then the grid shows the error, not a read that never ends.
+    public func filteredFailed(for trip: Trip, query: TripMemberQuery) -> Bool {
+        guard let failure = filteredFailures[trip.uid], failure.query == query else { return false }
+        return current(failure.lineage)
     }
 
     /// What the grid shows for `query`: the drained members for the unfiltered one, else the
@@ -541,6 +569,9 @@ public final class TripMemberStore {
                 }
             } while cursor != nil
         } catch {
+            if stillCurrent(lineage), filteredFlights[uid]?.token == token {
+                filteredFailures[uid] = (lineage, query)
+            }
             await report(error, handle: handle) {
                 self.stillCurrent(lineage) && self.filteredFlights[uid]?.token == token
             }
@@ -743,12 +774,14 @@ public final class TripMemberStore {
             removedFlights = [:]
             filteredDrains = [:]
             filteredFlights = [:]
+            filteredFailures = [:]
             return
         }
         drained[uid] = nil
         flights[uid] = nil
         filteredDrains[uid] = nil
         filteredFlights[uid] = nil
+        filteredFailures[uid] = nil
         removedResults[uid] = nil
         removedFlights[uid] = nil
     }

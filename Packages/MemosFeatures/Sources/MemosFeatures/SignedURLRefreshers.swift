@@ -244,7 +244,8 @@ final class TripURLRefresher: SignedURLRefreshing {
             case .trip(let opened):
                 guard let trip = trips.trips.first(where: { $0.uid == opened.uid }) else { return }
                 await members.drain(trip, using: handle, baseURL: baseURL)
-                await members.drainFiltered(trip, query: query, using: handle, baseURL: baseURL)
+                // Fenced by the store against the grid's choice NOW, not the one captured here.
+                await members.renewFiltered(trip, query: query, using: handle, baseURL: baseURL)
             case .automatic:
                 guard let lease else { return }
                 await members.drain(scope, under: lease, using: handle, baseURL: baseURL)

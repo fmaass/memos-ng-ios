@@ -545,9 +545,10 @@ struct TripView: View {
         let shown = shownScope
         // Read here, in the body, so a drain that lands re-presents the viewer's source as well.
         let fresh = freshMembers(of: shown)
-        let current = shownMembers
-        let members = current.rows
-        let loaded = current.loaded
+        // What the viewer pages over: the grid's rows, the filtered read's under a filter.
+        let paged = viewerRows
+        let members = paged.rows
+        let loaded = paged.loaded
         modeContent(shown)
             .background(Color(.systemGroupedBackground))
             // On the grid; the rename alert, the file sheet and the viewer's cover each on a view
@@ -685,7 +686,7 @@ struct TripView: View {
             }
             .onChange(of: ViewerFit(members: members.map(\.id), loaded: loaded)) { _, fit in
                 guard let open = viewing else { return }
-                let now = shownMembers.rows
+                let now = viewerRows.rows
                 if Self.viewerOutlived(open, holding: held, members: now, loaded: fit.loaded) {
                     viewing = nil
                 } else {
@@ -713,7 +714,7 @@ struct TripView: View {
             .task(
                 id: FilterKey(
                     identity: identity, id: scope.id, query: manage.query,
-                    stale: filteredState == .notLoaded)
+                    stale: filteredState == .notLoaded && !filteredFailed)
             ) {
                 await drainFiltered()
             }
@@ -866,7 +867,7 @@ struct TripView: View {
     }
 
     private func grid(_ shown: CollectionScope) -> some View {
-        let members = shownMembers.rows
+        let members = viewerRows.rows
         let items = gridRows
         let state = manage.query.isUnfiltered ? memberStore.state(for: shown) : filteredState
         return LibraryGrid(
@@ -994,9 +995,11 @@ struct TripView: View {
             mode: .initial, on: .collections, claim: selection.isActive ? .select : nil)
     }
 
-    /// The trip's members as the store holds them now: what a tap of the toolbar acts on.
+    /// What a tap of the toolbar acts on: the grid's rows as the store holds them now, the
+    /// filtered read's under a filter (`viewerRows`), so a chosen picture past the drain's cap
+    /// is still one of them.
     private var currentMembers: [LibraryRow] {
-        shownMembers.rows
+        viewerRows.rows
     }
 
     /// What the screen shows (`shown`).
@@ -1153,6 +1156,11 @@ struct TripView: View {
     private func confirmRemove() {
         guard let asked = removing else { return }
         removing = nil
+        // Asked under one session, answered under another: the question was about pictures the
+        // session now on screen never chose, so nothing is sent.
+        guard let now = access(), now.handle.generation == asked.access.handle.generation else {
+            return
+        }
         Task {
             do {
                 let outcome = try await memberStore.remove(
@@ -1274,14 +1282,29 @@ struct TripView: View {
         return memberStore.filteredState(for: trip, query: manage.query)
     }
 
-    /// What the grid draws: the members, or the trip's filtered read while a filter is chosen —
-    /// narrowed to the chosen pictures while Show Selected is pressed.
+    /// Whether the grid's filtered read failed and nothing has asked again: no re-read by itself.
+    private var filteredFailed: Bool {
+        guard let trip = live ?? openedTrip else { return false }
+        return memberStore.filteredFailed(for: trip, query: manage.query)
+    }
+
+    /// What the grid draws: `viewerRows`, narrowed to the chosen pictures while Show Selected is
+    /// pressed.
     private var gridRows: [LibraryRow] {
-        var rows = shownMembers.rows
-        if !manage.query.isUnfiltered, let trip = live ?? openedTrip {
-            rows = memberStore.filteredMembers(for: trip, query: manage.query) ?? []
+        selection.visible(in: viewerRows.rows)
+    }
+
+    /// The grid's rows before Show Selected narrows them — the members, or the trip's filtered
+    /// read while a filter is chosen — and whether they are a reading: what a tap opens the
+    /// viewer over and pages through, and what the selection is kept within. Under a filter a
+    /// picture of the filtered read is there even when the capped drain never reached it.
+    private var viewerRows: (rows: [LibraryRow], loaded: Bool) {
+        guard !manage.query.isUnfiltered, let trip = live ?? openedTrip else {
+            let current = shownMembers
+            return (current.rows, current.loaded)
         }
-        return selection.visible(in: rows)
+        let filtered = memberStore.filteredMembers(for: trip, query: manage.query)
+        return (filtered ?? [], filtered != nil)
     }
 
     private func loadJournal() async {
