@@ -159,6 +159,10 @@ struct TripView: View {
     @State private var removing: TripPendingRemoval?
     /// Whether that question is on screen; its going away takes it off the screen only.
     @State private var askingRemove = false
+    /// Select mode's Set visibility (MEMNG-788): its question and the last run's banner.
+    @State private var acting = MemoActionFlow()
+    @State private var askingVisibility = false
+    @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     /// This showing's lease (`TripMemberStore.coverLease(for:)`): what its lapsed signatures'
     /// re-reads of the carried cover, the members and the journal must still hold.
     @State private var coverLease: TripMemberStore.CoverLease?
@@ -586,6 +590,19 @@ struct TripView: View {
                     Text(Self.removeExplanation)
                 }
             }
+            // Select mode's Set visibility (MEMNG-788): an alert, for the same reason.
+            .background {
+                Color.clear.alert(
+                    MemoActionFlow.question(
+                        acting.asking?.memos.count ?? 0, to: acting.asking?.visibility ?? .public),
+                    isPresented: $askingVisibility
+                ) {
+                    Button(MemoActionFlow.confirmTitle) { confirmVisibility() }
+                    Button("Cancel", role: .cancel) { acting.cancel() }
+                } message: {
+                    Text(MemoActionFlow.explanation)
+                }
+            }
             .background {
                 Color.clear.sheet(isPresented: $manage.showingRemoved) {
                     if let removing = live ?? openedTrip {
@@ -663,6 +680,7 @@ struct TripView: View {
                 held = []
                 selection.close()
                 removing = nil
+                acting.void()
             }
             // A picture that leaves the trip leaves the selection with it.
             // Only against a reading: a filtered read still out is [] and not an answer, so the
@@ -674,6 +692,8 @@ struct TripView: View {
             .onChange(of: manage.query) {
                 removing = nil
                 askingRemove = false
+                acting.void()
+                askingVisibility = false
             }
             // Select mode belongs to the grid: Journal or Map ends it.
             .onChange(of: mode) { _, now in
@@ -1066,8 +1086,11 @@ struct TripView: View {
     private var selectBar: some View {
         let members = currentMembers
         return VStack(spacing: DesignTokens.Space.tight) {
-            if let message = deleting.message {
-                LibraryDeleteToast(text: message) { deleting.dismissMessage() }
+            if let message = deleting.message ?? acting.message {
+                LibraryDeleteToast(text: message) {
+                    deleting.dismissMessage()
+                    acting.dismissMessage()
+                }
             }
             LibrarySelectToolbar(
                 count: selection.count,
@@ -1141,20 +1164,72 @@ struct TripView: View {
         }
     }
 
-    /// Select mode's actions menu: on a trip the one destructive Remove row (MEMNG-780), live
-    /// while something is chosen and no share or delete is out; none elsewhere.
+    /// Select mode's actions menu: on a trip Set visibility (MEMNG-788), then the destructive
+    /// Remove row (MEMNG-780), live while something is chosen and no share or delete is out; none
+    /// elsewhere.
     private var selectRows: [SelectAction] {
         guard scope.isTrip else { return [] }
         let free = LibrarySelectionPresentation.actionsEnabled(
             count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
         // Under a filter whose read is still out there are no rows to act on.
         let enabled = rowsSettled && free
+        let memos = MemoActionPicture.memos(of: chosenPictures)
+        let visibilityRows = MemoActionFlow.choices.map { value in
+            SelectAction(
+                id: "visibility-\(value.rawValue)", title: value.label,
+                systemImage: value == .public ? "globe" : "person.2"
+            ) { askVisibility(value) }
+        }
         return [
+            SelectAction(
+                id: "visibility", title: MemoActionFlow.visibilityRowTitle(memos.count),
+                systemImage: "eye", disabled: !enabled || actions == nil || memos.isEmpty,
+                children: visibilityRows),
             SelectAction(
                 id: "remove", title: Self.removeRowTitle(selection.count),
                 systemImage: "minus.circle", role: .destructive, disabled: !enabled
-            ) { askRemove() }
+            ) { askRemove() },
         ]
+    }
+
+    /// The chosen pictures as the memo actions see them, in the order chosen.
+    private var chosenPictures: [MemoActionPicture] {
+        selection.rows(in: currentMembers).map(MemoActionPicture.init)
+    }
+
+    /// Public or Just us (MEMNG-788): the question is asked about the memos chosen NOW, under
+    /// this session and this filter (`MemoActionFlow.ask`).
+    private func askVisibility(_ visibility: MemoVisibility) {
+        guard rowsSettled, let access = access() else { return }
+        acting.ask(
+            memos: MemoActionPicture.memos(of: chosenPictures), visibility: visibility,
+            generation: access.handle.generation, filter: "\(manage.query)")
+        askingVisibility = acting.asking != nil
+    }
+
+    /// The question's Change, claimed synchronously; the members and the filtered read are read
+    /// again after the run, which let them go (`TripStore.membersChanged`).
+    private func confirmVisibility() {
+        guard let actions, let access = access(),
+            let asked = acting.claim(
+                generation: access.handle.generation, filter: "\(manage.query)")
+        else {
+            acting.cancel()
+            return
+        }
+        Task {
+            await acting.perform(reread: { await rereadMembers() }) {
+                await actions.setVisibility(
+                    asked.visibility, forMemos: asked.memos, using: access.handle,
+                    baseURL: access.baseURL)
+            }
+        }
+    }
+
+    /// The members and the grid's filtered read, read again after a memo action let them go.
+    private func rereadMembers() async {
+        await drain()
+        await drainFiltered()
     }
 
     /// The Remove row: the question is asked about the pictures chosen NOW, the trip and the
@@ -1203,6 +1278,7 @@ struct TripView: View {
         shareTask?.cancel()
         shareTask = nil
         deleting.abandon()
+        acting.abandon()
         removing = nil
         dock?.release(dockClaim)
     }

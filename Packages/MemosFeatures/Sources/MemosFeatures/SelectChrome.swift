@@ -8,7 +8,10 @@ struct SelectAction: Identifiable {
     var role: ButtonRole?
     /// Drawn but taking no press: nothing chosen, or a share or a delete is out (MEMNG-780).
     var disabled = false
-    let action: () -> Void
+    /// A submenu's rows (MEMNG-788): drawn as a nested menu under the title, whose own press does
+    /// nothing; empty for an ordinary row.
+    var children: [SelectAction] = []
+    var action: () -> Void = {}
 }
 
 /// Select mode's actions menu's rows, in order: the Library's header menu and the trip's system
@@ -18,10 +21,17 @@ struct SelectActionRows: View {
 
     var body: some View {
         ForEach(rows) { row in
-            Button(row.title, systemImage: row.systemImage, role: row.role) {
-                row.action()
+            if row.children.isEmpty {
+                Button(row.title, systemImage: row.systemImage, role: row.role) {
+                    row.action()
+                }
+                .disabled(row.disabled)
+            } else {
+                Menu(row.title, systemImage: row.systemImage) {
+                    SelectActionRows(rows: row.children)
+                }
+                .disabled(row.disabled)
             }
-            .disabled(row.disabled)
         }
     }
 }

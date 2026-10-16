@@ -1,4 +1,5 @@
 import MemosCore
+import MemosOutbox
 import SwiftUI
 
 /// What the app shows while somebody is signed in.
@@ -28,6 +29,10 @@ struct MainTabView: View {
     /// timeline (`TimelineView`), and read by every tab through the environment.
     @State private var trips: TripStore?
     @State private var members: TripMemberStore?
+    /// Select mode's memo actions (MEMNG-788), built beside the trip stores it re-reads.
+    @State private var actions: MemoActionStore?
+    /// What Add to trip asks whether an edit of a picture's memo is still owed from this phone.
+    @Environment(Outbox.self) private var outbox: Outbox?
 
     /// Opens on the Timeline (plan page 3929 decision 11), third of the four since Collections
     /// came in beside the Library (MEMNG-709). A test that is about another tab's screen under the
@@ -69,8 +74,18 @@ struct MainTabView: View {
             onUnauthorized: { [session] refusal in await session.handle(refusal) }
         )
         memberStore.reports(to: session)
+        let actionStore = MemoActionStore(
+            trips: store,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) },
+            owesEdit: { [outbox] memo, picture in
+                MemoActionStore.owesEdit(
+                    in: outbox?.jobs ?? [], memoUID: memo, attachmentUID: picture)
+            }
+        )
+        actionStore.reports(to: session)
         trips = store
         members = memberStore
+        actions = actionStore
     }
 
     /// The one card the session is entitled to, and never two: which of them is on screen is
@@ -117,6 +132,7 @@ struct MainTabView: View {
         .environment(monthJump)
         .environment(trips)
         .environment(members)
+        .environment(actions)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in

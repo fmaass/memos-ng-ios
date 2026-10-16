@@ -50,6 +50,11 @@ struct MediaLibraryView: View {
     @State private var shareTask: Task<Void, Never>?
     /// Select mode's Delete: the question, and the run its yes starts (MEMNG-589).
     @State private var deleting = LibraryDeleteFlow()
+    /// Select mode's memo actions (MEMNG-788): the visibility question and the last run's banner.
+    @State private var acting = MemoActionFlow()
+    @State private var askingVisibility = false
+    @Environment(MemoActionStore.self) private var actions: MemoActionStore?
+    @Environment(TripStore.self) private var trips: TripStore?
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
     @State private var dockClaim = UUID()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
@@ -108,8 +113,11 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .bottom) {
                 if bottomBar == .select {
                     VStack(spacing: DesignTokens.Space.tight) {
-                        if let message = deleting.message {
-                            LibraryDeleteToast(text: message) { deleting.dismissMessage() }
+                        if let message = deleting.message ?? acting.message {
+                            LibraryDeleteToast(text: message) {
+                                deleting.dismissMessage()
+                                acting.dismissMessage()
+                            }
                         }
                         LibrarySelectToolbar(
                             count: selection.count,
@@ -141,6 +149,20 @@ struct MediaLibraryView: View {
                         Button("Cancel", role: .cancel) { deleting.claim(.cancelled) }
                     } message: {
                         Text(LibraryDeleteFlow.explanation)
+                    }
+                    // Set visibility's question (MEMNG-788), on a view of its own.
+                    .background {
+                        Color.clear.alert(
+                            MemoActionFlow.question(
+                                acting.asking?.memos.count ?? 0,
+                                to: acting.asking?.visibility ?? .public),
+                            isPresented: $askingVisibility
+                        ) {
+                            Button(MemoActionFlow.confirmTitle) { confirmVisibility() }
+                            Button("Cancel", role: .cancel) { acting.cancel() }
+                        } message: {
+                            Text(MemoActionFlow.explanation)
+                        }
                     }
                 } else if dock != nil, Self.footRow(bottomBar) != nil {
                     // The room of the app's bar (`footRow`, MEMNG-690), which `MainTabs` keeps
@@ -267,6 +289,11 @@ struct MediaLibraryView: View {
             await loadBuckets()
         }
         // A picture that leaves the grid leaves the selection with it.
+        // A visibility question asked under one query is no question under another.
+        .onChange(of: filterKey) {
+            acting.void()
+            askingVisibility = false
+        }
         .onChange(of: library?.items) { _, items in
             selection.prune(keeping: items ?? [])
         }
@@ -282,6 +309,7 @@ struct MediaLibraryView: View {
             } else {
                 abandonShare()
                 deleting.abandon()
+                acting.abandon()
                 dock?.release(dockClaim)
             }
         }
@@ -293,6 +321,7 @@ struct MediaLibraryView: View {
             selection.close()
             abandonShare()
             deleting.abandon()
+            acting.abandon()
             dock?.release(dockClaim)
         }
     }
@@ -498,6 +527,7 @@ struct MediaLibraryView: View {
             ),
             select: choice.scope == .all ? { selection.begin() } : nil,
             selecting: selection.isActive,
+            menuRows: selectRows,
             close: { selection.close() }
         ) {
             LibraryFilterMenuContent(
@@ -634,6 +664,93 @@ struct MediaLibraryView: View {
             get: { deleting.asking != nil },
             set: { if !$0 { deleting.claim(.cancelled) } }
         )
+    }
+
+    /// The Library's query as one value: what a visibility question is fenced by (MEMNG-788).
+    private var filterKey: String {
+        guard let library else { return "" }
+        return [
+            "\(library.filter)", "\(library.order)", library.tag ?? "", "\(library.mine)",
+            "\(library.visibility)",
+        ].joined(separator: "|")
+    }
+
+    /// The chosen pictures as the memo actions see them, in the order chosen.
+    private var chosenPictures: [MemoActionPicture] {
+        selection.rows(in: library?.items ?? []).map(MemoActionPicture.init)
+    }
+
+    /// Select mode's actions menu (MEMNG-788): Add to trip, a submenu of the trips that have a
+    /// tag, and Set visibility for the chosen memos, Public or Just us behind a question. Each is
+    /// drawn disabled while none of the chosen pictures is on a memo of mine.
+    private var selectRows: [SelectAction] {
+        let memos = MemoActionPicture.memos(of: chosenPictures)
+        let free =
+            actions != nil
+            && LibrarySelectionPresentation.actionsEnabled(
+                count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
+        let tagged = (trips?.trips ?? []).filter { $0.tag != nil }
+        let tripRows = tagged.map { trip in
+            SelectAction(id: "add-to-\(trip.uid)", title: trip.title, systemImage: "suitcase") {
+                addToTrip(trip)
+            }
+        }
+        let visibilityRows = MemoActionFlow.choices.map { value in
+            SelectAction(
+                id: "visibility-\(value.rawValue)", title: value.label,
+                systemImage: value == .public ? "globe" : "person.2"
+            ) { askVisibility(value) }
+        }
+        return [
+            SelectAction(
+                id: "add-to-trip", title: MemoActionFlow.addRowTitle, systemImage: "suitcase",
+                disabled: !free || memos.isEmpty || tagged.isEmpty, children: tripRows),
+            SelectAction(
+                id: "visibility", title: MemoActionFlow.visibilityRowTitle(memos.count),
+                systemImage: "eye", disabled: !free || memos.isEmpty, children: visibilityRows),
+        ]
+    }
+
+    /// Public or Just us: the question is asked about the memos chosen NOW, under this session
+    /// and this query (`MemoActionFlow.ask`).
+    private func askVisibility(_ visibility: MemoVisibility) {
+        guard let handle = session.activeHandle else { return }
+        acting.ask(
+            memos: MemoActionPicture.memos(of: chosenPictures), visibility: visibility,
+            generation: handle.generation, filter: filterKey)
+        askingVisibility = acting.asking != nil
+    }
+
+    /// The question's Change, claimed synchronously; the grid and its day counts are read again
+    /// after the run.
+    private func confirmVisibility() {
+        guard let actions, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL,
+            let asked = acting.claim(generation: handle.generation, filter: filterKey)
+        else {
+            acting.cancel()
+            return
+        }
+        Task {
+            await acting.perform(reread: { await refreshAll() }) {
+                await actions.setVisibility(
+                    asked.visibility, forMemos: asked.memos, using: handle, baseURL: baseURL)
+            }
+        }
+    }
+
+    /// A trip of the submenu: the chosen pictures go to it in one inclusion; no question, it
+    /// changes no visibility and is undone by Remove.
+    private func addToTrip(_ trip: Trip) {
+        guard let actions, let handle = session.activeHandle, let baseURL = session.serverBaseURL
+        else { return }
+        let chosen = chosenPictures
+        Task {
+            await acting.perform(reread: { await refreshAll() }) {
+                await actions.add(
+                    attachments: chosen, toTrip: trip, using: handle, baseURL: baseURL)
+            }
+        }
     }
 
     /// The alert's yes. The session handle is taken HERE, at the answer, and the whole run goes out
