@@ -127,14 +127,116 @@ private final class AudienceCredentials: CredentialStore, @unchecked Sendable {
     }
 }
 
-/// "Captured by me" and Visibility pressed in the Library's own filter menu (MEMNG-787), hosted in
-/// the real `MainTabView` over a real `SessionStore` and the real generated client: the store's
-/// setters and the header lookup are held in MemosCoreTests, and what only a hosted screen shows is
-/// that the menu's rows reach them — the list read, the day buckets read under the same query, and
-/// the grid and its heading drawn from those two answers.
+/// The Library header's menus, read and pressed without opening them. A menu drawn in the
+/// screen's content rather than in a navigation bar is handed to UIKit as a button's menu or as a
+/// context-menu interaction whose configuration builds it on demand; either way the row's own
+/// `UIAction` is performed as the open menu would perform it (`TripMenuProbe`).
+@MainActor
+enum LibraryMenuProbe {
+    /// Performs the first row titled `title`, looking at the topmost menu holders first so the
+    /// header answers before any tile's long-press menu is asked for its rows.
+    static func perform(_ title: String, in window: UIWindow) -> Bool {
+        for holder in holders(in: window) {
+            guard let menu = menu(of: holder) else { continue }
+            for case let action as UIAction in leaves(menu) where action.title == title {
+                action.performWithSender(nil, target: nil)
+                return true
+            }
+        }
+        return false
+    }
+
+    /// What holds a menu on screen, for a failure's message: each holder's kind, label and rows.
+    static func describe(_ window: UIWindow) -> String {
+        holders(in: window).prefix(12).map { holder in
+            let rows = menu(of: holder).map { leaves($0).map(title) } ?? []
+            return "\(type(of: holder.view)) '\(holder.view.accessibilityLabel ?? "-")' \(rows)"
+        }
+        .joined(separator: "; ")
+    }
+
+    private struct Holder {
+        let view: UIView
+        let interaction: UIContextMenuInteraction?
+    }
+
+    /// Every button with a menu and every view with a context-menu interaction, top to bottom.
+    private static func holders(in window: UIWindow) -> [Holder] {
+        var found: [(Holder, CGFloat)] = []
+        var views: [UIView] = [window]
+        while let view = views.popLast() {
+            views.append(contentsOf: view.subviews)
+            let top = view.convert(view.bounds, to: window).minY
+            if let button = view as? UIButton, button.menu != nil {
+                found.append((Holder(view: button, interaction: nil), top))
+            }
+            for case let interaction as UIContextMenuInteraction in view.interactions {
+                found.append((Holder(view: view, interaction: interaction), top))
+            }
+        }
+        return found.sorted { $0.1 < $1.1 }.map(\.0)
+    }
+
+    private static func menu(of holder: Holder) -> UIMenu? {
+        typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
+        guard let interaction = holder.interaction else {
+            return (holder.view as? UIButton)?.menu
+        }
+        // One interaction can answer for a whole hosting view by location, so it is asked where
+        // the header's Filter button is drawn whenever that point is inside it.
+        let view = holder.view
+        var point = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        if let window = view.window, let filter = filterFrame(in: window) {
+            let inside = view.convert(CGPoint(x: filter.midX, y: filter.midY), from: window)
+            if view.bounds.contains(inside) { point = inside }
+        }
+        guard
+            let configuration = interaction.delegate?.contextMenuInteraction(
+                interaction, configurationForMenuAtLocation: point),
+            configuration.responds(to: Selector(("actionProvider"))),
+            let block = configuration.value(forKey: "actionProvider") as AnyObject?,
+            !(block is NSNull)
+        else { return nil }
+        return unsafeBitCast(block, to: Provider.self)([])
+    }
+
+    /// Where the element read out as "Filter" is, in the window's coordinates.
+    private static func filterFrame(in window: UIWindow) -> CGRect? {
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object is UITabBar { continue }
+            if object.accessibilityLabel == "Filter" {
+                return window.convert(object.accessibilityFrame, from: nil)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
+    private static func leaves(_ element: UIMenuElement?) -> [UIMenuElement] {
+        guard let element else { return [] }
+        if let menu = element as? UIMenu { return menu.children.flatMap(leaves) }
+        if let deferred = element as? UIDeferredMenuElement {
+            return CollectionScreenTests.provided(by: deferred).flatMap(leaves)
+        }
+        return [element]
+    }
+
+    private static func title(_ element: UIMenuElement) -> String {
+        (element as? UIAction)?.title ?? (element as? UICommand)?.title ?? "?"
+    }
+}
+
+/// "Captured by me" and Visibility pressed in the Library's own filter menu (MEMNG-787),
+/// hosted in the real `MainTabView` over a real `SessionStore` and the real generated client.
+/// The store's setters and the header lookup are held in MemosCoreTests; what only a hosted
+/// screen shows is that the menu's rows reach them — the list read, the day buckets read under
+/// the same query, and the grid and its heading drawn from those two answers.
 ///
-/// In this suite for the reason `MediaLibrarySegmentTests` is: it installs the loader's transport,
-/// process-wide, and the suite is serialized.
+/// In this suite for the reason `MediaLibrarySegmentTests` is: it installs the loader's
+/// transport, process-wide, and the suite is serialized.
 extension MediaImageLoaderTests {
     private func audienceSession(_ transport: AudienceTransport) -> SessionStore {
         SessionStore(
@@ -201,7 +303,8 @@ extension MediaImageLoaderTests {
             let session = audienceSession(wire)
             await session.enteredForeground()
             await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_aud")
-            #expect(session.state.user?.subject == AudienceWire.subject, "precondition: signed in")
+            #expect(
+                session.state.user?.subject == AudienceWire.subject, "precondition: signed in")
             let window = Self.audienceWindow()
             window.rootViewController = UIHostingController(
                 rootView: MainTabView(opening: .library).environment(session))
@@ -223,7 +326,9 @@ extension MediaImageLoaderTests {
             // Captured by me, pressed as the menu would press it.
             let lists = wire.reads(AudienceWire.listAttachments).count
             let days = wire.reads(AudienceWire.buckets).count
-            #expect(TripMenuProbe.perform("Captured by me", in: window), "no Captured by me row")
+            #expect(
+                LibraryMenuProbe.perform("Captured by me", in: window),
+                "no Captured by me row: \(LibraryMenuProbe.describe(window))")
             let mine = await audienceUntil(window) {
                 Set(TripProbe.tiles(in: window)) == ["aud-a", "aud-b"]
                     && Self.audienceHeading(in: window) == bucketCountLabel(7)
@@ -240,7 +345,9 @@ extension MediaImageLoaderTests {
             // Visibility → Just us, with Captured by me still on.
             let lists2 = wire.reads(AudienceWire.listAttachments).count
             let days2 = wire.reads(AudienceWire.buckets).count
-            #expect(TripMenuProbe.perform("Just us", in: window), "no Just us row")
+            #expect(
+                LibraryMenuProbe.perform("Just us", in: window),
+                "no Just us row: \(LibraryMenuProbe.describe(window))")
             let justUs = await audienceUntil(window) {
                 TripProbe.tiles(in: window) == ["aud-a"]
                     && Self.audienceHeading(in: window) == bucketCountLabel(3)
@@ -250,7 +357,8 @@ extension MediaImageLoaderTests {
             let usDays = wire.reads(AudienceWire.buckets).dropFirst(days2)
                 .filter { $0["size"] == "day" }
             #expect(usLists.last?["mine"] == "true", "Just us dropped mine from the list")
-            #expect(usLists.last?["visibility"] == "PROTECTED", "the list was not read as Just us")
+            #expect(
+                usLists.last?["visibility"] == "PROTECTED", "the list was not read as Just us")
             #expect(usDays.last?["mine"] == "true", "Just us dropped mine from the day counts")
             #expect(
                 usDays.last?["visibility"] == "PROTECTED",
