@@ -1975,6 +1975,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             if gone.contains(uid) { return nil }
             let film = films.contains(uid)
             if film, query["type"] == "image" { return nil }
+            // `mine=true` leaves another member's picture out, as the server does (MEMNG-787).
+            if query["mine"] == "true", theirs.contains(uid) { return nil }
             return item(
                 uid, taken: day.element, sig: sig, bare: bare, mine: !theirs.contains(uid),
                 mime: film ? "video/mp4" : "image/jpeg")
@@ -3146,5 +3148,81 @@ enum TripMenuProbe {
 
     private static func title(_ element: UIMenuElement) -> String {
         (element as? UIAction)?.title ?? (element as? UICommand)?.title ?? "?"
+    }
+}
+
+// MARK: - Captured by me and Visibility (MEMNG-787)
+
+extension TripScreenRenderTests {
+    /// The trip's filter menu, read off its bar item: the Kind rows, "Captured by me", the
+    /// Visibility rows, Sort By, then Removed from trip; "Captured by me" reads the member route
+    /// with `mine=true` and the grid is exactly my pictures, while the hero and the Map keep all
+    /// five; "Just us" then reads `visibility=PROTECTED` with `mine` still on.
+    @Test("the trip's Captured by me and Just us read the server; the hero and the Map keep all")
+    func capturedByMeOnATrip() async {
+        let wire = TripWire()
+        wire.transport.others("p1")
+        wire.transport.others("p3")
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            _ = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(TripProbe.tiles(in: screen.window) == Self.files, "control: the grid landed")
+            let rows = TripMenuProbe.rows(of: TripView.filterButton, in: screen.window)
+            let wanted = [
+                "All Items", "Photos", "Videos", "Captured by me", "Any", "Public", "Just us",
+                "Oldest First", "Newest First", TripView.removedRowButton,
+            ]
+            let positions = wanted.map { rows.firstIndex(of: $0) ?? -1 }
+            #expect(
+                !positions.contains(-1) && positions == positions.sorted(),
+                "the filter menu's rows: \(rows)")
+            let before = wire.transport.trips.calls(TripRows.members).count
+            #expect(TripMenuProbe.perform("Captured by me", in: screen.window), "no such row")
+            let read = await screen.until {
+                wire.transport.trips.calls(TripRows.members).dropFirst(before).contains {
+                    TripRows.query($0.path, "mine") == "true"
+                        && TripRows.query($0.path, "visibility") == nil
+                }
+            }
+            #expect(read, "no mine read: \(wire.transport.trips.calls(TripRows.members))")
+            let grid = await screen.until {
+                TripProbe.tiles(in: screen.window) == ["p0", "p2", "p4"]
+            }
+            #expect(grid, "the grid: \(TripProbe.tiles(in: screen.window))")
+            #expect(manage.query.mine, "the choice did not reach the screen's query")
+            #expect(screen.says("5 photos"), "the hero lost members to a filter")
+            let mapped = TripMapPresentation.memberUids(of: record, in: stores.1)
+            #expect(mapped == Set(Self.files), "the map's members: \(mapped ?? [])")
+
+            let next = wire.transport.trips.calls(TripRows.members).count
+            #expect(TripMenuProbe.perform("Just us", in: screen.window), "no Just us row")
+            let shared = await screen.until {
+                wire.transport.trips.calls(TripRows.members).dropFirst(next).contains {
+                    TripRows.query($0.path, "visibility") == "PROTECTED"
+                        && TripRows.query($0.path, "mine") == "true"
+                }
+            }
+            #expect(shared, "no Just us read: \(wire.transport.trips.calls(TripRows.members))")
+            #expect(manage.query.visibility == .justUs)
+            let still = TripMapPresentation.memberUids(of: record, in: stores.1)
+            #expect(still == Set(Self.files), "the map's members: \(still ?? [])")
+        }
+    }
+
+    /// The trip's menu and the Library's draw "Captured by me" and Visibility from ONE piece of
+    /// view code, between the Kind picker and Sort By.
+    @Test("the trip's filter menu is the shared rows, a divider, Sort By, a divider, Removed")
+    func theTripMenuSharesTheRows() {
+        let content = TripFilterMenuContent(query: .constant(.unfiltered), showRemoved: {})
+        let parts =
+            Mirror(reflecting: content.body).descendant("value").map { tuple in
+                Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
+            } ?? []
+        #expect(parts.count == 5, "the menu's body is \(type(of: content.body))")
+        #expect(parts.first == "MediaFilterRows", "the shared rows are not first: \(parts)")
+        #expect(parts.count == 5 && parts[2] == "SortByMenu", "\(parts)")
     }
 }
