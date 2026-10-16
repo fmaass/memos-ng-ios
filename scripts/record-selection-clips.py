@@ -35,6 +35,7 @@ SCENES = [
     "781a-collections-retap",
     "783-collection-cards",
     "822-collection-modes-bar",
+    "845a-library-scope-row",
 ]
 ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
 
@@ -171,32 +172,50 @@ class Driver:
         time.sleep(3.5)
 
     def scene_822(self):
-        # A tag card once Phase 2 lands; until then the one trip card opens the same screen.
+        # MEMNG-845: the row comes and goes as the Library's scope row does (scene_845a): the
+        # trip opens on the tabs, its scroll brings the row, the top gives the tabs back.
         time.sleep(2)
         self.tap("Portugal")
         time.sleep(3.5)
-        # Photos | Journal | Map in the capsule (CollectionModePicker.identifier).
+        self.fold()   # the capsule morphs into the Collections icon and the modes
+        time.sleep(3)
         self.tap_segment("collection-modes", 1, 3, "'Journal' segment")
+        time.sleep(3)
+        self.tap_segment("collection-modes", 2, 3, "'Map' segment")
         time.sleep(3)
         self.tap_segment("collection-modes", 0, 3, "'Photos' segment")
         time.sleep(3)
-        self.fold()
-        time.sleep(3)
-        self.tap_id("main-bar-folded", "the folded icon")   # the modes row again
-        time.sleep(3)
         self.tap_id("collection-modes-show-tabs", "the row's Collections icon")   # full capsule
         time.sleep(3)
-        self.tap("Timeline", lowest=True)
+        self.tap("Collections", lowest=True)   # pressed where it shows: the row again
         time.sleep(3)
-        self.tap("Collections", lowest=True)   # back on Collections: the modes row
+        self.swipe(200, 400, 200, 700, 0.6)   # back to the top: the tabs
         time.sleep(3)
-        self.swipe(200, 400, 200, 700, 0.6)   # to the top first: the trip has little travel left
-        time.sleep(2.5)
         self.fold()
         time.sleep(3)
-        self.find_id("main-bar-folded")   # folded before Back, or the scene stops here
+        self.find_id("collection-modes")   # the row before Back, or the scene stops here
         self.back()
         time.sleep(3.5)
+
+    def scene_845a(self):
+        # The Library's scope row, the reference scene_822 is matched to (MEMNG-845).
+        time.sleep(2)
+        self.swipe(200, 600, 200, 300, 0.6)   # the capsule morphs into the icon and the scope
+        time.sleep(3)
+        self.tap_segment("library-scope", 1, 3, "'Months' segment")
+        time.sleep(3)
+        self.tap_segment("library-scope", 2, 3, "'All' segment")
+        time.sleep(3)
+        self.tap_segment("library-scope", 0, 3, "'Years' segment")
+        time.sleep(3)
+        self.tap_id("library-show-tabs", "the row's Library icon")   # full capsule
+        time.sleep(3)
+        self.tap("Library", lowest=True)   # pressed where it shows: the row again
+        time.sleep(3)
+        self.swipe(200, 300, 200, 750, 0.6)   # back to the top: the tabs
+        time.sleep(2)
+        self.swipe(200, 300, 200, 750, 0.6)
+        time.sleep(3)
 
     def fold(self):
         """A short drag down that stays inside the trip's few points of travel: a longer one

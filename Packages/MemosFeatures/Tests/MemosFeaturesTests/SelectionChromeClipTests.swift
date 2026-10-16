@@ -72,10 +72,25 @@ extension MediaImageLoaderTests {
             #expect(await ClipStage.served(transport, TripRows.list, atLeast: 1))
             await ClipStage.settle(window, seconds: 2)
             #expect(await ClipStage.scene("822-collection-modes-bar"))
-            // The driver's last touch is Back from a folded trip: the root's +, unfolded.
+            // The driver's last touch is Back from the trip's modes row: the root's +.
             let plus = CollectionsScreen.newTripButton
             let root = await ClipStage.showsSoon(plus, in: window)
             #expect(root, "after Back the Collections root's + is not on screen")
+        }
+    }
+
+    @Test(
+        "clip 845: the Library's scope row, the reference the modes row is matched to",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipLibraryScopeRow() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            #expect(await ClipStage.scene("845a-library-scope-row"))
         }
     }
 

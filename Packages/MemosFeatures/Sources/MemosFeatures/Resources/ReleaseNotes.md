@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (52)
+
+- When a trip, tag, month or year is open, the bottom capsule now behaves as it does in the Library: it opens with the four tabs, and the Photos, Journal and Map tabs take their place once the grid scrolls.
+- Scrolling back to the top morphs the three tabs back into the four. Tapping the Collections icon brings the four back at any time, and tapping Collections again brings the three.
+- The Map keeps whichever capsule was showing when it was chosen.
+- Please open a trip, scroll down and back up, tap the Collections icon and then the Collections tab, and compare the motion with the Library's Years, Months and All.
+
 ## 2.4.0 (51)
 
 - When a trip, tag, month or year is open, the Photos, Journal and Map tabs now sit in the bottom capsule, where the Library's Years, Months and All tabs are, instead of in a row under the cover picture. Photos is chosen when the collection opens, and the grid starts right under the cover.

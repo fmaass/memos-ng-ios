@@ -1000,21 +1000,24 @@ struct TripScreenRenderTests {
         await collectionsStack(dock: dock) { screen, stack, _ in
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let shown = await screen.until {
-                stack.paths.last?.count == 1 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 1 && dock.collectionModes != nil
             }
-            #expect(shown, "no modes row over the trip: \(String(describing: Self.shape(dock)))")
+            #expect(shown, "the trip attached no modes")
+            // MEMNG-845: a collection opens on the tabs, as the Library does.
+            let opened = String(describing: Self.shape(dock))
+            #expect(Self.shape(dock) == .tabs, "the trip opened on \(opened)")
             let bar = MainTabs<EmptyView>.pressing(
                 selection: .constant(.collections), dock: dock)
             bar.wrappedValue = .timeline
             dock.send(.pressedTab(.collections, showing: .timeline))
-            #expect(Self.shape(dock) == .modes, "coming back lost the row")
+            #expect(Self.shape(dock) == .tabs, "coming back drew the row")
             dock.send(.pressedCollectionsIcon)
             #expect(Self.shape(dock) == .tabs, "the row's icon gave no full capsule")
             bar.wrappedValue = .collections
             let popped = await screen.until(seconds: 1) { stack.paths.last?.isEmpty == true }
             #expect(!popped, "the re-tap over the trip popped it")
             #expect(stack.paths.last?.count == 1)
-            #expect(Self.shape(dock) == .modes, "the re-tap did not bring the row back")
+            #expect(Self.shape(dock) == .modes, "the re-tap did not bring the row")
         }
     }
 
@@ -1044,16 +1047,19 @@ struct TripScreenRenderTests {
 
     /// The registry follows the stack's path (MEMNG-822): each top's own modes row, the full
     /// capsule at the root, and a cover over the trip or a tab switch changing nothing.
-    @Test("A, then B, then Back to A and the root: each top's modes row, the root's full capsule")
+    @Test("A, then B, then Back to A and the root: each top's own modes, the tabs on each arrival")
     func theModesRowFollowsThePath() async {
         let dock = AppDock()
         dock.send(.selected(.collections))
         await collectionsStack(dock: dock, also: "Spain 2025") { screen, stack, box in
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let ready4 = await screen.until {
-                stack.paths.last?.count == 1 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 1 && dock.collectionModes != nil
             }
             #expect(ready4)
+            #expect(Self.shape(dock) == .tabs, "A opened on its row")
+            dock.send(.pressedTab(.collections, showing: .collections))
+            #expect(Self.shape(dock) == .modes, "the Collections press over A drew no row")
             let a = dock.collectionModes
             // A cover over A takes it off screen and gives it back: the path never moved.
             box.covering = true
@@ -1069,7 +1075,7 @@ struct TripScreenRenderTests {
             // Away and back with no appearance between: the row is there at once.
             dock.send(.selected(.timeline))
             dock.send(.selected(.collections))
-            #expect(Self.shape(dock) == .modes, "the tab switch lost the row")
+            #expect(Self.shape(dock) == .tabs, "the tab switch kept the row")
             guard let spain = box.also else {
                 Issue.record("no second trip listed")
                 return
@@ -1079,13 +1085,13 @@ struct TripScreenRenderTests {
                 stack.paths.last?.count == 2 && dock.collectionModes != nil
                     && dock.collectionModes !== a
             }
-            #expect(onB, "B's screen did not bring its own row")
-            #expect(Self.shape(dock) == .modes)
+            #expect(onB, "B's screen did not bring its own modes")
+            #expect(Self.shape(dock) == .tabs, "B opened on its row")
             box.trail?.wrappedValue.removeLast()
             let ready7 = await screen.until { stack.paths.last?.count == 1 }
             #expect(ready7)
             #expect(dock.collectionModes === a, "Back to A drew another screen's row")
-            #expect(Self.shape(dock) == .modes)
+            #expect(Self.shape(dock) == .tabs, "Back to A opened on its row")
             box.trail?.wrappedValue = []
             let ready8 = await screen.until { stack.paths.last?.isEmpty == true }
             #expect(ready8)
@@ -1095,14 +1101,14 @@ struct TripScreenRenderTests {
 
     /// The Map is not a scroll view and feeds the dock nothing (MEMNG-822): the drag that folds
     /// the bar on Photos folds nothing on the Map, and the row stays.
-    @Test("a drag folds the modes row on Photos and never on the Map")
+    @Test("a drag brings the modes row on Photos and moves nothing on the Map")
     func theMapNeverFolds() async {
         let dock = AppDock()
         dock.send(.selected(.collections))
         await collectionsStack(dock: dock, height: 700) { screen, stack, _ in
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let ready9 = await screen.until {
-                stack.paths.last?.count == 1 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 1 && dock.collectionModes != nil
             }
             #expect(ready9)
             await screen.settle(turns: 40)
@@ -1111,29 +1117,29 @@ struct TripScreenRenderTests {
             for scroller in Self.scrollViews(in: screen.window) {
                 await TripProbe.drag(scroller, by: 240, on: screen)
             }
-            #expect(dock.mode == .tabs, "the Map folded the bar")
-            #expect(Self.shape(dock) == .modes)
+            #expect(dock.mode == .tabs, "the Map moved the bar")
+            #expect(Self.shape(dock) == .tabs)
             // The control: the same drag on Photos folds it.
             dock.collectionModes?.choose(.photos)
             await screen.settle(turns: 40)
             if let scroller = TripProbe.mainScroll(in: screen.window) {
                 await TripProbe.drag(scroller, by: 240, on: screen)
             }
-            #expect(Self.shape(dock) == .folded, "the drag on Photos folded nothing")
+            #expect(Self.shape(dock) == .modes, "the drag on Photos brought no row")
         }
     }
 
     /// A Photos scroll still moving when the Map is chosen (MEMNG-822): in one turn the Map is
     /// chosen and the outgoing grid moves on, the order a decelerating scroll view gives, and its
     /// reading — Photos', no longer on screen — leaves the Map's row whole.
-    @Test("a Photos scroll still moving when the Map is chosen leaves the Map's row whole")
+    @Test("a Photos scroll still moving when the Map is chosen leaves the Map's bar as it stood")
     func anOutgoingPhotosScrollLeavesTheMapWhole() async {
         let dock = AppDock()
         dock.send(.selected(.collections))
         await collectionsStack(dock: dock, height: 700) { screen, stack, _ in
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let ready11 = await screen.until {
-                stack.paths.last?.count == 1 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 1 && dock.collectionModes != nil
             }
             #expect(ready11)
             await screen.settle(turns: 40)
@@ -1154,7 +1160,7 @@ struct TripScreenRenderTests {
             #expect(dock.collectionModes?.mode == .map)
             #expect(dock.mode == .tabs, "the outgoing Photos scroll folded the bar")
             let shape = Self.shape(dock)
-            #expect(shape == .modes, "the Map's row went \(String(describing: shape))")
+            #expect(shape == .tabs, "the Map's bar went \(String(describing: shape))")
         }
     }
 
@@ -1168,7 +1174,7 @@ struct TripScreenRenderTests {
         await collectionsStack(dock: dock, also: "Spain 2025", height: 700) { screen, stack, box in
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
             let ready12 = await screen.until {
-                stack.paths.last?.count == 1 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 1 && dock.collectionModes != nil
             }
             #expect(ready12)
             await screen.settle(turns: 40)
@@ -1179,7 +1185,7 @@ struct TripScreenRenderTests {
             }
             box.trail?.wrappedValue.append(CollectionRoute(spain))
             let ready13 = await screen.until {
-                stack.paths.last?.count == 2 && Self.shape(dock) == .modes
+                stack.paths.last?.count == 2 && dock.collectionModes != nil
             }
             #expect(ready13)
             await screen.settle(turns: 40)
@@ -1192,10 +1198,10 @@ struct TripScreenRenderTests {
             await screen.settle(turns: 40)
             if let onB { await TripProbe.drag(onB, by: 240, on: screen) }
             #expect(dock.mode == .tabs, "B's scroll after Back folded A's bar")
-            #expect(Self.shape(dock) == .modes)
+            #expect(Self.shape(dock) == .tabs)
             // The control: A's own drag, with A on top, folds the bar.
             await TripProbe.drag(onA, by: 240, on: screen)
-            #expect(Self.shape(dock) == .folded, "A's drag on top folded nothing")
+            #expect(Self.shape(dock) == .modes, "A's drag on top brought no row")
         }
     }
 
@@ -1218,6 +1224,15 @@ struct TripScreenRenderTests {
             let ready15 = await screen.until { screen.element(labelled: "Portugal 2026") != nil }
             #expect(ready15)
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
+            // The row comes as the Library's does, on the collection's scroll (MEMNG-845).
+            let opened = await screen.until(seconds: 10) {
+                !TripProbe.tiles(in: screen.window).isEmpty
+            }
+            #expect(opened, "no grid: \(TripProbe.labels(in: screen.window))")
+            await screen.settle(turns: 40)
+            if let scroller = TripProbe.mainScroll(in: screen.window) {
+                await TripProbe.drag(scroller, by: 240, on: screen)
+            }
             let drawn = await screen.until(seconds: 10) {
                 Self.modesControl(in: screen.window) != nil
                     && !TripProbe.tiles(in: screen.window).isEmpty
@@ -1263,6 +1278,15 @@ struct TripScreenRenderTests {
             let ready10 = await screen.until { screen.element(labelled: "Portugal 2026") != nil }
             #expect(ready10)
             #expect(TripProbe.pressAtOnce("Portugal 2026", on: screen), "the card is not a link")
+            // The row comes as the Library's does, on the collection's scroll (MEMNG-845).
+            let opened = await screen.until(seconds: 10) {
+                !TripProbe.tiles(in: screen.window).isEmpty
+            }
+            #expect(opened, "no grid: \(TripProbe.labels(in: screen.window))")
+            await screen.settle(turns: 40)
+            if let scroller = TripProbe.mainScroll(in: screen.window) {
+                await TripProbe.drag(scroller, by: 240, on: screen)
+            }
             let drawn = await screen.until(seconds: 10) {
                 Self.modesControl(in: screen.window) != nil
                     && !TripProbe.tiles(in: screen.window).isEmpty
@@ -1450,7 +1474,7 @@ struct TripScreenRenderTests {
     /// The Trip screen stands in the Collections tab's stack under the one main bar: its foot
     /// clears the bar, and its scroll folds and unfolds the bar the way the Timeline's does,
     /// through the dock's existing fold reading.
-    @Test("the Trip screen clears the main bar, and its scroll folds and unfolds it")
+    @Test("the Trip screen clears the main bar, and its scroll brings the modes row and the tabs")
     func theTripScreenFoldsTheBar() async {
         let dock = AppDock()
         dock.send(.selected(.collections))
@@ -1466,7 +1490,7 @@ struct TripScreenRenderTests {
                 await TripProbe.drag(scroller, by: top - scroller.contentOffset.y, on: screen)
             }
             shapes.append(MainTabs<EmptyView>.leadingShape(dock, on: .collections))
-            #expect(shapes == [.modes, .folded, .modes], "the bar went \(shapes)")
+            #expect(shapes == [.tabs, .modes, .tabs], "the bar went \(shapes)")
             #expect(dock.mode == .tabs)
         }
     }

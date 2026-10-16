@@ -481,6 +481,12 @@ struct CollectionCardsTests {
             let library = MainTab.library.title
             #expect(ScopeBarProbe.selectedTitle(in: screen.window) != library, "control")
             #expect(screen.press("Mar 2026"), "the card took no press")
+            await screen.settle(turns: 40)
+            // MEMNG-845: a collection opens on the tabs, and its scroll brings the modes row
+            // whose Journal this waits for, as the Library's scroll brings its scope row.
+            if let scroller = TripProbe.mainScroll(in: screen.window) {
+                await TripProbe.drag(scroller, by: 240, on: screen)
+            }
             let opened = await screen.until(seconds: 10) {
                 screen.element(labelled: TripMode.journal.title) != nil
             }
