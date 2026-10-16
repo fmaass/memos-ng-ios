@@ -58,7 +58,7 @@ struct AudienceFilterTests {
 
     /// Off is the parameter ABSENT, never `mine=false`; Any is `visibility` absent; PRIVATE is
     /// never a choice.
-    static let wire: [(Bool, MediaVisibilityFilter, String?, String?)] = [
+    nonisolated static let wire: [(Bool, MediaVisibilityFilter, String?, String?)] = [
         (false, .any, nil, nil),
         (true, .any, "true", nil),
         (false, .public, nil, "PUBLIC"),
