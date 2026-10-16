@@ -2877,6 +2877,43 @@ extension TripScreenRenderTests {
         }
     }
 
+    /// Back to the unfiltered grid while its first drain is still out (review round 3): the
+    /// drained members are no reading yet, so the chosen pictures and the narrowing stand until
+    /// the drain lands, and then a picture that really left the trip leaves the selection.
+    @Test("back to no filter before the first drain lands keeps the selection and its narrowing")
+    func aHeldFirstDrainKeepsTheSelection() async {
+        let wire = TripWire()
+        // The unfiltered drain (no kind on the wire, oldest first) waits; the filtered read not.
+        wire.transport.trips.hold(TripRows.members) {
+            TripRows.query($0, "type") == nil && TripRows.query($0, "order") == "taken_asc"
+        }
+        let manage = TripManage()
+        manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
+        await selectingTrip(wire, manage: manage) { screen, _ in
+            let newest = ["p4", "p3", "p2", "p1", "p0"]
+            let drawn = await screen.until { TripProbe.tiles(in: screen.window) == newest }
+            #expect(drawn, "control: the filtered read \(TripProbe.tiles(in: screen.window))")
+            _ = await pressBar("Select", on: screen) { screen.says("Select Items") }
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p4 took no press")
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[2]), "p2 took no press")
+            #expect(screen.press("Show Selected (2)"), "Show Selected took no press")
+            #expect(await screen.until { TripProbe.tiles(in: screen.window) == ["p4", "p2"] })
+            manage.query = .unfiltered
+            await screen.settle(turns: 20)
+            #expect(screen.says("Show Selected (2)"), "the held drain cleared the selection")
+            // p2 leaves the trip on the server while the drain is out; then the drain lands.
+            if let uid = wire.transport.trips.rows.first?.uid {
+                wire.transport.trips.edit(uid) { $0.exclusions = ["p2"] }
+            }
+            wire.transport.trips.release(TripRows.members)
+            let pruned = await screen.until { screen.says("Show Selected (1)") }
+            #expect(pruned, "the picture that left stayed chosen")
+            let kept = await screen.until { TripProbe.tiles(in: screen.window) == ["p4"] }
+            #expect(kept, "the narrowing did not stand: \(TripProbe.tiles(in: screen.window))")
+        }
+    }
+
     /// Select, choose p0 to p2, and press the Remove row: true once its dialog is up.
     private func askRemoveOfThree(on screen: PressProbe.Screen) async -> Bool {
         let entered = await pressBar("Select", on: screen) {
