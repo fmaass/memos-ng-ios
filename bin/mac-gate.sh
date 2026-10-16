@@ -1422,14 +1422,15 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These thirteen must be there (the local lint's two among them: a lint that stopped
+# directory. These fourteen must be there (the local lint's two among them: a lint that stopped
 # refusing would only cost the queue time it exists to save, and nothing else would notice; and the
 # mutant batch's: one that stopped telling caught from survived would pass every mutant): the main-bar freeze's (ADR-0008 is the owner's, and a freeze
 # whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
 # exactly like a green one), the TestFlight cut's (the one other write path to the Mac) and the
 # release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497) and
-# the host router's (MAC_GATE_HOST=auto and the worktree run lock, MEMNG-824).
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh mutants-test.sh; do
+# the host router's (MAC_GATE_HOST=auto and the worktree run lock, MEMNG-824) and the build bump's
+# (the one script that writes the pair and its notes section, MEMNG-831).
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh mutants-test.sh bump-build-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-

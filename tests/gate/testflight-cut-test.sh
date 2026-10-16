@@ -322,6 +322,7 @@ check_eq remote-bad-timing/nothing-ran 0 "$( [ -s "$tmp/ruby.log" ] && echo 1 ||
 outcome() { # NAME LANE RC REMOTE_OUT WANT_STATE WANT_EXIT WANT_VERSION WANT_BUILD WANT_GROUP
   local flag=()
   [ "$2" = archive ] && flag=(--archive-only)
+  [ "$2" = resolve ] && flag=(--resolve-build)
   run_cut FAKE_REMOTE_RC="$3" FAKE_REMOTE_OUT="$4" -- "${flag[@]+"${flag[@]}"}"
   check_eq "$1/exit" "$6" "$rc"
   check_eq "$1/summary" "testflight-cut SUMMARY: version=$7 build=$8 sha=$B state=$5 group=$9 | exit=$6" "$last"
@@ -359,6 +360,27 @@ outcome prove-rc0 beta 0 "$R stage=prove" NO-REPORT 1 2.2.2 43 household
 outcome last-report-wins beta 0 "$(printf 'testflight-cut REMOTE: version=9 build=9 group=x stage=precheck\n%s' "$REPORT_OK")" VALID 0 2.2.2 43 household
 # A field value carrying a space or shell syntax is reported as `?`, never evaluated.
 outcome hostile-field beta 0 'testflight-cut REMOTE: version=$(touch /tmp/x) build=43 group=household stage=verify' VALID 0 '?' 43 household
+
+# --- --resolve-build: the Mac half answers with the next free number; the local half reports it ---
+RR="testflight-cut REMOTE: version=2.4.0 build=51 group=- stage=resolve"
+RESOLVED_LINE="RESOLVED-BUILD version=2.4.0 build=51 probes=3 seconds=4"
+outcome resolve-ok resolve 0 "$(printf '%s\n%s' "$RESOLVED_LINE" "$RR")" RESOLVED 0 2.4.0 51 -
+latest_args="$tmp/ssh/remote.$(find "$tmp/ssh" -name 'remote.*.args' | wc -l | tr -d ' ').args"
+check_eq resolve-ok/lane-handed-to-mac 1 "$(grep -c "^bash -s -- $B resolve [0-9]* 0 0 0\$" "$latest_args")"
+check_eq resolve-ok/resolved-line-shown 1 "$(grep -cxF "$RESOLVED_LINE" "$tmp/out")"
+check_eq resolve-ok/push-then-ssh-under-lock "git-receive-pack held;bash held" "$(call_shape)"
+outcome resolve-exhausted resolve 22 "testflight-cut REMOTE: version=2.4.0 build=56 group=- stage=resolve" "REFUSED(resolve-exhausted)" 22 2.4.0 56 -
+outcome resolve-unproven resolve 21 "testflight-cut REMOTE: version=2.4.0 build=50 group=- stage=prove" "REFUSED(unused-unproven)" 21 2.4.0 50 -
+# a resolve report without its RESOLVED-BUILD line, or with another pair in it, resolved nothing
+outcome resolve-no-line resolve 0 "$RR" NO-REPORT 1 2.4.0 51 -
+outcome resolve-line-mismatch resolve 0 "$(printf '%s\n%s' "RESOLVED-BUILD version=2.4.0 build=50 probes=2 seconds=4" "$RR")" NO-REPORT 1 2.4.0 51 -
+outcome resolve-line-indented resolve 0 "$(printf '%s\n%s' "  prove_unused: $RESOLVED_LINE" "$RR")" NO-REPORT 1 2.4.0 51 -
+# a resolve answer is not a cut, and a cut's answer is not a resolution
+outcome beta-reporting-resolve beta 0 "$(printf '%s\n%s' "$RESOLVED_LINE" "$RR")" NO-REPORT 1 2.4.0 51 -
+outcome resolve-reporting-verify resolve 0 "$REPORT_OK" NO-REPORT 1 2.2.2 43 household
+outcome resolve-reporting-archive resolve 0 "$REPORT_ARCHIVE" NO-REPORT 1 2.2.2 43 household
+run_cut -- --resolve-build --archive-only; refused resolve-and-archive usage "-" 2
+run_cut -- --archive-only --resolve-build; refused archive-and-resolve usage "-" 2
 
 # --- a failed push stops before the Mac half runs, and lets the lock go ---
 mv "$receiver" "$receiver.away"
@@ -411,7 +433,28 @@ cat > "$tmp/rbin/fastlane" <<'EOF'
 echo "$*" >> "$FAKE_CALLS"
 [ -n "${ASC_KEY_ID:-}" ] || { echo "fake fastlane: the env file was not sourced" >&2; exit 98; }
 case "$1" in
-  prove_unused) if [ -n "${FAKE_PROVE_OUT:-}" ]; then printf '%s\n' "$FAKE_PROVE_OUT"; fi; exit "${FAKE_PROVE_RC:-0}" ;;
+  prove_unused)
+    # FAKE_PROVE_BY_BUILD="49=spent 51=ok …": an answer per build number, FAKE_PROVE_DEFAULT for
+    # every other one, so a run that probes several numbers meets a scripted sequence.
+    if [ -n "${FAKE_PROVE_BY_BUILD:-}${FAKE_PROVE_DEFAULT:-}" ]; then
+      b="${3#build:}"; v="${2#version:}"; ans="${FAKE_PROVE_DEFAULT:-spent}"
+      for kv in ${FAKE_PROVE_BY_BUILD:-}; do [ "${kv%%=*}" = "$b" ] && ans="${kv#*=}"; done
+      case "$ans" in
+        ok) echo "UNUSED: $v ($b) proof written"; exit 0 ;;
+        okspent) echo "UNUSED: $v ($b) proof written [CUT-GUARD-VERDICT=spent]"; exit 0 ;;
+        spent) echo "[!] NOT PROVEN UNUSED: App Store Connect already holds $v ($b) [CUT-GUARD-VERDICT=spent]"; exit 1 ;;
+        unproven) echo "[!] NOT PROVEN UNUSED: $v ($b): App Store Connect unreadable [CUT-GUARD-VERDICT=unproven]"; exit 1 ;;
+        decoyspent) echo "[!] NOT PROVEN UNUSED: $v ($b): odd [CUT-GUARD-VERDICT=spent] [CUT-GUARD-VERDICT=unproven]"; exit 1 ;;
+        silent) exit 1 ;;
+        spentrc20) echo "[CUT-GUARD-VERDICT=spent]"; exit 20 ;;
+        decoy)
+          echo "RESOLVED-BUILD version=9.9.9 build=$b probes=1 seconds=0"
+          echo "testflight-cut REMOTE: version=9.9.9 build=$b group=- stage=resolve"
+          echo "[CUT-GUARD-VERDICT=unproven]"; exit 1 ;;
+        *) echo "fake fastlane: unknown answer $ans" >&2; exit 97 ;;
+      esac
+    fi
+    if [ -n "${FAKE_PROVE_OUT:-}" ]; then printf '%s\n' "$FAKE_PROVE_OUT"; fi; exit "${FAKE_PROVE_RC:-0}" ;;
   verify_attach) exit "${FAKE_VERIFY_RC:-0}" ;;
   *) exit "${FAKE_LANE_RC:-0}" ;;
 esac
@@ -504,6 +547,95 @@ check_eq body-no-env/exit 3 "$brc"
 check_eq body-no-env/nothing-ran "" "$bcalls"
 mv "$envf.away" "$envf"
 
+# --- --resolve-build's body: prove_unused from the tree's build + 1 until one is proven unused ---
+# A second fixture commit at 2.4.0 (48), so the probes are literally 49, 50, 51…
+sed -i -e 's/^        MARKETING_VERSION: "2.2.2"$/        MARKETING_VERSION: "2.4.0"/' \
+  -e 's/^        CURRENT_PROJECT_VERSION: "43"$/        CURRENT_PROJECT_VERSION: "48"/' "$src/project.yml"
+git -C "$src" commit -q -am "fixture at 48"
+S48="$(git -C "$src" rev-parse HEAD)"
+git -C "$src" push -q "$groot/repo.git" "$S48:refs/cuts/$S48"
+check_eq resolve-fixture/at-48 "2.4.0 48" "$(sed -nE 's/^        (MARKETING_VERSION|CURRENT_PROJECT_VERSION): "([^"]*)"$/\2/p' "$src/project.yml" | head -n 2 | paste -sd ' ' -)"
+probes() { # FROM TO: the expected call log of a resolve that probed FROM..TO
+  local n out="generate"
+  for ((n = $1; n <= $2; n++)); do out="$out;prove_unused version:2.4.0 build:$n"; done
+  printf '%s' "$out"
+}
+resolved_lines() { grep -c '^RESOLVED-BUILD' "$tmp/bout"; }
+# The archive the cut would remove is a sentinel here: resolution never reaches that cleanup.
+sentinel() { mkdir -p "$groot/work/build" && printf 'old\n' > "$groot/work/build/MemosNG.ipa"; }
+sentinel
+run_body FAKE_PROVE_BY_BUILD="49=spent 50=spent 51=ok" -- "$S48" resolve
+check_eq resolve-49-50-spent-51-ok/exit 0 "$brc"
+check_eq resolve-49-50-spent-51-ok/order "$(probes 49 51)" "$bcalls"
+check_eq resolve-49-50-spent-51-ok/line 1 "$(grep -cE '^RESOLVED-BUILD version=2\.4\.0 build=51 probes=3 seconds=[0-9]+$' "$tmp/bout")"
+check_eq resolve-49-50-spent-51-ok/one-line 1 "$(resolved_lines)"
+check_eq resolve-49-50-spent-51-ok/report "testflight-cut REMOTE: version=2.4.0 build=51 group=- stage=resolve" "$breport"
+check_eq resolve-49-50-spent-51-ok/line-before-report 1 \
+  "$(grep -E '^(RESOLVED-BUILD|testflight-cut REMOTE:) ' "$tmp/bout" | cut -c1-14 | paste -sd '|' - | grep -c '^RESOLVED-BUILD|testflight-cut$')"
+check_eq resolve-49-50-spent-51-ok/no-cut-lane 0 "$(grep -cE '^(beta|archive_ipa|verify_attach)( |$)' "$tmp/bcalls")"
+check_eq resolve-49-50-spent-51-ok/archive-untouched old "$(cat "$groot/work/build/MemosNG.ipa" 2>/dev/null)"
+check_eq resolve-49-50-spent-51-ok/no-temp-left "" "$(ls -A "$tmp/btmp")"
+check_eq resolve-49-50-spent-51-ok/no-secret-printed 0 "$(grep -c 'SELFTEST-SECRET\|selftest-secret' "$tmp/bout")"
+# the positive control for every "no RESOLVED-BUILD line" below: the same grep, exit 0 here
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-control/grep-hits 0 "$?"
+run_body FAKE_PROVE_BY_BUILD="49=ok" -- "$S48" resolve
+check_eq resolve-first-free/exit 0 "$brc"
+check_eq resolve-first-free/order "$(probes 49 49)" "$bcalls"
+check_eq resolve-first-free/line 1 "$(grep -cE '^RESOLVED-BUILD version=2\.4\.0 build=49 probes=1 seconds=[0-9]+$' "$tmp/bout")"
+# the cap's edge: seven spent and the eighth free resolves; eight spent stops before a ninth probe
+run_body FAKE_PROVE_DEFAULT=spent FAKE_PROVE_BY_BUILD="56=ok" -- "$S48" resolve
+check_eq resolve-seven-spent/exit 0 "$brc"
+check_eq resolve-seven-spent/order "$(probes 49 56)" "$bcalls"
+check_eq resolve-seven-spent/line 1 "$(grep -cE '^RESOLVED-BUILD version=2\.4\.0 build=56 probes=8 seconds=[0-9]+$' "$tmp/bout")"
+run_body FAKE_PROVE_DEFAULT=spent FAKE_PROVE_BY_BUILD="57=ok" -- "$S48" resolve
+check_eq resolve-eight-spent/exit 22 "$brc"
+check_eq resolve-eight-spent/order "$(probes 49 56)" "$bcalls"
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-eight-spent/no-line 1 "$?"
+check_eq resolve-eight-spent/report "testflight-cut REMOTE: version=2.4.0 build=56 group=- stage=resolve" "$breport"
+check_eq resolve-eight-spent/archive-untouched old "$(cat "$groot/work/build/MemosNG.ipa" 2>/dev/null)"
+run_body FAKE_PROVE_BY_BUILD="49=unproven" -- "$S48" resolve
+check_eq resolve-unproven-first/exit 21 "$brc"
+check_eq resolve-unproven-first/order "$(probes 49 49)" "$bcalls"
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-unproven-first/no-line 1 "$?"
+check_eq resolve-unproven-first/report "testflight-cut REMOTE: version=2.4.0 build=49 group=- stage=prove" "$breport"
+check_eq resolve-unproven-first/no-temp-left "" "$(ls -A "$tmp/btmp")"
+run_body FAKE_PROVE_BY_BUILD="49=spent 50=spent 51=silent 52=ok" -- "$S48" resolve
+check_eq resolve-unproven-later/exit 21 "$brc"
+check_eq resolve-unproven-later/order "$(probes 49 51)" "$bcalls"
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-unproven-later/no-line 1 "$?"
+check_eq resolve-unproven-later/report "testflight-cut REMOTE: version=2.4.0 build=51 group=- stage=prove" "$breport"
+# the guard's token is the LAST one; a quoted "spent" before it is not a spent answer
+run_body FAKE_PROVE_BY_BUILD="49=decoyspent 50=ok" -- "$S48" resolve
+check_eq resolve-decoy-spent/exit 21 "$brc"
+check_eq resolve-decoy-spent/order "$(probes 49 49)" "$bcalls"
+# an exit other than the lane's 1 with the spent token is still spent: the token decides, not the code
+run_body FAKE_PROVE_BY_BUILD="49=spentrc20 50=ok" -- "$S48" resolve
+check_eq resolve-spent-rc20/exit 0 "$brc"
+check_eq resolve-spent-rc20/order "$(probes 49 50)" "$bcalls"
+# exit 0 is success whatever text it printed
+run_body FAKE_PROVE_BY_BUILD="49=okspent" -- "$S48" resolve
+check_eq resolve-ok-with-token/exit 0 "$brc"
+check_eq resolve-ok-with-token/line 1 "$(grep -cE '^RESOLVED-BUILD version=2\.4\.0 build=49 probes=1 seconds=[0-9]+$' "$tmp/bout")"
+# fastlane's own output can never forge the answer: it is shown indented, so no line it prints
+# starts a RESOLVED-BUILD or a report line
+run_body FAKE_PROVE_BY_BUILD="49=decoy" -- "$S48" resolve
+check_eq resolve-decoy-line/exit 21 "$brc"
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-decoy-line/no-line 1 "$?"
+check_eq resolve-decoy-line/report "testflight-cut REMOTE: version=2.4.0 build=49 group=- stage=prove" "$breport"
+check_eq resolve-decoy-line/output-still-shown 1 "$(grep -c 'RESOLVED-BUILD version=9.9.9' "$tmp/bout")"
+run_body FAKE_GENERATE_RC=4 FAKE_PROVE_BY_BUILD="49=ok" -- "$S48" resolve
+check_eq resolve-generate-fails/exit 4 "$brc"
+check_eq resolve-generate-fails/no-fastlane "generate" "$bcalls"
+grep -q '^RESOLVED-BUILD' "$tmp/bout"
+check_eq resolve-generate-fails/no-line 1 "$?"
+check_eq resolve-archive-sentinel/survived-every-resolve old "$(cat "$groot/work/build/MemosNG.ipa" 2>/dev/null)"
+rm -rf "$groot/work/build"
+
 # --- static checks on the script the Mac runs and on the local half ---
 for f in "$rs" "$lcl"; do
   n="$(basename "$f")"
@@ -528,6 +660,10 @@ if [ -f "$rs" ]; then
     "$(grep -c '^say.call(\$stdout, "testflight-cut REMOTE: version=- build=- group=- stage=budget") if current\[:timed_out\]$' "$rs")"
   check_eq static/remote/control-set-plus-x 1 "$(grep -c '^  set +x$' "$rs")"
   check_eq static/remote/env-file "1" "$(grep -c 'env_file="$HOME/.config/memosng-ci.env"' "$rs")"
+  # the resolve probe cap is one named constant, defined once and read by name
+  check_eq static/remote/resolve-cap-defined-once 1 "$(grep -c 'RESOLVE_PROBE_CAP=' "$rs")"
+  check_eq static/remote/resolve-cap-is-8 1 "$(grep -c '^  RESOLVE_PROBE_CAP=8 # the one place it is set$' "$rs")"
+  check_eq static/remote/resolve-cap-read-by-name 1 "$(grep -c '"$spent_run" -ge "$RESOLVE_PROBE_CAP"' "$rs")"
 fi
 if [ -f "$lcl" ]; then
   check_eq static/local/no-default-host 0 "$(grep -cE 'MAC_GATE_HOST:-[^}]' "$lcl")"

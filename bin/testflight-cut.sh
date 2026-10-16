@@ -3,6 +3,7 @@
 #
 #   env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=<lock file> bin/testflight-cut.sh                 # upload
 #   env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=<lock file> bin/testflight-cut.sh --archive-only  # no upload
+#   env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=<lock file> bin/testflight-cut.sh --resolve-build # next free build
 #   … bin/testflight-cut.sh --sha <40-hex>   # authorise a HEAD that is not origin/main
 #
 # Runs from any Linux checkout of this repository (a lane's clone, or the owner's). It needs a
@@ -23,17 +24,26 @@
 #      lock it checks the commit out, regenerates the project, proves the build number unused
 #      (`fastlane prove_unused`), runs `fastlane beta expected_sha:<sha>` (which claims the number
 #      first) and reads App Store Connect back (`fastlane verify_attach`); with --archive-only it
-#      runs `fastlane archive_ipa expected_sha:<sha>` alone and spends no number;
+#      runs `fastlane archive_ipa expected_sha:<sha>` alone and spends no number; with
+#      --resolve-build it runs `fastlane prove_unused version:<v> build:<n>` for n = the commit's
+#      build + 1, + 2, … until one is proven unused, and nothing else: no archive, no upload, no
+#      claim. The pair is the one the AUTHORISED HEAD's project.yml names (origin/main's, or the
+#      --sha commit's). Its answer is the line
+#        RESOLVED-BUILD version=<v> build=<n> probes=<k> seconds=<s>
+#      (k prove_unused runs in s wall seconds), and the SUMMARY's build is that n. Resolution is
+#      not a reservation: the cut that follows proves the number again under its own sha;
 #   4. releases the estate lock and prints, as its LAST line,
 #      testflight-cut SUMMARY: version=<v> build=<n> sha=<40> state=<state> group=<group> | exit=<rc>
-#      state: VALID (beta passed its App Store Connect read-back), archive-only, FAILED, TIMEOUT,
+#      state: VALID (beta passed its App Store Connect read-back), archive-only, RESOLVED
+#      (--resolve-build found a free number), FAILED, TIMEOUT,
 #      LOCK-TIMEOUT (the release checkout's lock), ESTATE-LOCK-TIMEOUT, REMOTE-REFUSED,
 #      PUSH-FAILED, NO-REPORT (exit 0 without the report of a finished lane), UNKNOWN(ssh-lost)
 #      or REFUSED(<reason>). REFUSED(deadline-passed) is the Mac half's: D had passed once it held
 #      the checkout lock, and nothing was launched. REFUSED(build-number-spent) is the Mac half's: the number is claimed
 #      already, or App Store Connect holds it; REFUSED(unused-unproven) is the Mac half's too: the
 #      number could not be proven unused (App Store Connect unreadable, the markers' lock), and
-#      nothing was archived.
+#      nothing was archived. REFUSED(resolve-exhausted) is --resolve-build's: the Mac half found
+#      every number it may probe spent (its cap, RESOLVE_PROBE_CAP in the Mac half's body).
 #
 # Timing: ONE absolute deadline D = (start of the ssh leg) + budget, in UTC epoch seconds, is
 # computed here and handed to the Mac half, which refuses to start at all when fewer than
@@ -61,7 +71,8 @@
 # Exit codes: 0 = the cut succeeded; 2 = refusal (nothing pushed or run); 75 = the estate lock or
 # the release checkout's lock was still held at its ceiling; otherwise the code of the step that
 # failed — fastlane's, git push's, ssh's 255, 124 for the budget, 20 for a spent build number,
-# 21 for a number not proven unused, 1 for NO-REPORT and for an UNKNOWN(ssh-lost) whose ssh said 0.
+# 21 for a number not proven unused, 22 when --resolve-build met only spent numbers up to its cap,
+# 1 for NO-REPORT and for an UNKNOWN(ssh-lost) whose ssh said 0.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
@@ -89,9 +100,12 @@ lane=beta
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) have_sha=1; sha_arg="${2:-}"; [ $# -ge 2 ] && shift; shift ;;
-    --archive-only) lane=archive_ipa; shift ;;
+    --archive-only|--resolve-build)
+      [ "$lane" = beta ] || refuse usage "--archive-only and --resolve-build exclude each other, and each is given once"
+      if [ "$1" = --archive-only ]; then lane=archive_ipa; else lane=resolve; fi
+      shift ;;
     -h|--help) usage; exit 0 ;;
-    *) refuse usage "unknown argument '$1' (bin/testflight-cut.sh [--sha <40-hex>] [--archive-only])" ;;
+    *) refuse usage "unknown argument '$1' (bin/testflight-cut.sh [--sha <40-hex>] [--archive-only|--resolve-build])" ;;
   esac
 done
 
@@ -232,7 +246,16 @@ case "$rc:$stage" in
   76:expired) state="REFUSED(deadline-passed)" ;;
   0:verify) if [ "$lane" = beta ]; then state=VALID; else state=NO-REPORT; rc=1; fi ;;
   0:fastlane) if [ "$lane" = archive_ipa ]; then state=archive-only; else state=NO-REPORT; rc=1; fi ;;
+  # A resolution counts only with its answer line, at the start of a line and naming the reported pair.
+  0:resolve)
+    if [ "$lane" = resolve ] && [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$build" =~ ^[0-9]+$ ]] &&
+      grep -Eq "^RESOLVED-BUILD version=${version//./\\.} build=$build probes=[0-9]+ seconds=[0-9]+\$" "$log"; then
+      state=RESOLVED
+    else
+      state=NO-REPORT; rc=1
+    fi ;;
   0:*) state=NO-REPORT; rc=1 ;;
+  22:resolve) state="REFUSED(resolve-exhausted)" ;;
   20:prove) state="REFUSED(build-number-spent)" ;;
   *:prove) state="REFUSED(unused-unproven)" ;;
   *:precheck) state=REMOTE-REFUSED ;;

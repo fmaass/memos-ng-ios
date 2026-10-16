@@ -34,4 +34,9 @@ overlap on two hosts over one artifacts directory; it carries one informational 
 host=` line and needs no reclaim. Every line that closes descriptor 9 for a child or a subshell
 closes 7 too, the router's own `exec 9>&-` lines excepted; `tests/gate/host-routing-test.sh`, a
 named selftest, holds all of it. `bin/testflight-cut.sh` does not take `auto`: keep its explicit
-host and lock.
+host and lock — its `--resolve-build` mode included, which runs `fastlane prove_unused` from the
+authorised commit's build + 1 until one number is proven unused and prints `RESOLVED-BUILD
+version=<v> build=<n> probes=<k> seconds=<s>` (exit 21 when a number is not proven either way, 22
+after eight spent in a row), archiving, claiming and uploading nothing. `bin/bump-build.sh --build
+<n> --notes-file <path>` then writes that number into both build key lines and its notes section in
+one commit on a work branch; its suite, `tests/gate/bump-build-test.sh`, is a named selftest too.

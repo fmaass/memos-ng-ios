@@ -4,7 +4,7 @@
 #   ssh <host> 'bash -s -- <sha> <lane> <deadline> <grace> <reap> <min window>'
 #
 #   <sha>         the full 40-character commit, already pushed to <release root>/repo.git as refs/cuts/<sha>
-#   <lane>        beta | archive_ipa
+#   <lane>        beta | archive_ipa | resolve
 #   <deadline>    the ABSOLUTE deadline D, UTC epoch seconds, computed by bin/testflight-cut.sh
 #                 (start of its ssh leg + budget); everything below, the checkout-lock wait
 #                 included, ends by D however late this script started
@@ -12,7 +12,8 @@
 #   <reap>        seconds the killed group is waited for after the KILL
 #   <min window>  this script refuses to start (stage=precheck, exit 3) unless more than this many
 #                 seconds are left before D
-# All four numbers are bin/testflight-cut.sh's constants; this script holds none of its own.
+# All four numbers are bin/testflight-cut.sh's constants; this script holds no timing constant of
+# its own (the one constant it holds is resolve's probe cap, RESOLVE_PROBE_CAP in the body).
 #
 # Under the release checkout's OWN lock (<release root>/.cut.lock, held by Ruby's File#flock, since
 # the system Ruby is what the Mac's non-interactive shell always has), and before the deadline:
@@ -27,6 +28,14 @@
 #                 fastlane beta expected_sha:<sha>              (claims the number first)
 #                 fastlane verify_attach version:<v> build:<b>
 #   archive_ipa:  fastlane archive_ipa expected_sha:<sha>       (no proof, no claim, no upload)
+#   resolve:      fastlane prove_unused version:<v> build:<n>   for n = <b> + 1, <b> + 2, … and
+#                                                                nothing else (no archive, no claim,
+#                                                                no upload): exit 0 for n prints
+#                   RESOLVED-BUILD version=<v> build=<n> probes=<k> seconds=<s>
+#                 and reports stage=resolve, exit 0; a spent verdict moves to n + 1; any other
+#                 failure reports stage=prove, exit 21; RESOLVE_PROBE_CAP spent answers in a row
+#                 report stage=resolve, exit 22. prove_unused's own output is shown indented, so
+#                 no line it prints can start the answer line or the report.
 # The Fastfile takes the estate-wide release lock itself; this script never does, and never
 # touches the Mac gate's locks or devices.
 #
@@ -35,11 +44,13 @@
 # lock — runs on TERM), KILL at D + <grace>, and is gone by D + <grace> + <reap>.
 #
 # Output: the cut's own output, then one report line the local half reads:
-#   testflight-cut REMOTE: version=<v> build=<n> group=<group> stage=<precheck|generate|prove|fastlane|verify>
+#   testflight-cut REMOTE: version=<v> build=<n> group=<group> stage=<precheck|generate|prove|resolve|fastlane|verify>
+#   (resolve reports group=- and the last number it probed)
 #   (the wrapper adds stage=lock with exit 75, stage=expired with exit 76 and stage=budget with
 #   exit 124, version=- build=-)
 # Exit: the failing step's code (fastlane's, generate's); 20 when prove_unused found the number
-# spent, 21 when it could not prove it unused; 2 for bad arguments; 3 when a precondition failed
+# spent, 21 when it could not prove it unused, 22 when resolve met only spent numbers up to its
+# cap; 2 for bad arguments; 3 when a precondition failed
 # before anything ran (3 too when too little was left before the deadline to start); 75 when the
 # checkout lock was still held at the deadline; 124 when the deadline passed.
 #
@@ -59,8 +70,8 @@ main() {
     echo "testflight-cut REMOTE: version=- build=- group=- stage=precheck"
     return 2
   fi
-  case "$lane" in beta|archive_ipa) ;; *)
-    echo "testflight-cut: the lane must be beta or archive_ipa (got '$lane')" >&2
+  case "$lane" in beta|archive_ipa|resolve) ;; *)
+    echo "testflight-cut: the lane must be beta, archive_ipa or resolve (got '$lane')" >&2
     echo "testflight-cut REMOTE: version=- build=- group=- stage=precheck"
     return 2 ;;
   esac
@@ -136,6 +147,41 @@ echo "testflight-cut: bin/generate.sh in $work"
 ./bin/generate.sh </dev/null
 rc=$?
 [ "$rc" -eq 0 ] || report generate "$rc"
+if [ "$lane" = resolve ]; then
+  # The spent answers in a row after which resolve stops (exit 22). Unmeasured: the first timed
+  # run after landing records probes= and seconds= (docs/TESTFLIGHT.md).
+  RESOLVE_PROBE_CAP=8 # the one place it is set
+  group=-
+  probes=0
+  spent_run=0
+  resolve_t0="$(date +%s)"
+  n=$((tree_build + 1))
+  while :; do
+    build="$n"
+    probes=$((probes + 1))
+    echo "testflight-cut: resolve probe $probes: fastlane prove_unused version:$version build:$n"
+    prove_out="$(mktemp "${TMPDIR:-/tmp}/testflight-cut-prove.XXXXXX")" || precheck "cannot create a temporary file"
+    "$fastlane_cmd" prove_unused "version:$version" "build:$n" 2>&1 | tee "$prove_out" | sed 's/^/  prove_unused: /'
+    rc=${PIPESTATUS[0]}
+    verdict="$(grep -o 'CUT-GUARD-VERDICT=[a-z-]*' "$prove_out" | tail -n 1)"
+    rm -f "${prove_out:?}"
+    if [ "$rc" -eq 0 ]; then
+      echo "RESOLVED-BUILD version=$version build=$n probes=$probes seconds=$(( $(date +%s) - resolve_t0 ))"
+      report resolve 0
+    fi
+    if [ "$verdict" != CUT-GUARD-VERDICT=spent ]; then
+      echo "testflight-cut: $version ($n) is not proven unused (prove_unused exit $rc, ${verdict:-no verdict}) - resolution stops"
+      report prove 21
+    fi
+    spent_run=$((spent_run + 1))
+    echo "testflight-cut: $version ($n) is spent (prove_unused exit $rc)"
+    if [ "$spent_run" -ge "$RESOLVE_PROBE_CAP" ]; then
+      echo "testflight-cut: $spent_run spent numbers in a row, $((tree_build + 1)) to $n - resolution stops"
+      report resolve 22
+    fi
+    n=$((n + 1))
+  done
+fi
 if [ "$lane" = beta ]; then
   echo "testflight-cut: fastlane prove_unused version:$version build:$build"
   # The lane's refusal names its verdict (fastlane/lib/cut_guard.rb): only "spent" says the number
