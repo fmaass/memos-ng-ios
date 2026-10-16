@@ -433,6 +433,19 @@ public final class TripStore {
         return .batch(outcome)
     }
 
+    /// Pictures joined trip `uid` (or, for nil, changed in ways any trip's reads may show) through
+    /// their memos rather than through this store's writes (`MemoActionStore`, MEMNG-788): the
+    /// revision moves, so every read of the outgoing members is dropped and the screens read
+    /// again; a named trip's record is read again and its members drained, as after a batch.
+    func membersChanged(uid: String?, using handle: SessionHandle, baseURL: URL) async {
+        guard identity != nil, sessionStillCurrent(handle.generation) else { return }
+        bump(uid)
+        guard let uid, trips.contains(where: { $0.uid == uid }) else { return }
+        _ = try? await reload(uid: uid, using: handle, baseURL: baseURL)
+        guard sessionStillCurrent(handle.generation) else { return }
+        for reconcile in onReconcile { await reconcile(uid, handle, baseURL) }
+    }
+
     // MARK: - Slots and fences
 
     /// Runs `perform` in trip `uid`'s slot, or joins the identical write already in it, or refuses.
