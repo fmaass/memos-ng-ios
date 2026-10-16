@@ -2736,35 +2736,32 @@ extension TripScreenRenderTests {
         }
     }
 
+    /// Counts, as the store and the wire tell them apart: ONE call into the member store's
+    /// `remove` sends one exclusion PUT per picture, so a confirmed removal of three is three PUTs.
     @Test("Remove with three chosen asks first; only the dialog's Remove sends the one removal")
     func removeAsksFirst() async {
         for confirm in [true, false] {
             let wire = TripWire()
             await selectingTrip(wire) { screen, _ in
-                let entered = await pressBar("Select", on: screen) {
-                    screen.says(LibrarySelectionPresentation.showSelectedText(0))
-                }
-                #expect(entered, "Select stood no toolbar")
-                let photos = TripProbe.photos(in: screen.window)
-                for index in 0..<3 {
-                    #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[index]))
-                }
-                #expect(await screen.until { screen.says("Show Selected (3)") })
-                let row = TripView.removeRowTitle(3)
-                #expect(row == "Remove 3 pictures from trip…")
-                #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
-                let asked = await screen.until { TripMenuProbe.alert(over: screen.host) != nil }
-                let alert = TripMenuProbe.alert(over: screen.host)
+                let asked = await askRemoveOfThree(on: screen)
                 #expect(asked, "no dialog")
+                let alert = TripMenuProbe.alert(over: screen.host)
                 #expect(alert?.title == "Remove 3 pictures from Portugal 2026?")
                 #expect(alert?.message == "They stay in your library.")
                 #expect(wire.transport.writes.isEmpty, "a write before the answer")
+                // The selection moves while the question is up: the answer is about what it
+                // asked, p0 to p2, never p3.
+                let photos = TripProbe.photos(in: screen.window)
+                #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[3]), "p3 took no press")
                 let answer = confirm ? TripView.removeConfirmButton : "Cancel"
-                #expect(TripProbe.pressAlert(answer, in: screen.host), "\(answer) took no press")
+                // Delivered twice, as a dialog's callbacks can be: the second finds no question.
+                #expect(TripMenuProbe.answer(answer, over: screen.host, times: 2), "\(answer)")
                 if confirm {
-                    // One call into the store's remove: one exclusion per picture on the wire.
+                    // Three exclusion PUTs: the one store call's, and no second call's.
                     let sent = await screen.until { wire.transport.writes.count == 3 }
                     #expect(sent, "the removal wrote \(wire.transport.writes)")
+                    await screen.settle(turns: 6)
+                    #expect(wire.transport.writes.count == 3, "\(wire.transport.writes)")
                     #expect(
                         wire.transport.trips.rows.first?.exclusions.sorted() == ["p0", "p1", "p2"])
                 } else {
@@ -2773,6 +2770,53 @@ extension TripScreenRenderTests {
                 }
             }
         }
+    }
+
+    /// The session the question was asked under ended while it was up: its Remove sends nothing.
+    @Test("a Remove answered after the session changed sends nothing")
+    func removeAfterASessionChange() async {
+        let wire = TripWire()
+        let box = TripAccessBox(wire.access)
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        let view = NavigationStack {
+            TripView(
+                trip: record, trips: stores.0, memberStore: stores.1, identity: alice,
+                access: { box.access })
+        }
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+        .environment(dock)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(await askRemoveOfThree(on: screen), "no dialog")
+            box.access = CollectionsAccess(
+                handle: SessionHandle(client: wire.access.handle.client, generation: 2),
+                baseURL: TripWire.baseURL)
+            #expect(TripMenuProbe.answer(TripView.removeConfirmButton, over: screen.host))
+            await screen.settle(turns: 8)
+            let wrote = wire.transport.writes
+            #expect(wrote.isEmpty, "a stale question wrote \(wrote)")
+        }
+    }
+
+    /// Select, choose p0 to p2, and press the Remove row: true once its dialog is up.
+    private func askRemoveOfThree(on screen: PressProbe.Screen) async -> Bool {
+        let entered = await pressBar("Select", on: screen) {
+            screen.says(LibrarySelectionPresentation.showSelectedText(0))
+        }
+        #expect(entered, "Select stood no toolbar")
+        let photos = TripProbe.photos(in: screen.window)
+        for index in 0..<3 {
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[index]))
+        }
+        #expect(await screen.until { screen.says("Show Selected (3)") })
+        let row = TripView.removeRowTitle(3)
+        #expect(row == "Remove 3 pictures from trip…")
+        #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
+        return await screen.until { TripMenuProbe.alert(over: screen.host) != nil }
     }
 
     @Test("the Removed from trip row presents the Removed sheet, and Add Back works in it")
@@ -2814,15 +2858,20 @@ extension TripScreenRenderTests {
         }
     }
 
+    /// Photos, newest first, over a trip of two films and three stills: the grid is exactly the
+    /// three stills newest first, from the server's read; the hero and the map keep all five.
     @Test("a filter reads the member route with its type and order; the hero keeps every member")
     func aFilterReadsTheServer() async {
         let wire = TripWire()
+        wire.transport.film("p1")
+        wire.transport.film("p3")
         let stores = stores()
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         let manage = TripManage()
         let host = trip(stores, wire, record, manage: manage)
         await CollectionsHost.with(host, height: 3000) { screen in
-            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            _ = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(TripProbe.tiles(in: screen.window) == Self.files, "control: the grid landed")
             let before = wire.transport.trips.calls(TripRows.members).count
             manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
             let read = await screen.until {
@@ -2832,10 +2881,81 @@ extension TripScreenRenderTests {
                 }
             }
             #expect(read, "no filtered read: \(wire.transport.trips.calls(TripRows.members))")
+            let grid = await screen.until {
+                TripProbe.tiles(in: screen.window) == ["p4", "p2", "p0"]
+            }
+            #expect(grid, "the grid: \(TripProbe.tiles(in: screen.window))")
             #expect(screen.says("5 photos"), "the hero lost members to a filter")
             #expect(stores.1.members(for: record).count == 5, "the members moved with a filter")
+            let mapped = TripMapPresentation.memberUids(of: record, in: stores.1)
+            let all = Set(stores.1.members(for: record).map(\.id))
+            #expect(mapped?.count == 5 && mapped == all, "the map's members: \(mapped ?? [])")
         }
     }
+
+    /// A filtered read that failed is not read again by itself: no loop of reads with nobody
+    /// asking (review round 1).
+    @Test("a failed filtered read is not sent again until something asks")
+    func aFailedFilterIsNotRetriedInALoop() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            wire.transport.trips.fail([TripRows.members])
+            manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
+            func filtered() -> Int {
+                wire.transport.trips.calls(TripRows.members).filter {
+                    TripRows.query($0.path, "type") == "image"
+                }.count
+            }
+            #expect(await screen.until { filtered() >= 1 }, "no filtered read")
+            await screen.settle(turns: 30)
+            try? await Task.sleep(for: .milliseconds(500))
+            await screen.settle(turns: 30)
+            #expect(filtered() == 1, "a failed read was sent \(filtered()) times")
+        }
+    }
+
+    /// The viewer opened from the filtered grid pages over what the grid shows, in its order —
+    /// also past the cap, where a picture of the filtered read is not among the drained members.
+    @Test(
+        "a tap under a filter opens that picture and pages over the filtered set",
+        arguments: [5, 2])
+    func aTapUnderAFilter(cap: Int) async {
+        let wire = TripWire()
+        wire.transport.film("p1")
+        wire.transport.film("p3")
+        let stores = stores(memberCap: cap)
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
+        let shown = Array(["p4", "p2", "p0"].prefix(cap))
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == shown }
+            #expect(grid, "the grid: \(TripProbe.tiles(in: screen.window))")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == shown.count && TripProbe.pressAtOnce(photos[0]), "no press")
+            var pager: UIScrollView?
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, pager == nil {
+                pager = TripProbe.pager(over: screen.host)
+                if pager == nil { await screen.settle(turns: 5) }
+            }
+            #expect(pager.map(TripProbe.pageCount) == shown.count, "the viewer's pages")
+            #expect(pager.map(TripProbe.pageIndex) == 0, "not opened on the tapped p4")
+        }
+    }
+}
+
+/// An access a test can move to another session while the screen is up.
+@MainActor
+final class TripAccessBox {
+    var access: CollectionsAccess
+    init(_ access: CollectionsAccess) { self.access = access }
 }
 
 /// A navigation bar's menus, read and pressed without opening them: SwiftUI hands a bar item's
@@ -2860,6 +2980,20 @@ enum TripMenuProbe {
             }
         }
         return false
+    }
+
+    /// Answers the alert over `host` with its `label` action, delivering the action's handler
+    /// `times` times after the dismissal, as a framework answering twice would.
+    static func answer(_ label: String, over host: UIViewController, times: Int = 1) -> Bool {
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        guard let alert = alert(over: host),
+            let action = alert.actions.first(where: { $0.title == label }),
+            let block = action.value(forKey: "handler") as AnyObject?
+        else { return false }
+        let handler = unsafeBitCast(block, to: Handler.self)
+        alert.dismiss(animated: false)
+        for _ in 0..<times { handler(action) }
+        return true
     }
 
     /// The alert presented over `host`, anywhere in its chain of presentations.

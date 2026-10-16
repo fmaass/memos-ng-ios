@@ -128,4 +128,100 @@ struct TripMemberFilterTests {
         // The default IS the unfiltered members, read by no request of its own.
         #expect(members.filteredMembers(for: trip, query: .unfiltered)?.map(\.id) == before)
     }
+
+    /// The refresher's interleaving (review round 1): a renewal asked under filter A waits on the
+    /// unfiltered drain; meanwhile B is chosen and its read lands; then the renewal goes on. A is
+    /// obsolete: it reads nothing, takes no slot, and B's rows and the error line stand.
+    @Test("a renewal asked under an obsolete filter reads nothing; the active one stands")
+    func aRenewalUnderAnObsoleteFilter() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let drains = LockedValue(0)
+        let paths = LockedValue<[String]>([])
+        let client = Stub.client { request, _, _ in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            if TripWire.query(path, "order") == "taken_asc", !TripWire.hasQuery(path, "type") {
+                drains.set(drains.get() + 1)
+                if drains.get() == 2 {
+                    entered.open()
+                    await release.wait()
+                }
+                return TripWire.page([0, 1, 2])
+            }
+            return TripWire.hasQuery(path, "type") ? TripWire.page([1]) : TripWire.page([2, 0])
+        }
+        let (trip, _, members) = await seeded()
+        await members.drain(trip, using: client.handle, baseURL: Stub.baseURL)
+        let a = TripMemberQuery(filter: .images, order: .newestFirst)
+        let b = TripMemberQuery(filter: .all, order: .newestFirst)
+        await members.drainFiltered(trip, query: a, using: client.handle, baseURL: Stub.baseURL)
+        // The refresher's two steps, as `TripURLRefresher.signatureExpired` takes them.
+        let renewal = Task {
+            await members.drain(trip, using: client.handle, baseURL: Stub.baseURL)
+            await members.renewFiltered(
+                trip, query: a, using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "the renewal's drain was never sent")
+        await members.drainFiltered(trip, query: b, using: client.handle, baseURL: Stub.baseURL)
+        let afterB = paths.get().count
+        release.open()
+        await renewal.value
+        let late = paths.get().dropFirst(afterB).filter { TripWire.hasQuery($0, "type") }
+        #expect(late.isEmpty, "the obsolete filter was read again: \(late)")
+        let shown = members.filteredMembers(for: trip, query: b)?.map(\.id)
+        #expect(shown == [TripWire.uid(2), TripWire.uid(0)], "B's rows: \(shown ?? [])")
+        #expect(members.filteredState(for: trip, query: b) == .complete)
+        #expect(members.lastError == nil)
+
+        // The active filter's own renewal does read again.
+        await members.renewFiltered(trip, query: b, using: client.handle, baseURL: Stub.baseURL)
+        #expect(paths.get().count == afterB + 1, "the active filter's renewal: \(paths.get())")
+    }
+
+    @Test("a failed filtered read stays failed, not unread, until something invalidates the trip")
+    func aFailedFilterStaysFailed() async {
+        let calls = LockedValue(0)
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            return (HTTPResponse(status: .serviceUnavailable), nil)
+        }
+        let (trip, _, members) = await seeded()
+        let images = TripMemberQuery(filter: .images, order: .oldestFirst)
+        await members.drainFiltered(
+            trip, query: images, using: client.handle, baseURL: Stub.baseURL)
+        #expect(calls.get() == 1)
+        #expect(members.filteredFailed(for: trip, query: images), "the failure was not kept")
+        #expect(members.filteredMembers(for: trip, query: images) == nil)
+        let other = TripMemberQuery(filter: .videos, order: .oldestFirst)
+        #expect(!members.filteredFailed(for: trip, query: other), "another filter reads as failed")
+        members.invalidate(uid: trip.uid)
+        #expect(!members.filteredFailed(for: trip, query: images), "an invalidation kept it")
+    }
+
+    @Test("a filtered page answered for a session that has ended is dropped whole")
+    func aFilteredReadAcrossASessionChange() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Stub.client { _, _, _ in
+            entered.open()
+            await release.wait()
+            return TripWire.page([0, 1])
+        }
+        let (trip, _, members) = await seeded()
+        let issued = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: issued)
+        members.reports(to: session)
+        let images = TripMemberQuery(filter: .images, order: .oldestFirst)
+        let inFlight = Task {
+            await members.drainFiltered(
+                trip, query: images, using: issued, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no request was sent")
+        session.activeHandle = SessionHandle(client: client, generation: 2)
+        release.open()
+        await inFlight.value
+        #expect(members.filteredMembers(for: trip, query: images) == nil, "a stale answer landed")
+        #expect(members.filteredState(for: trip, query: images) == .notLoaded)
+    }
 }
