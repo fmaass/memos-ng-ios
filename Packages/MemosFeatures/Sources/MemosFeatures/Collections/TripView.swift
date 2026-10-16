@@ -665,7 +665,16 @@ struct TripView: View {
                 removing = nil
             }
             // A picture that leaves the trip leaves the selection with it.
-            .onChange(of: members) { _, now in selection.prune(keeping: now) }
+            // Only against a reading: a filtered read still out is [] and not an answer, so the
+            // chosen pictures and the narrowing stand until it lands (review round 2).
+            .onChange(of: PruneKey(rows: members.map(\.id), settled: rowsSettled)) { _, key in
+                if key.settled { selection.prune(keeping: viewerRows.rows) }
+            }
+            // A question about the pictures under one filter is no question under another.
+            .onChange(of: manage.query) {
+                removing = nil
+                askingRemove = false
+            }
             // Select mode belongs to the grid: Journal or Map ends it.
             .onChange(of: mode) { _, now in
                 if now != .photos { selection.close() }
@@ -884,7 +893,8 @@ struct TripView: View {
             loadMore: {},
             selection: selection,
             toggle: { selection.toggle($0) },
-            above: AnyView(hero(shown, members: members)),
+            // The hero reads the trip's members, never the filtered grid's (its cover included).
+            above: AnyView(hero(shown, members: shownMembers.rows)),
             below: footerText(shown, state: state, empty: items.isEmpty).map {
                 AnyView(TripFooter(text: $0))
             },
@@ -1066,7 +1076,11 @@ struct TripView: View {
                 isDeleting: deleteRunning,
                 share: { shareSelection() },
                 // Only the chosen pictures that are mine, as in the Library.
-                delete: { deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers)) },
+                delete: {
+                    // No reading under the filter yet: nothing on screen to delete.
+                    guard rowsSettled else { return }
+                    deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers))
+                },
                 showSelected: { selection.toggleNarrowed() },
                 narrowed: selection.narrowed
             )
@@ -1118,7 +1132,9 @@ struct TripView: View {
     /// ORIGINAL through the session's download lane, fenced by the session generation it started
     /// under (`MediaBatchShareFlow`). With no session there is nothing to fetch with.
     private func shareSelection() {
-        guard let lane = shareLane ?? session.map(TripShareLane.session) else { return }
+        guard rowsSettled, let lane = shareLane ?? session.map(TripShareLane.session) else {
+            return
+        }
         let rows = selection.rows(in: currentMembers)
         shareTask = Task {
             _ = await sharing.share(rows, generation: lane.generation, download: lane.download)
@@ -1129,8 +1145,10 @@ struct TripView: View {
     /// while something is chosen and no share or delete is out; none elsewhere.
     private var selectRows: [SelectAction] {
         guard scope.isTrip else { return [] }
-        let enabled = LibrarySelectionPresentation.actionsEnabled(
+        let free = LibrarySelectionPresentation.actionsEnabled(
             count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
+        // Under a filter whose read is still out there are no rows to act on.
+        let enabled = rowsSettled && free
         return [
             SelectAction(
                 id: "remove", title: Self.removeRowTitle(selection.count),
@@ -1143,10 +1161,10 @@ struct TripView: View {
     /// session — what the answer sends, whatever the selection does meanwhile.
     private func askRemove() {
         let chosen = selection.rows(in: currentMembers).map(\.id)
-        guard !chosen.isEmpty, let access = access(), let target = live ?? openedTrip else {
-            return
-        }
-        removing = TripPendingRemoval(uids: chosen, trip: target, access: access)
+        guard rowsSettled, !chosen.isEmpty, let access = access(), let target = live ?? openedTrip
+        else { return }
+        removing = TripPendingRemoval(
+            uids: chosen, trip: target, access: access, query: manage.query)
         askingRemove = true
     }
 
@@ -1161,6 +1179,9 @@ struct TripView: View {
         guard let now = access(), now.handle.generation == asked.access.handle.generation else {
             return
         }
+        // Asked under one filter, answered under another: the grid no longer shows what it
+        // asked about, so nothing is sent either.
+        guard manage.query == asked.query else { return }
         Task {
             do {
                 let outcome = try await memberStore.remove(
@@ -1170,7 +1191,8 @@ struct TripView: View {
             } catch {
                 removeFailure = TripManage.sentence(error)
             }
-            selection.prune(keeping: currentMembers)
+            // Against a reading only: a filtered read the removal let go is no empty answer.
+            if rowsSettled { selection.prune(keeping: currentMembers) }
         }
     }
 
@@ -1294,6 +1316,14 @@ struct TripView: View {
         selection.visible(in: viewerRows.rows)
     }
 
+    /// Whether `viewerRows` is a reading: always unfiltered (the settled members), and under a
+    /// filter once its read of the current lineage has landed. Until then nothing is pruned
+    /// against it and no action acts on it.
+    private var rowsSettled: Bool {
+        guard !manage.query.isUnfiltered, let trip = live ?? openedTrip else { return true }
+        return memberStore.filteredMembers(for: trip, query: manage.query) != nil
+    }
+
     /// The grid's rows before Show Selected narrows them — the members, or the trip's filtered
     /// read while a filter is chosen — and whether they are a reading: what a tap opens the
     /// viewer over and pages through, and what the selection is kept within. Under a filter a
@@ -1310,6 +1340,12 @@ struct TripView: View {
     private func loadJournal() async {
         guard let readScope, let access = access() else { return }
         await memberStore.loadJournal(readScope, using: access.handle, baseURL: access.baseURL)
+    }
+
+    /// What the selection is pruned against, and whether it is a reading at all.
+    private struct PruneKey: Equatable {
+        let rows: [String]
+        let settled: Bool
     }
 
     /// What decides whether an open viewer still fits the trip.
@@ -1744,6 +1780,8 @@ struct TripPendingRemoval {
     let uids: [String]
     let trip: Trip
     let access: CollectionsAccess
+    /// The grid's filter when it asked: an answer under another one sends nothing.
+    let query: TripMemberQuery
 }
 
 /// The trip's filter menu (MEMNG-780): the Library's kinds as an inline Picker under "Filter",
