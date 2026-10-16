@@ -213,6 +213,8 @@ struct MediaLibraryView: View {
                 scope: choice.scope,
                 filter: library?.filter,
                 tag: library?.tag,
+                mine: library?.mine,
+                visibility: library?.visibility,
                 subject: session.state.user?.subject
             )
         ) {
@@ -351,6 +353,8 @@ struct MediaLibraryView: View {
             for: scope,
             filter: library.filter,
             tag: library.tag,
+            mine: library.mine,
+            visibility: library.visibility,
             timeZoneIdentifier: store.timeZoneIdentifier,
             buckets: store.buckets,
             answering: store.loadedRequest
@@ -440,6 +444,8 @@ struct MediaLibraryView: View {
                     for: .all,
                     filter: library.filter,
                     tag: library.tag,
+                    mine: library.mine,
+                    visibility: library.visibility,
                     timeZoneIdentifier: store.timeZoneIdentifier,
                     buckets: store.buckets,
                     answering: store.loadedRequest
@@ -496,6 +502,8 @@ struct MediaLibraryView: View {
         ) {
             LibraryFilterMenuContent(
                 filter: filterBinding(library),
+                mine: mineBinding(library),
+                visibility: visibilityBinding(library),
                 order: sortBinding(library),
                 groupByDay: groupByDayBinding,
                 tileLayout: tileLayoutBinding
@@ -513,6 +521,31 @@ struct MediaLibraryView: View {
             set: { chosen in
                 guard chosen != library.filter else { return }
                 library.setFilter(chosen)
+                Task { await load() }
+            }
+        )
+    }
+
+    /// "Captured by me" (MEMNG-787): a new list, read from its first page as a kind is; the buckets
+    /// follow through their task key, which names it. Not persisted, as the kind is not.
+    private func mineBinding(_ library: MediaLibraryStore) -> Binding<Bool> {
+        Binding(
+            get: { library.mine },
+            set: { chosen in
+                guard chosen != library.mine else { return }
+                library.setMine(chosen)
+                Task { await load() }
+            }
+        )
+    }
+
+    /// Visibility (MEMNG-787), as "Captured by me".
+    private func visibilityBinding(_ library: MediaLibraryStore) -> Binding<MediaVisibilityFilter> {
+        Binding(
+            get: { library.visibility },
+            set: { chosen in
+                guard chosen != library.visibility else { return }
+                library.setVisibility(chosen)
                 Task { await load() }
             }
         )
@@ -687,6 +720,8 @@ struct MediaLibraryView: View {
                 size: size,
                 filter: library.filter,
                 tag: library.tag,
+                mine: library.mine,
+                visibility: library.visibility,
                 using: handle,
                 baseURL: baseURL
             )
@@ -695,6 +730,8 @@ struct MediaLibraryView: View {
                 size: size,
                 filter: library.filter,
                 tag: library.tag,
+                mine: library.mine,
+                visibility: library.visibility,
                 using: handle,
                 baseURL: baseURL
             )
@@ -733,6 +770,8 @@ private struct BucketListKey: Equatable {
     let scope: LibraryScope
     let filter: MediaLibraryFilter?
     let tag: String?
+    let mine: Bool?
+    let visibility: MediaVisibilityFilter?
     let subject: String?
 }
 

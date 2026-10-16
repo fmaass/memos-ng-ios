@@ -1782,20 +1782,17 @@ struct TripPendingRemoval {
     let query: TripMemberQuery
 }
 
-/// The trip's filter menu (MEMNG-780): the Library's kinds as an inline Picker under "Filter",
-/// a divider, its nested Sort By menu — the same rows and glyphs as `LibraryFilterMenuContent` —
-/// then, after a divider, the row that opens the pictures removed from the trip.
+/// The trip's filter menu (MEMNG-780): the Library's own filter rows (`MediaFilterRows` — the
+/// kinds, "Captured by me" and Visibility, MEMNG-787), a divider, its nested Sort By menu — the
+/// same rows and glyphs as `LibraryFilterMenuContent` — then, after a divider, the row that opens
+/// the pictures removed from the trip.
 struct TripFilterMenuContent: View {
     @Binding var query: TripMemberQuery
     let showRemoved: () -> Void
 
     var body: some View {
-        Picker("Filter", selection: $query.filter) {
-            ForEach(MediaLibraryFilter.allCases) { filter in
-                Text(MediaLibraryPresentation.label(for: filter)).tag(filter)
-            }
-        }
-        .pickerStyle(.inline)
+        MediaFilterRows(
+            filter: $query.filter, mine: $query.mine, visibility: $query.visibility)
         Divider()
         SortByMenu(order: $query.order)
         Divider()

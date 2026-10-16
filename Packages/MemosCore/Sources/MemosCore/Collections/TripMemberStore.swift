@@ -999,7 +999,9 @@ public final class TripMemberStore {
             query: .init(
                 _type: query.filter == .images ? .image : query.filter == .videos ? .video : nil,
                 limit: limit, cursor: cursor,
-                order: query.order == .newestFirst ? .takenDesc : .takenAsc)
+                order: query.order == .newestFirst ? .takenDesc : .takenAsc,
+                // Absent unless chosen, so the default is exactly the drain's request (MEMNG-787).
+                mine: apiMine(query.mine), visibility: query.visibility.apiVisibility)
         )
         switch try await client.listMembersApiCollectionsUidAttachmentsGet(input) {
         case .ok(let ok):
@@ -1014,19 +1016,28 @@ public final class TripMemberStore {
     }
 }
 
-/// The trip grid's Kind and Sort (MEMNG-780): the Library's two choices, read by the server
-/// through the member route's `type` and `order`. The default — every kind, oldest first — is the
-/// drain itself, so it sends no read of its own.
+/// The trip grid's Kind and Sort (MEMNG-780), "Captured by me" and Visibility (MEMNG-787): the
+/// Library's choices, read by the server through the member route's `type`, `order`, `mine` and
+/// `visibility`. The default — every kind, oldest first, everyone's, any visibility — is the
+/// drain itself, so it sends no read of its own. Every part of it is in the filtered read's
+/// slot, failure record and renewal check, because they compare the whole value.
 public struct TripMemberQuery: Sendable, Hashable {
     public var filter: MediaLibraryFilter
     public var order: MediaLibraryOrder
+    public var mine: Bool
+    public var visibility: MediaVisibilityFilter
 
-    public init(filter: MediaLibraryFilter = .all, order: MediaLibraryOrder = .oldestFirst) {
+    public init(
+        filter: MediaLibraryFilter = .all, order: MediaLibraryOrder = .oldestFirst,
+        mine: Bool = false, visibility: MediaVisibilityFilter = .any
+    ) {
         self.filter = filter
         self.order = order
+        self.mine = mine
+        self.visibility = visibility
     }
 
-    /// Every kind, oldest taken first: what the drain reads.
+    /// Every kind, oldest taken first, everyone's, any visibility: what the drain reads.
     public static let unfiltered = TripMemberQuery()
 
     public var isUnfiltered: Bool { self == .unfiltered }

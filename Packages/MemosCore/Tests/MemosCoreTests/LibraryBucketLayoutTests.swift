@@ -28,7 +28,9 @@ struct LibraryBucketLayoutTests {
         tag: String? = nil,
         zone: String = "UTC"
     ) -> LibraryBucketRequest {
-        LibraryBucketRequest(size: size, filter: filter, tag: tag, timeZoneIdentifier: zone)
+        LibraryBucketRequest(
+            size: size, filter: filter, tag: tag, mine: false, visibility: .any,
+            timeZoneIdentifier: zone)
     }
 
     /// `bucketsShown` for a selection on screen, which defaults to the one `request` reads.
@@ -44,6 +46,8 @@ struct LibraryBucketLayoutTests {
             for: scope,
             filter: filter,
             tag: tag,
+            mine: false,
+            visibility: .any,
             timeZoneIdentifier: zone,
             buckets: buckets,
             answering: request

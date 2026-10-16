@@ -45,6 +45,10 @@ public struct LibraryBucketRequest: Sendable, Equatable {
     public let size: LibraryBucketSize
     public let filter: MediaLibraryFilter
     public let tag: String?
+    /// "Captured by me" and Visibility (MEMNG-787): the counts are counts under both, so a list
+    /// read for one is no answer for another.
+    public let mine: Bool
+    public let visibility: MediaVisibilityFilter
     public let timeZoneIdentifier: String
 }
 
@@ -120,6 +124,8 @@ public final class LibraryBucketStore {
         size: LibraryBucketSize,
         filter: MediaLibraryFilter,
         tag: String?,
+        mine: Bool = false,
+        visibility: MediaVisibilityFilter = .any,
         using handle: SessionHandle,
         baseURL: URL
     ) async {
@@ -127,6 +133,8 @@ public final class LibraryBucketStore {
             size: size,
             filter: filter,
             tag: tag,
+            mine: mine,
+            visibility: visibility,
             timeZoneIdentifier: timeZoneIdentifier
         )
         // Join or refuse (MEMNG-631). A caller whose session has been replaced is REFUSED and
@@ -167,6 +175,8 @@ public final class LibraryBucketStore {
         size: LibraryBucketSize,
         filter: MediaLibraryFilter,
         tag: String?,
+        mine: Bool = false,
+        visibility: MediaVisibilityFilter = .any,
         using handle: SessionHandle,
         baseURL: URL
     ) async {
@@ -174,6 +184,8 @@ public final class LibraryBucketStore {
             size: size,
             filter: filter,
             tag: tag,
+            mine: mine,
+            visibility: visibility,
             timeZoneIdentifier: timeZoneIdentifier
         )
         let began = generation
@@ -256,6 +268,8 @@ public final class LibraryBucketStore {
             size: request.size,
             filter: request.filter,
             tag: request.tag,
+            mine: request.mine,
+            visibility: request.visibility,
             using: handle,
             baseURL: baseURL
         )
@@ -390,7 +404,9 @@ public final class LibraryBucketStore {
                     size: apiSize(request.size),
                     _type: request.filter.apiType,
                     tz: request.timeZoneIdentifier,
-                    tag: request.tag
+                    tag: request.tag,
+                    mine: apiMine(request.mine),
+                    visibility: request.visibility.apiVisibility
                 )
             )
         )

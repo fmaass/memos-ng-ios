@@ -89,7 +89,8 @@ struct ServiceUnavailableParityTests {
     @Test("a 503 to the buckets read is thrown as its undocumented 503 was")
     func buckets() async {
         let request = LibraryBucketRequest(
-            size: .month, filter: .all, tag: nil, timeZoneIdentifier: "UTC"
+            size: .month, filter: .all, tag: nil, mine: false, visibility: .any,
+            timeZoneIdentifier: "UTC"
         )
         await #expect(throws: Self.unavailable) {
             try await LibraryBucketStore.buckets(

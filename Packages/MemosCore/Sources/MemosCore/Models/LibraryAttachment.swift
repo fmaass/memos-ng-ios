@@ -67,6 +67,33 @@ public enum MediaLibraryFilter: String, Sendable, Equatable, CaseIterable, Ident
     }
 }
 
+/// Who may see the memo a picture hangs on, as the Library's and a trip's filter offer it
+/// (MEMNG-787): Any, Public or Just us. Private is never a choice: nobody else sees a private
+/// memo's pictures, so it narrows nothing anyone shares.
+public enum MediaVisibilityFilter: String, Sendable, Hashable, CaseIterable, Identifiable {
+    case any
+    case `public`
+    case justUs
+
+    public var id: String { rawValue }
+
+    /// The memo visibility it narrows to, or nil for Any.
+    public var visibility: MemoVisibility? {
+        switch self {
+        case .any: nil
+        case .public: .public
+        case .justUs: .protected
+        }
+    }
+
+    /// What rides in `?visibility=`: nil for Any, which is the parameter ABSENT.
+    var apiVisibility: Components.Schemas.Visibility? { visibility?.generated }
+}
+
+/// What rides in `?mine=` for "Captured by me": `true`, or the parameter absent. Never
+/// `mine=false`, which is the server's default spelled out and a second way to say "everyone's".
+func apiMine(_ mine: Bool) -> Bool? { mine ? true : nil }
+
 /// Which end of the library the grid starts at.
 ///
 /// One key, two directions — the whole of what a photo library needs. The key is when the picture

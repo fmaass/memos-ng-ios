@@ -439,7 +439,8 @@ struct CollectionsScreen: View {
     private var yearsShown: [LibraryBucket]? {
         guard let years else { return nil }
         return bucketsShown(
-            for: .years, filter: .all, tag: nil, timeZoneIdentifier: years.timeZoneIdentifier,
+            for: .years, filter: .all, tag: nil, mine: false, visibility: .any,
+            timeZoneIdentifier: years.timeZoneIdentifier,
             buckets: years.buckets, answering: years.loadedRequest)
     }
 
