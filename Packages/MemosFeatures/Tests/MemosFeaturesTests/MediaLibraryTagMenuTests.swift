@@ -318,7 +318,7 @@ struct LibraryFilterMenuRenderTests {
         #expect(rows.count == 3, "the shared rows are \(type(of: shared.body))")
         #expect(rows.first?.hasPrefix("Picker") == true, "no kind picker first: \(rows)")
         #expect(rows.count == 3 && rows[1].hasPrefix("Toggle"), "no toggle second: \(rows)")
-        #expect(rows.last == "VisibilityMenu", "no Visibility menu last: \(rows)")
+        #expect(rows.last == "LibraryVisibilityMenu", "no Visibility menu last: \(rows)")
 
         // View Options' own two groups (MEMNG-821): the toggle, a divider, then the layout pair.
         let options = ViewOptionsMenuContent(

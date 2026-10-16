@@ -162,13 +162,13 @@ struct MediaFilterRows: View {
         }
         .pickerStyle(.inline)
         Toggle(Self.capturedByMe, systemImage: Self.capturedByMeSymbol, isOn: $mine)
-        VisibilityMenu(visibility: $visibility)
+        LibraryVisibilityMenu(visibility: $visibility)
     }
 }
 
 /// The nested "Visibility" menu: its label carries the choice in force as a second line, as Sort
 /// By's does, and opening it shows Any, Public and Just us with a checkmark on the current one.
-struct VisibilityMenu: View {
+struct LibraryVisibilityMenu: View {
     @Binding var visibility: MediaVisibilityFilter
 
     var body: some View {
