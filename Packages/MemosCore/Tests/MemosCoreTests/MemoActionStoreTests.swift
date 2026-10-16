@@ -126,7 +126,7 @@ struct MemoActionStoreTests {
 
     @Test("an identical call while one runs joins it: one request per memo on the wire")
     func anIdenticalCallJoins() async throws {
-        let gate = Gate()
+        let gate = ActionGate()
         let server = Self.server(hold: { operation, count in
             if operation == Self.patchMemo, count == 1 { await gate.wait() }
         })
@@ -134,14 +134,18 @@ struct MemoActionStoreTests {
         var joined = 0
         store.onJoin = { joined += 1 }
         let handle = server.client.handle
-        async let first = store.setVisibility(
-            .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.setVisibility(
+                .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+        }
         await arrival(of: Self.patchMemo, in: server)
-        async let second = store.setVisibility(
-            .public, forMemos: ["m2", "m1"], using: handle, baseURL: Stub.baseURL)
+        let second = Task {
+            await store.setVisibility(
+                .public, forMemos: ["m2", "m1"], using: handle, baseURL: Stub.baseURL)
+        }
         for _ in 0..<10_000 where joined == 0 { try? await Task.sleep(for: .milliseconds(1)) }
         await gate.open()
-        let (a, b) = await (first, second)
+        let (a, b) = (await first.value, await second.value)
 
         #expect(joined == 1, "the second call did not join")
         #expect(a == b)
@@ -150,21 +154,23 @@ struct MemoActionStoreTests {
 
     @Test("a differing call while one runs is refused, sends nothing and gets no other's result")
     func aDifferingCallIsRefused() async throws {
-        let gate = Gate()
+        let gate = ActionGate()
         let server = Self.server(hold: { operation, count in
             if operation == Self.patchMemo, count == 1 { await gate.wait() }
         })
         let store = MemoActionStore(trips: nil)
         let handle = server.client.handle
-        async let first = store.setVisibility(
-            .public, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+        let first = Task {
+            await store.setVisibility(
+                .public, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+        }
         await arrival(of: Self.patchMemo, in: server)
         let otherValue = await store.setVisibility(
             .protected, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
         let otherMemos = await store.setVisibility(
             .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
         await gate.open()
-        _ = await first
+        _ = await first.value
 
         #expect(otherValue == .refused)
         #expect(otherMemos == .refused)
@@ -177,7 +183,7 @@ struct MemoActionStoreTests {
 
     @Test("a run answered after sign-out is dropped: nothing more sent, no outcome, no re-read")
     func theGenerationFence() async throws {
-        let gate = Gate()
+        let gate = ActionGate()
         let server = Self.server(hold: { operation, count in
             if operation == Self.patchMemo, count == 1 { await gate.wait() }
         })
@@ -187,12 +193,14 @@ struct MemoActionStoreTests {
         let store = MemoActionStore(trips: trips)
         store.reports(to: session)
         let revision = trips.revision
-        async let run = store.setVisibility(
-            .public, forMemos: ["m1", "m2"], using: issued, baseURL: Stub.baseURL)
+        let run = Task {
+            await store.setVisibility(
+                .public, forMemos: ["m1", "m2"], using: issued, baseURL: Stub.baseURL)
+        }
         await arrival(of: Self.patchMemo, in: server)
         session.activeHandle = nil
         await gate.open()
-        let result = await run
+        let result = await run.value
 
         #expect(result == .superseded)
         #expect(paths(server, Self.patchMemo) == ["/api/memos/m1"], "a PATCH outlived the session")
@@ -335,7 +343,7 @@ private func arrival(of operation: String, in server: TripServer) async {
 }
 
 /// Holds a scripted answer until the test opens it; once open, every wait passes.
-private actor Gate {
+private actor ActionGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
