@@ -146,11 +146,24 @@ enum LibraryMenuProbe {
         return false
     }
 
-    /// What holds a menu on screen, for a failure's message: each holder's kind, label and rows.
+    /// What holds a menu on screen, for a failure's message: each holder's kind, its button
+    /// menu, its interaction's configuration and the rows either gave.
     static func describe(_ window: UIWindow) -> String {
-        holders(in: window).prefix(12).map { holder in
-            let rows = menu(of: holder).map { leaves($0).map(title) } ?? []
-            return "\(type(of: holder.view)) '\(holder.view.accessibilityLabel ?? "-")' \(rows)"
+        holders(in: window).prefix(8).map { holder in
+            var parts = ["\(type(of: holder.view))"]
+            if let button = holder.view as? UIButton {
+                parts.append("menu=\(button.menu.map(summary) ?? "nil")")
+                parts.append("primary=\(button.showsMenuAsPrimaryAction)")
+            }
+            if let configuration = configuration(of: holder) {
+                let names = ivarNames(of: configuration)
+                parts.append("cfg=\(type(of: configuration)) \(names)")
+            } else {
+                let kind = holder.interaction.map { String(describing: type(of: $0)) } ?? "-"
+                parts.append("cfg=nil ia=\(kind)")
+            }
+            parts.append("rows=\(menu(of: holder).map { leaves($0).map(title) } ?? [])")
+            return parts.joined(separator: " ")
         }
         .joined(separator: "; ")
     }
@@ -160,44 +173,77 @@ enum LibraryMenuProbe {
         let interaction: UIContextMenuInteraction?
     }
 
-    /// Every button with a menu and every view with a context-menu interaction, top to bottom.
+    /// Every button and every view with a context-menu interaction, top to bottom.
     private static func holders(in window: UIWindow) -> [Holder] {
         var found: [(Holder, CGFloat)] = []
         var views: [UIView] = [window]
         while let view = views.popLast() {
             views.append(contentsOf: view.subviews)
             let top = view.convert(view.bounds, to: window).minY
-            if let button = view as? UIButton, button.menu != nil {
-                found.append((Holder(view: button, interaction: nil), top))
-            }
-            for case let interaction as UIContextMenuInteraction in view.interactions {
-                found.append((Holder(view: view, interaction: interaction), top))
+            let interactions = view.interactions.compactMap { $0 as? UIContextMenuInteraction }
+            if let button = view as? UIButton {
+                let own = button.contextMenuInteraction ?? interactions.first
+                found.append((Holder(view: button, interaction: own), top))
+            } else {
+                for interaction in interactions {
+                    found.append((Holder(view: view, interaction: interaction), top))
+                }
             }
         }
         return found.sorted { $0.1 < $1.1 }.map(\.0)
     }
 
-    private static func menu(of holder: Holder) -> UIMenu? {
-        typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
-        guard let interaction = holder.interaction else {
-            return (holder.view as? UIButton)?.menu
-        }
-        // One interaction can answer for a whole hosting view by location, so it is asked where
-        // the header's Filter button is drawn whenever that point is inside it.
+    /// The configuration the holder's interaction would open, asked where the header's Filter
+    /// button is drawn whenever that point is inside it: one interaction can answer for a whole
+    /// hosting view by location.
+    private static func configuration(of holder: Holder) -> UIContextMenuConfiguration? {
+        guard let interaction = holder.interaction else { return nil }
         let view = holder.view
         var point = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         if let window = view.window, let filter = filterFrame(in: window) {
             let inside = view.convert(CGPoint(x: filter.midX, y: filter.midY), from: window)
             if view.bounds.contains(inside) { point = inside }
         }
-        guard
-            let configuration = interaction.delegate?.contextMenuInteraction(
-                interaction, configurationForMenuAtLocation: point),
-            configuration.responds(to: Selector(("actionProvider"))),
-            let block = configuration.value(forKey: "actionProvider") as AnyObject?,
-            !(block is NSNull)
-        else { return nil }
-        return unsafeBitCast(block, to: Provider.self)([])
+        return interaction.delegate?.contextMenuInteraction(
+            interaction, configurationForMenuAtLocation: point)
+    }
+
+    private static func menu(of holder: Holder) -> UIMenu? {
+        typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
+        if let menu = (holder.view as? UIButton)?.menu, !leaves(menu).isEmpty { return menu }
+        guard let configuration = configuration(of: holder) else { return nil }
+        var type: AnyClass? = Swift.type(of: configuration)
+        while let next = type, next != NSObject.self {
+            for (name, encoding) in CollectionScreenTests.ivarList(of: next) {
+                guard encoding == "@?", name.lowercased().contains("action") else { continue }
+                let found = CollectionScreenTests.ivar(named: name, of: configuration)
+                guard let block = found as AnyObject?, !(block is NSNull) else { continue }
+                if let menu = unsafeBitCast(block, to: Provider.self)([]) { return menu }
+            }
+            type = class_getSuperclass(next)
+        }
+        return nil
+    }
+
+    private static func ivarNames(of object: AnyObject) -> [String] {
+        var names: [String] = []
+        var type: AnyClass? = Swift.type(of: object)
+        while let next = type, next != NSObject.self {
+            names += CollectionScreenTests.ivarList(of: next).map { "\($0.name):\($0.encoding)" }
+            type = class_getSuperclass(next)
+        }
+        return names
+    }
+
+    /// A menu element's kind and title, and a menu's children one level down.
+    private static func summary(_ element: UIMenuElement) -> String {
+        guard let menu = element as? UIMenu else {
+            if let deferred = element as? UIDeferredMenuElement {
+                return "deferred\(ivarNames(of: deferred))"
+            }
+            return "\(type(of: element))(\(title(element)))"
+        }
+        return "menu[\(menu.children.map(summary).joined(separator: ","))]"
     }
 
     /// Where the element read out as "Filter" is, in the window's coordinates.
