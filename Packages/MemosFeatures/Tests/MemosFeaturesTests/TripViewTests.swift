@@ -413,14 +413,15 @@ struct TripScreenRenderTests {
     /// pictures are on screen when `body` runs.
     private func selectingTrip(
         _ wire: TripWire, shareLane: TripShareLane? = nil,
-        stores given: (TripStore, TripMemberStore)? = nil,
+        stores given: (TripStore, TripMemberStore)? = nil, manage: TripManage = TripManage(),
         _ body: (PressProbe.Screen, AppDock) async -> Void
     ) async {
         let dock = AppDock()
         dock.send(.selected(.collections))
         let stores = given ?? stores()
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
-        let view = trip(stores, wire, record, shareLane: shareLane).environment(dock)
+        let view = trip(stores, wire, record, shareLane: shareLane, manage: manage)
+            .environment(dock)
         await CollectionsHost.with(view, height: 3000) { screen in
             _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
             #expect(TripProbe.photos(in: screen.window).count == 5, "control: the grid landed")
@@ -2736,8 +2737,11 @@ extension TripScreenRenderTests {
         }
     }
 
-    /// Counts, as the store and the wire tell them apart: ONE call into the member store's
-    /// `remove` sends one exclusion PUT per picture, so a confirmed removal of three is three PUTs.
+    /// What the counts say: one call into the member store's `remove` sends one exclusion PUT per
+    /// picture, so one confirmed removal of three is three PUTs. Three PUTs alone do not prove one
+    /// call — a second call with the same pictures while the first is out JOINS its slot and sends
+    /// nothing — so the answer is delivered once more after the batch has ended, when a second
+    /// call could join nothing and would send three more. Still three: one store call.
     @Test("Remove with three chosen asks first; only the dialog's Remove sends the one removal")
     func removeAsksFirst() async {
         for confirm in [true, false] {
@@ -2755,16 +2759,24 @@ extension TripScreenRenderTests {
                 #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[3]), "p3 took no press")
                 let answer = confirm ? TripView.removeConfirmButton : "Cancel"
                 // Delivered twice, as a dialog's callbacks can be: the second finds no question.
-                #expect(TripMenuProbe.answer(answer, over: screen.host, times: 2), "\(answer)")
+                let deliver = TripMenuProbe.handler(answer, over: screen.host)
+                #expect(deliver != nil, "no \(answer) on the dialog")
+                deliver?()
+                deliver?()
                 if confirm {
-                    // Three exclusion PUTs: the one store call's, and no second call's.
                     let sent = await screen.until { wire.transport.writes.count == 3 }
                     #expect(sent, "the removal wrote \(wire.transport.writes)")
                     await screen.settle(turns: 6)
+                    // A third delivery after the batch ended: a second store call would send
+                    // three more PUTs here.
+                    deliver?()
+                    await screen.settle(turns: 10)
                     #expect(wire.transport.writes.count == 3, "\(wire.transport.writes)")
                     #expect(
                         wire.transport.trips.rows.first?.exclusions.sorted() == ["p0", "p1", "p2"])
                 } else {
+                    await screen.settle(turns: 6)
+                    deliver?()
                     await screen.settle(turns: 6)
                     #expect(wire.transport.writes.isEmpty, "Cancel wrote \(wire.transport.writes)")
                 }
@@ -2799,6 +2811,69 @@ extension TripScreenRenderTests {
             await screen.settle(turns: 8)
             let wrote = wire.transport.writes
             #expect(wrote.isEmpty, "a stale question wrote \(wrote)")
+        }
+    }
+
+    /// The filter changed while the question was up (review round 2): the answer was about
+    /// pictures the grid no longer shows, and its Remove sends nothing.
+    @Test("a Remove answered after the filter changed sends nothing")
+    func removeAfterAFilterChange() async {
+        let wire = TripWire()
+        let manage = TripManage()
+        await selectingTrip(wire, manage: manage) { screen, _ in
+            #expect(await askRemoveOfThree(on: screen), "no dialog")
+            // The dialog's own Remove, taken while it is up and delivered once the filter moved.
+            let deliver = TripMenuProbe.handler(TripView.removeConfirmButton, over: screen.host)
+            #expect(deliver != nil, "no Remove on the dialog")
+            manage.query = TripMemberQuery(filter: .videos, order: .oldestFirst)
+            await screen.settle(turns: 8)
+            deliver?()
+            await screen.settle(turns: 10)
+            let wrote = wire.transport.writes
+            #expect(wrote.isEmpty, "a question about another filter wrote \(wrote)")
+        }
+    }
+
+    /// A Sort change while select mode narrows the grid (review round 2): until the new read
+    /// lands there is no reading to prune against, so the chosen pictures and the narrowing
+    /// stand; once it lands, a picture that really left the trip leaves the selection.
+    @Test("a held read across a Sort change keeps the selection and its narrowing")
+    func aHeldSortChangeKeepsTheSelection() async {
+        let wire = TripWire()
+        let manage = TripManage()
+        // Photos, as the trip holds nothing else: the Sort change below keeps a filtered read.
+        manage.query = TripMemberQuery(filter: .images, order: .newestFirst)
+        let stores = stores()
+        await selectingTrip(wire, stores: stores, manage: manage) { screen, _ in
+            let newest = ["p4", "p3", "p2", "p1", "p0"]
+            let drawn = await screen.until { TripProbe.tiles(in: screen.window) == newest }
+            #expect(drawn, "control: newest first \(TripProbe.tiles(in: screen.window))")
+            _ = await pressBar("Select", on: screen) { screen.says("Select Items") }
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p4 took no press")
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[2]), "p2 took no press")
+            #expect(screen.press("Show Selected (2)"), "Show Selected took no press")
+            #expect(await screen.until { TripProbe.tiles(in: screen.window) == ["p4", "p2"] })
+            wire.transport.trips.hold(TripRows.members)
+            manage.query = TripMemberQuery(filter: .images, order: .oldestFirst)
+            let asked = await screen.until {
+                wire.transport.trips.calls(TripRows.members).contains {
+                    TripRows.query($0.path, "type") == "image"
+                        && TripRows.query($0.path, "order") == "taken_asc"
+                }
+            }
+            #expect(asked, "the new order was never asked for")
+            await screen.settle(turns: 20)
+            #expect(screen.says("Show Selected (2)"), "the held read cleared the selection")
+            // p2 leaves the trip on the server while the read is out; then the read lands.
+            if let uid = wire.transport.trips.rows.first?.uid {
+                wire.transport.trips.edit(uid) { $0.exclusions = ["p2"] }
+            }
+            wire.transport.trips.release(TripRows.members)
+            let pruned = await screen.until { screen.says("Show Selected (1)") }
+            #expect(pruned, "the picture that left stayed chosen")
+            let kept = await screen.until { TripProbe.tiles(in: screen.window) == ["p4"] }
+            #expect(kept, "the narrowing did not stand: \(TripProbe.tiles(in: screen.window))")
         }
     }
 
@@ -2886,6 +2961,11 @@ extension TripScreenRenderTests {
             }
             #expect(grid, "the grid: \(TripProbe.tiles(in: screen.window))")
             #expect(screen.says("5 photos"), "the hero lost members to a filter")
+            // The hero's cover is the trip's, p0, not the filtered grid's first picture.
+            #expect(CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window))
+            let moved = CollectionsHost.identified(
+                TripView.coverIdentifier("p4"), in: screen.window)
+            #expect(!moved, "the hero's cover followed the filter")
             #expect(stores.1.members(for: record).count == 5, "the members moved with a filter")
             let mapped = TripMapPresentation.memberUids(of: record, in: stores.1)
             let all = Set(stores.1.members(for: record).map(\.id))
@@ -2980,6 +3060,19 @@ enum TripMenuProbe {
             }
         }
         return false
+    }
+
+    /// The alert over `host`'s `label` action as a call: the alert is dismissed now, and each call
+    /// delivers that action's handler once, as a framework answering late or twice would.
+    static func handler(_ label: String, over host: UIViewController) -> (() -> Void)? {
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        guard let alert = alert(over: host),
+            let action = alert.actions.first(where: { $0.title == label }),
+            let block = action.value(forKey: "handler") as AnyObject?
+        else { return nil }
+        let handler = unsafeBitCast(block, to: Handler.self)
+        alert.dismiss(animated: false)
+        return { handler(action) }
     }
 
     /// Answers the alert over `host` with its `label` action, delivering the action's handler
