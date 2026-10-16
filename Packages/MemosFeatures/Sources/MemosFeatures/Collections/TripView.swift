@@ -1316,13 +1316,11 @@ struct TripView: View {
         selection.visible(in: viewerRows.rows)
     }
 
-    /// Whether `viewerRows` is a reading: always unfiltered (the settled members), and under a
-    /// filter once its read of the current lineage has landed. Until then nothing is pruned
-    /// against it and no action acts on it.
-    private var rowsSettled: Bool {
-        guard !manage.query.isUnfiltered, let trip = live ?? openedTrip else { return true }
-        return memberStore.filteredMembers(for: trip, query: manage.query) != nil
-    }
+    /// Whether `viewerRows` is a reading: unfiltered, once a drain has settled — drained whole,
+    /// not pages still arriving (`settled(of:in:under:)` holds members only at `.complete` or
+    /// `.truncated`) — and under a filter once its read of the current lineage has landed. Until
+    /// then nothing is pruned against it and no action acts on it.
+    private var rowsSettled: Bool { viewerRows.loaded }
 
     /// The grid's rows before Show Selected narrows them — the members, or the trip's filtered
     /// read while a filter is chosen — and whether they are a reading: what a tap opens the
