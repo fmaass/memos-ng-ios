@@ -316,7 +316,7 @@ struct LibraryFilterMenuRenderTests {
                 Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
             } ?? []
         #expect(rows.count == 3, "the shared rows are \(type(of: shared.body))")
-        #expect(rows.first?.hasPrefix("Picker") == true, "no kind picker first: \(rows)")
+        #expect(rows.first?.contains("Picker<") == true, "no kind picker first: \(rows)")
         #expect(rows.count == 3 && rows[1].hasPrefix("Toggle"), "no toggle second: \(rows)")
         #expect(rows.last == "LibraryVisibilityMenu", "no Visibility menu last: \(rows)")
 

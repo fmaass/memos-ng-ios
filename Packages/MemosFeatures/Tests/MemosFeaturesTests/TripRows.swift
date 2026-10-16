@@ -226,7 +226,7 @@ nonisolated final class TripRows: @unchecked Sendable {
             query["tag"] = row.tag
             query["spanStart"] = row.spanStart
             query["spanEnd"] = row.spanEnd
-            for name in ["cursor", "limit", "order", "type"] {
+            for name in ["cursor", "limit", "order", "type", "mine", "visibility"] {
                 if let value = Self.query(path, name) { query[name] = value }
             }
             let listed = try await listing(query)
