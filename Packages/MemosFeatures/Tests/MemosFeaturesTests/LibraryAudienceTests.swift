@@ -65,7 +65,8 @@ private final class AudienceTransport: ClientTransport, @unchecked Sendable {
                 """
             )
         case AudienceWire.listAttachments:
-            let uids = justUs ? ["aud-a"] : mine ? ["aud-a", "aud-b"] : ["aud-a", "aud-b", "aud-c"]
+            let everybody = ["aud-a", "aud-b", "aud-c"]
+            let uids = justUs ? ["aud-a"] : mine ? ["aud-a", "aud-b"] : everybody
             return Self.json("[\(uids.map(Self.row).joined(separator: ","))]")
         case AudienceWire.attachmentTags:
             return Self.json("[]")
