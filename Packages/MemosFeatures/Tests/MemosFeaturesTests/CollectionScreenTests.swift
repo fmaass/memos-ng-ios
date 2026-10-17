@@ -548,10 +548,12 @@ struct CollectionScreenTests {
             #expect(drawn, "precondition: the screen never drew the drain in flight")
             guard drawn else { return }
             let during = TripProbe.spinners(in: screen.window)
+            // Counted while the one read is still held: a re-drain that starts the moment the
+            // failure lands, before the store is seen to have failed, is counted too.
+            let reads = wire.transport.listReads.count
             wire.transport.release()
             let failed = await screen.until { held.1.drainFailed(for: Self.tag) }
             #expect(failed, "precondition: the drain failed")
-            let reads = wire.transport.listReads.count
             await screen.settle(turns: 40)
             _ = await screen.until(seconds: 2) { wire.transport.listReads.count > reads }
             let after = wire.transport.listReads.count
