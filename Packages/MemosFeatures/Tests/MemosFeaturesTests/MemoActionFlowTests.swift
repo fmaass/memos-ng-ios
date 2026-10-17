@@ -142,6 +142,62 @@ struct MemoActionFlowTests {
         #expect(reads.two == 0, "the filtered read went out under another session")
     }
 
+    @Test("the Library's two reads each take the session at issuance, never a newer one")
+    func theLibraryReadsAreIssuedUnderTheirSession() async {
+        let flow = Flow()
+        let now = Generation()
+        let wire = Wire()
+        let current: LibraryRefresh.Current = {
+            now.value.map { (SessionHandle(client: Self.client, generation: $0), Self.base) }
+        }
+        let list: LibraryRefresh.Read = { handle, _ in wire.list.append(handle.generation) }
+        let counts: LibraryRefresh.Read = { handle, _ in wire.counts.append(handle.generation) }
+        let changed = MemoActionResult.finished(
+            .init(action: .visibility(.public), asked: 1, changed: 1))
+
+        await flow.perform(
+            issuedUnder: 1, current: { now.value },
+            rereads: [
+                {
+                    await LibraryRefresh.both(
+                        issuedUnder: 1, current: current, list: list, counts: counts)
+                }
+            ]
+        ) { changed }
+        #expect(wire.list == [1] && wire.counts == [1], "positive control: both reads went out")
+
+        // The flow has checked the session; it moves before either read begins.
+        wire.list = []
+        wire.counts = []
+        await flow.perform(
+            issuedUnder: 1, current: { now.value },
+            rereads: [
+                {
+                    now.value = 2
+                    await LibraryRefresh.both(
+                        issuedUnder: 1, current: current, list: list, counts: counts)
+                }
+            ]
+        ) { changed }
+        #expect(wire.list.isEmpty && wire.counts.isEmpty, "a read went out under another session")
+
+        // It moves as the first read goes out, whichever that is: the other one stays home.
+        now.value = 1
+        wire.list = []
+        wire.counts = []
+        await LibraryRefresh.both(
+            issuedUnder: 1, current: current,
+            list: { handle, _ in
+                wire.list.append(handle.generation)
+                now.value = 2
+            },
+            counts: { handle, _ in
+                wire.counts.append(handle.generation)
+                now.value = 2
+            })
+        #expect(wire.list + wire.counts == [1], "a read went out under the session after it")
+    }
+
     @Test("Add to trip's banner: N of M added, and the pictures the outbox held back")
     func theAddBanner() {
         #expect(
@@ -218,6 +274,18 @@ struct MemoActionFlowTests {
 @MainActor
 private final class Generation {
     var value: Int? = 1
+}
+
+/// The generation each Library read went out under, in order.
+@MainActor
+private final class Wire {
+    var list: [Int] = []
+    var counts: [Int] = []
+}
+
+extension MemoActionFlowTests {
+    fileprivate static let base = URL(string: "https://memos.example.invalid")!
+    fileprivate static let client = MediaViewerPagerFreshURLTests.unusedClient
 }
 
 /// How often each re-read was asked for.

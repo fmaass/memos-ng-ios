@@ -506,14 +506,38 @@ struct MediaLibraryView: View {
         .refreshable { await refreshAll() }
     }
 
-    /// All's pull-to-refresh: the list and the day buckets its headings count from, read side by
-    /// side, so a day that gained a picture is not drawn under its old count. The buckets go
-    /// through the store's refreshing read, so a read still pending from before the pull cannot
-    /// answer for it.
-    private func refreshAll() async {
-        async let list: Void = load()
-        async let counts: Void = loadBuckets(refreshing: true)
-        _ = await (list, counts)
+    /// All's pull-to-refresh, and a memo action's re-read: the list and the day buckets its
+    /// headings count from, read side by side, so a day that gained a picture is not drawn under
+    /// its old count. The buckets go through the store's refreshing read, so a read still pending
+    /// from before the pull cannot answer for it. Each read goes out only under `issued` — the
+    /// generation the action ran under, or the one current when the pull began — taken at its own
+    /// issuance (`LibraryRefresh`).
+    private func refreshAll(issuedUnder issued: Int? = nil) async {
+        guard let generation = issued ?? session.activeHandle?.generation else { return }
+        let size = choice.scope.bucketSize
+        await LibraryRefresh.both(
+            issuedUnder: generation,
+            current: { [session] in
+                guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+                else { return nil }
+                return (handle, baseURL)
+            },
+            list: { [library] handle, baseURL in
+                await library?.refresh(using: handle, baseURL: baseURL)
+            },
+            counts: { [library, buckets] handle, baseURL in
+                guard let library, let buckets, let size else { return }
+                await buckets.refresh(
+                    size: size,
+                    filter: library.filter,
+                    tag: library.tag,
+                    mine: library.mine,
+                    visibility: library.visibility,
+                    using: handle,
+                    baseURL: baseURL
+                )
+            }
+        )
     }
 
     /// The title, the line naming what the grid holds, and the filter menu that changes it.
@@ -734,7 +758,7 @@ struct MediaLibraryView: View {
             await acting.perform(
                 issuedUnder: handle.generation,
                 current: { [session] in session.activeHandle?.generation },
-                rereads: [{ await refreshAll() }]
+                rereads: [{ await refreshAll(issuedUnder: handle.generation) }]
             ) {
                 await actions.setVisibility(
                     asked.visibility, forMemos: asked.memos, using: handle, baseURL: baseURL)
@@ -752,7 +776,7 @@ struct MediaLibraryView: View {
             await acting.perform(
                 issuedUnder: handle.generation,
                 current: { [session] in session.activeHandle?.generation },
-                rereads: [{ await refreshAll() }]
+                rereads: [{ await refreshAll(issuedUnder: handle.generation) }]
             ) {
                 await actions.add(
                     attachments: chosen, toTrip: trip, using: handle, baseURL: baseURL)
