@@ -311,10 +311,15 @@ public final class Outbox {
             noteProgress(in: loaded)
             queueError = nil
             queueReadSucceeded = max(queueReadSucceeded, ticket)
-            owedEdits = owedEdits.filter { _, owed in
-                // Only a read that began after the write returned can say the edit is not owed.
-                guard let wrote = owed.wroteBefore, ticket > wrote else { return true }
-                return loaded.contains { $0.id == owed.jobID && $0.pendingEdit != nil }
+            owedEdits = owedEdits.compactMapValues { owed -> OwedEdit? in
+                // Only a read that began after the write returned can say the edit is not owed, or
+                // say what memo and pictures the capture has resolved to since.
+                guard let wrote = owed.wroteBefore, ticket > wrote else { return owed }
+                let job = loaded.first { $0.id == owed.jobID }
+                guard let job, job.pendingEdit != nil else { return nil }
+                var rebound = owed
+                rebound.bind(job)
+                return rebound
             }
             if OutboxProgress.didComplete(previous: previous, current: loaded.map(\.id)) {
                 lastCompletedAt = Date()
@@ -341,15 +346,26 @@ public final class Outbox {
     /// succeeds, after a failed one until a later one succeeds, and while a re-submit has not yet
     /// found the capture it edits. Nothing else writes an edit; the drain only sends them, so what
     /// it changes between two reads errs towards holding a picture, never towards tagging one.
+    ///
+    /// Nor can an owed edit whose capture has not resolved be told apart from the memo asked
+    /// about: the server can show that memo and its picture before a read of the queue has brought
+    /// back the uids its create resolved to. So such an edit answers `unknown` for every memo it
+    /// cannot exclude, marked or read from disk, until a read shows it resolved.
     public func editOwed(memoUID: String?, attachmentUID: String) -> OutboxEditAnswer {
         guard queueReadSucceeded > queueReadFailed else { return .unknown }
-        for owed in owedEdits.values {
-            guard let binding = owed.binding else { return .unknown }
-            if let memoUID, binding.memoUID == memoUID { return .owed }
-            if binding.attachmentUIDs.contains(attachmentUID) { return .owed }
+        let marked: [OwedEdit.Binding?] = owedEdits.values.map(\.binding)
+        let queued: [OwedEdit.Binding?] = jobs.filter { $0.pendingEdit != nil }.map {
+            OwedEdit.Binding($0)
         }
-        return Self.owesEdit(in: jobs, memoUID: memoUID, attachmentUID: attachmentUID)
-            ? .owed : .clear
+        var answer = OutboxEditAnswer.clear
+        for binding in marked + queued {
+            switch binding?.answer(memoUID: memoUID, attachmentUID: attachmentUID) ?? .unknown {
+            case .owed: return .owed
+            case .unknown: answer = .unknown
+            case .clear: break
+            }
+        }
+        return answer
     }
 
     /// Whether a job of `jobs` owes an edit to the memo `memoUID`, or to the memo holding
@@ -788,6 +804,24 @@ private struct OwedEdit {
     struct Binding {
         let memoUID: String?
         let attachmentUIDs: Set<String>
+        /// Whether a picture of the capture has no uid yet.
+        let picturesUnresolved: Bool
+
+        init(_ job: UploadJob) {
+            memoUID = job.resolvedMemoUID
+            attachmentUIDs = Set(job.files.compactMap(\.attachmentUID))
+            picturesUnresolved = job.files.contains { $0.attachmentUID == nil }
+        }
+
+        /// `owed` for the memo or a picture this edit names; `unknown` when what it has not
+        /// resolved could be that memo — a memo asked about while its own is unnamed, a memo-less
+        /// picture while one of its own is — and `clear` only when it excludes them.
+        func answer(memoUID asked: String?, attachmentUID: String) -> OutboxEditAnswer {
+            if let asked, memoUID == asked { return .owed }
+            if attachmentUIDs.contains(attachmentUID) { return .owed }
+            let excluded = asked != nil ? memoUID != nil : !picturesUnresolved
+            return excluded ? .clear : .unknown
+        }
     }
 
     let jobID: UUID
@@ -801,8 +835,6 @@ private struct OwedEdit {
     }
 
     mutating func bind(_ job: UploadJob) {
-        binding = Binding(
-            memoUID: job.resolvedMemoUID,
-            attachmentUIDs: Set(job.files.compactMap(\.attachmentUID)))
+        binding = Binding(job)
     }
 }

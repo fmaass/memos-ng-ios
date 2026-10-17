@@ -561,6 +561,129 @@ struct MemoActionStoreTests {
         #expect(bodies(server, Self.inclusion).first?["attachmentUids"] as? [String] == ["p1"])
     }
 
+    @Test("a re-submitted capture whose create has not resolved cannot tell any picture apart")
+    func anUnresolvedEditCannotTell() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = Self.unresolvedCapture()
+        try await repository.save(job)
+        await outbox.refresh()
+        #expect(outbox.editOwed(memoUID: "m1", attachmentUID: "p1") == .clear, "positive control")
+
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let picture = [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)]
+        let window = Window()
+        // Asked while the edit is written: only the re-submit's own mark knows it, and that mark
+        // names neither a memo nor a picture yet.
+        outbox.resubmitWrote = {
+            window.inJobs = outbox.jobs.first?.pendingEdit != nil
+            window.result = await store.add(
+                attachments: picture, toTrip: Self.portugal, using: server.client.handle,
+                baseURL: Stub.baseURL)
+        }
+        let outcome = await outbox.resubmit(job.id, draft: Self.edit(of: job, in: repository))
+        #expect(outcome == .accepted)
+        #expect(window.inJobs == false, "not inside the window")
+        let unchecked = MemoActionResult.finished(
+            .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldUnchecked: 1))
+        #expect(window.result == unchecked, "an unresolved mark let the picture go")
+
+        // Read back: the queue holds the edit, still owed to a memo it cannot name.
+        #expect(outbox.jobs.first?.pendingEdit != nil, "positive control: the edit was read")
+        let after = await store.add(
+            attachments: picture, toTrip: Self.portugal, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(after == unchecked, "an unresolved queued edit let the picture go")
+        #expect(server.calls.of(Self.inclusion).isEmpty, "a picture that may be owed was sent")
+    }
+
+    @Test("once a read shows the capture resolved, only the pictures of its memo are held")
+    func aResolvedEditIsExactAgain() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = Self.unresolvedCapture()
+        try await repository.save(job)
+        await outbox.refresh()
+        let outcome = await outbox.resubmit(job.id, draft: Self.edit(of: job, in: repository))
+        #expect(outcome == .accepted)
+
+        // The create answers: the server holds m1 with p1 from here, and the drain writes that
+        // down — but the outbox has not read it yet.
+        guard case .present(var written) = await repository.presence(job.id) else {
+            Issue.record("the re-submitted capture is not on disk")
+            return
+        }
+        #expect(written.pendingEdit != nil, "positive control: the edit was written")
+        written.resolvedMemoUID = "m1"
+        written.files[0].attachmentUID = "p1"
+        try await repository.save(written)
+
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let other = [MemoActionPicture(uid: "p2", memoUID: "m2", mine: true)]
+        let before = await store.add(
+            attachments: other, toTrip: Self.portugal, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(
+            before
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldUnchecked: 1)),
+            "a picture went out before the outbox read where the capture resolved")
+        #expect(server.calls.of(Self.inclusion).isEmpty, "sent before the resolution was read")
+
+        await outbox.refresh()
+        let sent = await store.add(
+            attachments: other, toTrip: Self.portugal, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(sent == .finished(.init(action: .addToTrip("t1"), asked: 1, changed: 1)))
+        #expect(bodies(server, Self.inclusion).first?["attachmentUids"] as? [String] == ["p2"])
+        let held = await store.add(
+            attachments: [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)],
+            toTrip: Self.portugal, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(
+            held
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldByOutbox: 1)))
+        #expect(server.calls.of(Self.inclusion).count == 1, "the resolved memo's picture was sent")
+    }
+
+    @Test("an unresolved capture owing an edit, read from disk with no re-submit here, cannot tell")
+    func aLoadedUnresolvedEditCannotTell() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var job = Self.unresolvedCapture()
+        job.pendingEdit = PendingEdit(
+            content: "Lisbon at dusk", visibility: nil, capturedAt: job.capturedAt,
+            fileIDs: job.files.map(\.id))
+        try await repository.save(job)
+        await outbox.refresh()
+        #expect(outbox.jobs.first?.pendingEdit != nil, "positive control: the queue holds the edit")
+
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let result = await store.add(
+            attachments: [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)],
+            toTrip: Self.portugal, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(
+            result
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldUnchecked: 1)))
+        #expect(server.calls.of(Self.inclusion).isEmpty, "an unresolved loaded edit let it go")
+        #expect(
+            outbox.editOwed(memoUID: nil, attachmentUID: "p9") == .unknown,
+            "a memo-less picture was told apart from a picture with no uid yet")
+
+        // Its picture resolves first: a memo-less picture is no longer one of its own, and a
+        // memo still may be.
+        job.files[0].attachmentUID = "p1"
+        try await repository.save(job)
+        await outbox.refresh()
+        #expect(outbox.editOwed(memoUID: nil, attachmentUID: "p9") == .clear)
+        #expect(outbox.editOwed(memoUID: "m9", attachmentUID: "p9") == .unknown)
+        #expect(outbox.editOwed(memoUID: nil, attachmentUID: "p1") == .owed)
+    }
+
     private static let portugal = Trip(
         uid: "t1", title: "Portugal", tag: "portugal", createdAt: Date(), updatedAt: Date())
 
@@ -588,6 +711,17 @@ struct MemoActionStoreTests {
             ],
             binding: AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "alice"),
             resolvedMemoUID: "m1")
+    }
+
+    /// A capture whose create has not resolved: neither its memo nor its picture has a uid yet.
+    private static func unresolvedCapture() -> UploadJob {
+        UploadJob(
+            content: "Lisbon", capturedAt: Date(timeIntervalSince1970: 0),
+            files: [
+                OutboxFile(
+                    relativePath: "a.jpg", filename: "a.jpg", mime: "image/jpeg", byteSize: 1)
+            ],
+            binding: AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "alice"))
     }
 
     /// The editor's later text for `job`, its picture kept.
