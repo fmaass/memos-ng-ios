@@ -145,8 +145,10 @@ struct TripView: View {
     @State private var sharing = MediaBatchShareFlow()
     /// The running share batch, cancelled when select mode ends so its download stops early.
     @State private var shareTask: Task<Void, Never>?
-    /// Select mode's Delete: the question, and the run its yes starts.
-    @State private var deleting = LibraryDeleteFlow()
+    /// Select mode's Delete and memo actions (MEMNG-788), around the one result banner they share
+    /// (`SelectResults`): the toast shows whichever spoke last.
+    @State private var results = SelectResults()
+    private var deleting: LibraryDeleteFlow { results.deleting }
     /// This screen's claim on the dock while select mode's toolbar stands in the main bar's place.
     @State private var dockClaim = UUID()
     /// The members last shown while they were settled, kept while a re-read is on the wire.
@@ -160,7 +162,7 @@ struct TripView: View {
     /// Whether that question is on screen; its going away takes it off the screen only.
     @State private var askingRemove = false
     /// Select mode's Set visibility (MEMNG-788): its question and the last run's banner.
-    @State private var acting = MemoActionFlow()
+    private var acting: MemoActionFlow { results.acting }
     @State private var askingVisibility = false
     @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     /// This showing's lease (`TripMemberStore.coverLease(for:)`): what its lapsed signatures'
@@ -1086,11 +1088,8 @@ struct TripView: View {
     private var selectBar: some View {
         let members = currentMembers
         return VStack(spacing: DesignTokens.Space.tight) {
-            if let message = deleting.message ?? acting.message {
-                LibraryDeleteToast(text: message) {
-                    deleting.dismissMessage()
-                    acting.dismissMessage()
-                }
+            if let message = results.banner.message {
+                LibraryDeleteToast(text: message) { results.banner.dismiss() }
             }
             LibrarySelectToolbar(
                 count: selection.count,
@@ -1218,18 +1217,16 @@ struct TripView: View {
             return
         }
         Task {
-            await acting.perform(reread: { await rereadMembers() }) {
+            await acting.perform(
+                issuedUnder: access.handle.generation,
+                current: { self.access()?.handle.generation },
+                rereads: [{ await drain(using: access) }, { await drainFiltered(using: access) }]
+            ) {
                 await actions.setVisibility(
                     asked.visibility, forMemos: asked.memos, using: access.handle,
                     baseURL: access.baseURL)
             }
         }
-    }
-
-    /// The members and the grid's filtered read, read again after a memo action let them go.
-    private func rereadMembers() async {
-        await drain()
-        await drainFiltered()
     }
 
     /// The Remove row: the question is asked about the pictures chosen NOW, the trip and the
@@ -1362,14 +1359,16 @@ struct TripView: View {
         )
     }
 
-    private func drain() async {
-        guard let readScope, let access = access() else { return }
+    /// The members' read, under `given` — a memo action's issuing session — or the session now.
+    private func drain(using given: CollectionsAccess? = nil) async {
+        guard let readScope, let access = given ?? access() else { return }
         await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
-    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query.
-    private func drainFiltered() async {
-        guard let trip = live ?? openedTrip, let access = access() else { return }
+    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query,
+    /// under `given` — a memo action's issuing session — or the session now.
+    private func drainFiltered(using given: CollectionsAccess? = nil) async {
+        guard let trip = live ?? openedTrip, let access = given ?? access() else { return }
         await memberStore.drainFiltered(
             trip, query: manage.query, using: access.handle, baseURL: access.baseURL)
     }

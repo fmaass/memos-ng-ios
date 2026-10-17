@@ -48,10 +48,12 @@ struct MediaLibraryView: View {
     @State private var sharing = MediaBatchShareFlow()
     /// The running share batch, cancelled when select mode ends so its download stops early.
     @State private var shareTask: Task<Void, Never>?
-    /// Select mode's Delete: the question, and the run its yes starts (MEMNG-589).
-    @State private var deleting = LibraryDeleteFlow()
+    /// Select mode's Delete (MEMNG-589) and memo actions (MEMNG-788), around the one result
+    /// banner they share (`SelectResults`): the toast shows whichever spoke last.
+    @State private var results = SelectResults()
+    private var deleting: LibraryDeleteFlow { results.deleting }
     /// Select mode's memo actions (MEMNG-788): the visibility question and the last run's banner.
-    @State private var acting = MemoActionFlow()
+    private var acting: MemoActionFlow { results.acting }
     @State private var askingVisibility = false
     @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     @Environment(TripStore.self) private var trips: TripStore?
@@ -113,11 +115,8 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .bottom) {
                 if bottomBar == .select {
                     VStack(spacing: DesignTokens.Space.tight) {
-                        if let message = deleting.message ?? acting.message {
-                            LibraryDeleteToast(text: message) {
-                                deleting.dismissMessage()
-                                acting.dismissMessage()
-                            }
+                        if let message = results.banner.message {
+                            LibraryDeleteToast(text: message) { results.banner.dismiss() }
                         }
                         LibrarySelectToolbar(
                             count: selection.count,
@@ -732,7 +731,11 @@ struct MediaLibraryView: View {
             return
         }
         Task {
-            await acting.perform(reread: { await refreshAll() }) {
+            await acting.perform(
+                issuedUnder: handle.generation,
+                current: { [session] in session.activeHandle?.generation },
+                rereads: [{ await refreshAll() }]
+            ) {
                 await actions.setVisibility(
                     asked.visibility, forMemos: asked.memos, using: handle, baseURL: baseURL)
             }
@@ -746,7 +749,11 @@ struct MediaLibraryView: View {
         else { return }
         let chosen = chosenPictures
         Task {
-            await acting.perform(reread: { await refreshAll() }) {
+            await acting.perform(
+                issuedUnder: handle.generation,
+                current: { [session] in session.activeHandle?.generation },
+                rereads: [{ await refreshAll() }]
+            ) {
                 await actions.add(
                     attachments: chosen, toTrip: trip, using: handle, baseURL: baseURL)
             }
