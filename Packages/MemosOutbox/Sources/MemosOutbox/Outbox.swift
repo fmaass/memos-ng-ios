@@ -94,6 +94,22 @@ public final class Outbox {
     /// A withdrawal the disk refused to record, whose cancellation only this process can issue.
     private var unrecordedWithdrawal: OutboxWithdrawal?
 
+    /// The edits a re-submit is writing or has written, one entry per call, held apart from `jobs`
+    /// because `jobs` is a snapshot of disk that trails every write by a read (`editOwed`). An entry
+    /// is put down synchronously when a re-submit begins, before anything suspends; it is dropped
+    /// only by a successful read of the queue that began after the re-submit's own write had
+    /// returned and that shows the job gone or its edit sent — or at once, when the re-submit ended
+    /// without writing anything.
+    private var owedEdits: [UUID: OwedEdit] = [:]
+    /// Reads of the queue begun so far; each read's ticket is the count when it began.
+    private var queueReadsBegun = 0
+    /// The ticket of the newest read that succeeded, and of the newest one that failed.
+    private var queueReadSucceeded = 0
+    private var queueReadFailed = 0
+    /// Awaited by `resubmit` between its write and its read back. Nil in the app; a test holds the
+    /// re-submit there to ask the outbox inside that window.
+    var resubmitWrote: (@MainActor () async -> Void)?
+
     /// The app's subsystem, spelled out: this package depends on nothing, `MemosLog` included.
     private static let log = Logger(subsystem: "live.discomarder.memosng", category: "outbox")
 
@@ -287,11 +303,19 @@ public final class Outbox {
 
     public func refresh() async {
         let previous = jobs.map(\.id)
+        queueReadsBegun += 1
+        let ticket = queueReadsBegun
         do {
             let loaded = try await repository.loadJobs()
             jobs = loaded
             noteProgress(in: loaded)
             queueError = nil
+            queueReadSucceeded = max(queueReadSucceeded, ticket)
+            owedEdits = owedEdits.filter { _, owed in
+                // Only a read that began after the write returned can say the edit is not owed.
+                guard let wrote = owed.wroteBefore, ticket > wrote else { return true }
+                return loaded.contains { $0.id == owed.jobID && $0.pendingEdit != nil }
+            }
             if OutboxProgress.didComplete(previous: previous, current: loaded.map(\.id)) {
                 lastCompletedAt = Date()
             }
@@ -300,8 +324,44 @@ public final class Outbox {
             // screen, and the reason it could not be re-read is said out loud.
             queueError =
                 "The queue on this device could not be read: \(error.localizedDescription)"
+            queueReadFailed = max(queueReadFailed, ticket)
         }
         persistenceError = await engine.lastPersistenceFailure
+    }
+
+    /// Whether the memo `memoUID`, or the one holding the picture `attachmentUID`, is owed an edit
+    /// this device has still to send — answered synchronously, from this outbox's own state, for an
+    /// Add to trip that must not tag a memo an owed full-content edit would then rewrite
+    /// (MEMNG-788).
+    ///
+    /// `jobs` alone cannot answer it: it is the queue as last read, and a re-submit's edit is on
+    /// disk one read before it is in `jobs` — for ever, when that read fails. So an edit is owed
+    /// from the instant its re-submit begins until a read begun after its write shows it sent, and
+    /// the answer is `unknown` whenever the queue is not known as read: before the first read
+    /// succeeds, after a failed one until a later one succeeds, and while a re-submit has not yet
+    /// found the capture it edits. Nothing else writes an edit; the drain only sends them, so what
+    /// it changes between two reads errs towards holding a picture, never towards tagging one.
+    public func editOwed(memoUID: String?, attachmentUID: String) -> OutboxEditAnswer {
+        guard queueReadSucceeded > queueReadFailed else { return .unknown }
+        for owed in owedEdits.values {
+            guard let binding = owed.binding else { return .unknown }
+            if let memoUID, binding.memoUID == memoUID { return .owed }
+            if binding.attachmentUIDs.contains(attachmentUID) { return .owed }
+        }
+        return Self.owesEdit(in: jobs, memoUID: memoUID, attachmentUID: attachmentUID)
+            ? .owed : .clear
+    }
+
+    /// Whether a job of `jobs` owes an edit to the memo `memoUID`, or to the memo holding
+    /// `attachmentUID`: a capture whose editor's later changes are still to be sent.
+    public nonisolated static func owesEdit(
+        in jobs: [UploadJob], memoUID: String?, attachmentUID: String
+    ) -> Bool {
+        jobs.contains { job in
+            guard job.pendingEdit != nil else { return false }
+            if let memoUID, job.resolvedMemoUID == memoUID { return true }
+            return job.files.contains { $0.attachmentUID == attachmentUID }
+        }
     }
 
     /// Recomputed wherever `jobs` is reassigned, from the jobs themselves: a job seen for the
@@ -490,6 +550,10 @@ public final class Outbox {
     /// capture: the create is replayed as it was first sent, and the edit is owed to the memo that
     /// replay resolves to.
     public func resubmit(_ jobID: UUID, draft: RestoredDraft) async -> ResubmitOutcome {
+        // The edit is owed from this instant, before anything suspends: an Add to trip asked while
+        // it is being written must not read the snapshot from before it (`editOwed`).
+        let call = UUID()
+        owedEdits[call] = OwedEdit(jobID: jobID, job: jobs.first { $0.id == jobID })
         // Absent, unreadable and present are three answers, not two: a capture whose manifest
         // could not be read is still there, and answering `vanished` for it would hand the editor
         // a fresh enqueue — a second memo for one capture.
@@ -498,13 +562,19 @@ public final class Outbox {
         case .present(let job):
             snapshot = job
         case .absent:
+            owedEdits[call] = nil
             return .vanished
         case .unreadable:
+            owedEdits[call] = nil
             return .refused(.captureUnreadable)
         }
+        owedEdits[call]?.bind(snapshot)
         // An edit of this capture is claimed: its body cannot be replaced under the server's feet,
         // and a new key over uploads the previous edit consumed is a memo the server refuses.
-        guard snapshot.editUnansweredSince == nil else { return .refused(.editUnanswered) }
+        guard snapshot.editUnansweredSince == nil else {
+            owedEdits[call] = nil
+            return .refused(.editUnanswered)
+        }
         var candidate = snapshot.released(at: Date())
         if draft != self.draft(of: snapshot) {
             let known = Set(snapshot.files.map(\.id))
@@ -515,6 +585,7 @@ public final class Outbox {
                 // down, and a copy that fails refuses the re-submit rather than recording a
                 // picture nothing holds.
                 guard let staged = stage(picture, into: snapshot) else {
+                    owedEdits[call] = nil
                     return .refused(.stagingFailed)
                 }
                 candidate.files.append(staged)
@@ -540,6 +611,9 @@ public final class Outbox {
         let written = try? await repository.save(
             candidate, ifStillCurrent: nil, matching: snapshot, else: candidate
         )
+        // From here a read of the queue tells the truth about this edit, written or not.
+        owedEdits[call]?.wroteBefore = queueReadsBegun
+        if let resubmitWrote { await resubmitWrote() }
         await refresh()
         guard (written ?? nil) != nil else { return .refused(.writeLost) }
         await drainAfterAdoption()
@@ -695,4 +769,40 @@ public enum ResubmitRefusal: Sendable, Equatable {
     /// The capture's manifest could not be read just now. Absent is not the same as unreadable:
     /// a re-submit answered `vanished` here would enqueue a second memo for the same capture.
     case captureUnreadable
+}
+
+/// `Outbox.editOwed`'s answer. Three, not a Bool: a queue that could not be read is not a queue
+/// owing nothing.
+public enum OutboxEditAnswer: Sendable, Equatable {
+    /// Nothing this device holds owes that memo an edit.
+    case clear
+    /// An edit to that memo is being written or waits to be sent.
+    case owed
+    /// The queue is not known as read just now.
+    case unknown
+}
+
+/// One re-submit's edit, from the instant the call began (`Outbox.resubmit`).
+private struct OwedEdit {
+    /// What the edit is owed to; nil until the capture is known.
+    struct Binding {
+        let memoUID: String?
+        let attachmentUIDs: Set<String>
+    }
+
+    let jobID: UUID
+    private(set) var binding: Binding?
+    /// The count of queue reads begun when the call's write returned; nil before it has.
+    var wroteBefore: Int?
+
+    init(jobID: UUID, job: UploadJob?) {
+        self.jobID = jobID
+        if let job { bind(job) }
+    }
+
+    mutating func bind(_ job: UploadJob) {
+        binding = Binding(
+            memoUID: job.resolvedMemoUID,
+            attachmentUIDs: Set(job.files.compactMap(\.attachmentUID)))
+    }
 }

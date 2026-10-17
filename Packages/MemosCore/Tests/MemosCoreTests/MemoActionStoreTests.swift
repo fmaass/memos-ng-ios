@@ -2,7 +2,7 @@ import Foundation
 import HTTPTypes
 import MemosAPI
 @testable import MemosCore
-import MemosOutbox
+@testable import MemosOutbox
 import OpenAPIRuntime
 import Testing
 
@@ -404,15 +404,8 @@ struct MemoActionStoreTests {
 
     @Test("the app's wiring over a real outbox owing an edit holds the picture until it is sent")
     func theRealOutboxHoldsAPicture() async throws {
-        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let (root, repository, outbox) = try Self.realOutbox()
         defer { try? FileManager.default.removeItem(at: root) }
-        let credentials = SignedOut()
-        let repository = try OutboxRepository(
-            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) })
-        let outbox = Outbox(
-            repository: repository, credentials: credentials, http: Unsent(),
-            scheduler: NoChunkSession(), completion: MemoCompletionEndpoint(http: Unsent()),
-            network: UsablePath(), preferences: UploadPreferences(defaults: Self.scratchDefaults()))
         let edited = UploadJob(
             content: "Lisbon", capturedAt: Date(timeIntervalSince1970: 0),
             files: [
@@ -467,9 +460,158 @@ struct MemoActionStoreTests {
         #expect(server.calls.of(Self.inclusion).isEmpty, "an unchecked picture was sent")
     }
 
+    @Test("an Add asked while a re-submit's edit is written, before the queue is read, is held")
+    func anEditBeingWrittenHoldsThePicture() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = Self.resolvedCapture()
+        try await repository.save(job)
+        await outbox.refresh()
+        #expect(outbox.editOwed(memoUID: "m1", attachmentUID: "p1") == .clear, "positive control")
+
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let window = Window()
+        // The re-submit is held after its write and before its read back: the edit is on disk,
+        // `jobs` still shows the capture without it, and the Add is asked right there.
+        outbox.resubmitWrote = {
+            if case .present(let written) = await repository.presence(job.id) {
+                window.onDisk = written.pendingEdit != nil
+            }
+            window.inJobs = outbox.jobs.first?.pendingEdit != nil
+            window.result = await store.add(
+                attachments: [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)],
+                toTrip: Self.portugal, using: server.client.handle, baseURL: Stub.baseURL)
+        }
+        let outcome = await outbox.resubmit(job.id, draft: Self.edit(of: job, in: repository))
+        #expect(outcome == .accepted)
+        #expect(window.onDisk == true && window.inJobs == false, "not inside the window")
+        #expect(
+            window.result
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldByOutbox: 1)))
+        #expect(server.calls.of(Self.inclusion).isEmpty, "the stale queue let the picture go")
+    }
+
+    @Test("after the queue failed to be read, the outbox cannot tell until a read succeeds")
+    func aFailedQueueReadCannotTell() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(outbox.editOwed(memoUID: "m1", attachmentUID: "p1") == .unknown, "never read")
+        let job = Self.resolvedCapture()
+        try await repository.save(job)
+        await outbox.refresh()
+
+        // The jobs directory goes: the next read fails, and the snapshot it leaves is stale.
+        let jobs = root.appending(path: "jobs")
+        try FileManager.default.removeItem(at: jobs)
+        await outbox.refresh()
+        #expect(outbox.lastError != nil, "positive control: the read failed")
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let picture = [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)]
+        let held = await store.add(
+            attachments: picture, toTrip: Self.portugal, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(
+            held
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldUnchecked: 1)))
+        #expect(server.calls.of(Self.inclusion).isEmpty, "a queue that failed to read let it go")
+
+        try FileManager.default.createDirectory(at: jobs, withIntermediateDirectories: true)
+        try await repository.save(job)
+        await outbox.refresh()
+        let sent = await store.add(
+            attachments: picture, toTrip: Self.portugal, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(sent == .finished(.init(action: .addToTrip("t1"), asked: 1, changed: 1)))
+    }
+
+    @Test("a re-submitted edit holds the picture until it is sent and a read shows it sent")
+    func anEditSentReleasesThePicture() async throws {
+        let (root, repository, outbox) = try Self.realOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let job = Self.resolvedCapture()
+        try await repository.save(job)
+        await outbox.refresh()
+        let outcome = await outbox.resubmit(job.id, draft: Self.edit(of: job, in: repository))
+        #expect(outcome == .accepted)
+        #expect(outbox.editOwed(memoUID: "m1", attachmentUID: "p1") == .owed)
+
+        // The edit is sent: the drain writes the capture back without it.
+        guard case .present(var written) = await repository.presence(job.id) else {
+            Issue.record("the re-submitted capture is not on disk")
+            return
+        }
+        #expect(written.pendingEdit != nil, "positive control: the edit was written")
+        written.pendingEdit = nil
+        try await repository.save(written)
+        #expect(
+            outbox.editOwed(memoUID: "m1", attachmentUID: "p1") == .owed,
+            "released before a read showed the edit sent")
+
+        await outbox.refresh()
+        let server = Self.server()
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let sent = await store.add(
+            attachments: [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)],
+            toTrip: Self.portugal, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(sent == .finished(.init(action: .addToTrip("t1"), asked: 1, changed: 1)))
+        #expect(bodies(server, Self.inclusion).first?["attachmentUids"] as? [String] == ["p1"])
+    }
+
+    private static let portugal = Trip(
+        uid: "t1", title: "Portugal", tag: "portugal", createdAt: Date(), updatedAt: Date())
+
+    /// A real outbox over a scratch root, with no account: it sends nothing.
+    private static func realOutbox() throws -> (URL, OutboxRepository, Outbox) {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let credentials = SignedOut()
+        let repository = try OutboxRepository(
+            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) })
+        let outbox = Outbox(
+            repository: repository, credentials: credentials, http: Unsent(),
+            scheduler: NoChunkSession(), completion: MemoCompletionEndpoint(http: Unsent()),
+            network: UsablePath(), preferences: UploadPreferences(defaults: Self.scratchDefaults()))
+        return (root, repository, outbox)
+    }
+
+    /// A capture whose create resolved to m1 with the picture p1, owing nothing yet.
+    private static func resolvedCapture() -> UploadJob {
+        UploadJob(
+            content: "Lisbon", capturedAt: Date(timeIntervalSince1970: 0),
+            files: [
+                OutboxFile(
+                    relativePath: "a.jpg", filename: "a.jpg", mime: "image/jpeg", byteSize: 1,
+                    attachmentUID: "p1")
+            ],
+            binding: AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "alice"),
+            resolvedMemoUID: "m1")
+    }
+
+    /// The editor's later text for `job`, its picture kept.
+    private static func edit(of job: UploadJob, in repository: OutboxRepository) -> RestoredDraft {
+        RestoredDraft(
+            jobID: job.id, content: "Lisbon at dusk", visibility: nil, capturedAt: job.capturedAt,
+            pictures: job.files.map {
+                RestoredDraft.Picture(
+                    id: $0.id, url: repository.mediaURL(job: job, file: $0),
+                    filename: $0.filename, mime: $0.mime)
+            })
+    }
+
     private static func scratchDefaults() -> UserDefaults {
         UserDefaults(suiteName: "memo-actions-\(UUID().uuidString)") ?? .standard
     }
+}
+
+/// What a test saw inside a re-submit it held.
+@MainActor
+private final class Window {
+    var onDisk: Bool?
+    var inJobs: Bool?
+    var result: MemoActionResult?
 }
 
 // MARK: - A real outbox that sends nothing

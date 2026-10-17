@@ -79,8 +79,8 @@ public enum OutboxCheck: Equatable, Sendable {
     case clear
     /// An edit of its memo is still to be sent: it is held back.
     case owesEdit
-    /// The outbox could not be asked — it is not there to ask. Held back too: an outbox that
-    /// cannot answer is no empty one.
+    /// The outbox could not be asked — it is not there to ask, or its queue is not known as read
+    /// (`Outbox.editOwed`). Held back too: an outbox that cannot answer is no empty one.
     case cannotTell
 }
 
@@ -155,13 +155,17 @@ public final class MemoActionStore {
         self.outboxCheck = outboxCheck
     }
 
-    /// The check the app wires in: asked of `outbox`'s queue as it stands at each Add, and
-    /// `cannotTell` for every picture when there is no outbox to ask.
+    /// The check the app wires in: `outbox`'s own answer at each Add (`Outbox.editOwed`) — never
+    /// its `jobs`, the queue as last read, which trails an edit being written — and `cannotTell`
+    /// for every picture when there is no outbox to ask.
     public static func outboxCheck(_ outbox: Outbox?) -> OutboxAsk {
         { memo, picture in
             guard let outbox else { return .cannotTell }
-            return owesEdit(in: outbox.jobs, memoUID: memo, attachmentUID: picture)
-                ? .owesEdit : .clear
+            switch outbox.editOwed(memoUID: memo, attachmentUID: picture) {
+            case .clear: return .clear
+            case .owed: return .owesEdit
+            case .unknown: return .cannotTell
+            }
         }
     }
 
@@ -177,11 +181,7 @@ public final class MemoActionStore {
     public nonisolated static func owesEdit(
         in jobs: [UploadJob], memoUID: String?, attachmentUID: String
     ) -> Bool {
-        jobs.contains { job in
-            guard job.pendingEdit != nil else { return false }
-            if let memoUID, job.resolvedMemoUID == memoUID { return true }
-            return job.files.contains { $0.attachmentUID == attachmentUID }
-        }
+        Outbox.owesEdit(in: jobs, memoUID: memoUID, attachmentUID: attachmentUID)
     }
 
     // MARK: - Set visibility
