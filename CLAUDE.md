@@ -210,6 +210,7 @@ Writes to known pages resolve BY ID from here; name-search is discovery only.
 - Documentation Backlog: none — work is tracked in windshift workspace `MEMNG`
 - Lessons Learned: page:3281
 - Feature — Places: page:3855
+- Feature — Manage tokens: page:4334
 - Session Reviews chapter: chapter:3155
 - Decisions chapter: chapter:3154 (ADR-0001: page:3157; ADR-0004: page:3936 — the app versions inside
   the shared API major; ADR-0005: page:3995 — superseded by ADR-0006; ADR-0006: page:4036 — superseded by ADR-0007;
