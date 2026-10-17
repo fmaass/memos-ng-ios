@@ -45,25 +45,43 @@ public enum MemoAction: Hashable, Sendable {
 
 /// What a run of a memo action did: of the `asked` items (memos for visibility, pictures for Add
 /// to trip), how many the server `changed` — set, or `added` — how many were held back because an
-/// edit of their memo is still owed from this phone's outbox, and the sentence of what stopped
-/// or refused the rest, if anything did.
+/// edit of their memo is still owed from this phone's outbox, how many were held back because
+/// that outbox could not be asked, and the sentence of what stopped or refused the rest, if
+/// anything did.
 public struct MemoActionOutcome: Equatable, Sendable {
     public let action: MemoAction
     public let asked: Int
     public let changed: Int
     public let heldByOutbox: Int
+    public let heldUnchecked: Int
     public let failure: String?
 
     public init(
         action: MemoAction, asked: Int, changed: Int, heldByOutbox: Int = 0,
-        failure: String? = nil
+        heldUnchecked: Int = 0, failure: String? = nil
     ) {
         self.action = action
         self.asked = asked
         self.changed = changed
         self.heldByOutbox = heldByOutbox
+        self.heldUnchecked = heldUnchecked
         self.failure = failure
     }
+}
+
+/// Asks this phone's outbox about one picture before it is added: its memo's uid (nil for an
+/// orphan) and its own uid.
+public typealias OutboxAsk = @MainActor (String?, String) -> OutboxCheck
+
+/// What this phone's outbox says about one picture's memo before it is added to a trip.
+public enum OutboxCheck: Equatable, Sendable {
+    /// Nothing is owed: the picture may go.
+    case clear
+    /// An edit of its memo is still to be sent: it is held back.
+    case owesEdit
+    /// The outbox could not be asked — it is not there to ask. Held back too: an outbox that
+    /// cannot answer is no empty one.
+    case cannotTell
 }
 
 /// How a call to `MemoActionStore` ended.
@@ -115,9 +133,10 @@ public final class MemoActionStore {
 
     private let trips: TripStore?
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
-    /// Whether this phone's outbox still owes an edit to the memo of a picture (memo uid, picture
-    /// uid): such a picture is not added, because that edit carries text read before the tag.
-    private let owesEdit: @MainActor (String?, String) -> Bool
+    /// What this phone's outbox says about the memo of a picture (memo uid, picture uid): a
+    /// picture whose memo is owed an edit is not added, because that edit carries text read before
+    /// the tag, and neither is one the outbox could not be asked about (`outboxCheck(_:)`).
+    private let outboxCheck: OutboxAsk
     private var session: (any SessionReporting)?
     private var slots: [Kind: Slot] = [:]
     private var nextToken = 0
@@ -129,11 +148,21 @@ public final class MemoActionStore {
         trips: TripStore?,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded },
-        owesEdit: @escaping @MainActor (String?, String) -> Bool = { _, _ in false }
+        outboxCheck: @escaping OutboxAsk = { _, _ in .clear }
     ) {
         self.trips = trips
         self.onUnauthorized = onUnauthorized
-        self.owesEdit = owesEdit
+        self.outboxCheck = outboxCheck
+    }
+
+    /// The check the app wires in: asked of `outbox`'s queue as it stands at each Add, and
+    /// `cannotTell` for every picture when there is no outbox to ask.
+    public static func outboxCheck(_ outbox: Outbox?) -> OutboxAsk {
+        { memo, picture in
+            guard let outbox else { return .cannotTell }
+            return owesEdit(in: outbox.jobs, memoUID: memo, attachmentUID: picture)
+                ? .owesEdit : .clear
+        }
     }
 
     /// Names the session this store's transport outcomes belong to. Idempotent.
@@ -231,13 +260,15 @@ public final class MemoActionStore {
     ) async -> MemoActionResult {
         let action = MemoAction.addToTrip(trip.uid)
         let eligible = chosen.filter(\.actsOnMemo)
-        let held = eligible.filter { owesEdit($0.memoUID, $0.uid) }
-        let sent = eligible.filter { picture in !held.contains(picture) }.map(\.uid)
+        let checks = eligible.map { outboxCheck($0.memoUID, $0.uid) }
+        let owed = checks.filter { $0 == .owesEdit }.count
+        let unchecked = checks.filter { $0 == .cannotTell }.count
+        let sent = zip(eligible, checks).filter { $0.1 == .clear }.map(\.0.uid)
         func outcome(_ changed: Int, _ failure: String? = nil) -> MemoActionResult {
             .finished(
                 MemoActionOutcome(
                     action: action, asked: chosen.count, changed: changed,
-                    heldByOutbox: held.count, failure: failure))
+                    heldByOutbox: owed, heldUnchecked: unchecked, failure: failure))
         }
         guard !sent.isEmpty else { return outcome(0) }
         guard sent.count <= Self.inclusionCap else {

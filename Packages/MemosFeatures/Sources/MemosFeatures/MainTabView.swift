@@ -77,10 +77,7 @@ struct MainTabView: View {
         let actionStore = MemoActionStore(
             trips: store,
             onUnauthorized: { [session] refusal in await session.handle(refusal) },
-            owesEdit: { [outbox] memo, picture in
-                MemoActionStore.owesEdit(
-                    in: outbox?.jobs ?? [], memoUID: memo, attachmentUID: picture)
-            }
+            outboxCheck: MemoActionStore.outboxCheck(outbox)
         )
         actionStore.reports(to: session)
         trips = store

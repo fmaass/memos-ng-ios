@@ -267,7 +267,8 @@ struct MemoActionStoreTests {
         let uid = server.seed(title: "Portugal", tag: "portugal", pictures: [0])
         let (trips, _) = await TripSeeder(server: server).members()
         let trip = try #require(trips.trips.first { $0.uid == uid })
-        let store = MemoActionStore(trips: trips, owesEdit: { memo, _ in memo == "m2" })
+        let store = MemoActionStore(
+            trips: trips, outboxCheck: { memo, _ in memo == "m2" ? .owesEdit : .clear })
         let result = await store.add(
             attachments: Self.chosen, toTrip: trip, using: server.client.handle,
             baseURL: Stub.baseURL)
@@ -398,6 +399,114 @@ struct MemoActionStoreTests {
         #expect(outcome.changed == 0)
         #expect(outcome.failure != nil, "a refused run said nothing")
     }
+
+    // MARK: - The outbox, as the app wires it
+
+    @Test("the app's wiring over a real outbox owing an edit holds the picture until it is sent")
+    func theRealOutboxHoldsAPicture() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentials = SignedOut()
+        let repository = try OutboxRepository(
+            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) })
+        let outbox = Outbox(
+            repository: repository, credentials: credentials, http: Unsent(),
+            scheduler: NoChunkSession(), completion: MemoCompletionEndpoint(http: Unsent()),
+            network: UsablePath(), preferences: UploadPreferences(defaults: Self.scratchDefaults()))
+        let edited = UploadJob(
+            content: "Lisbon", capturedAt: Date(timeIntervalSince1970: 0),
+            files: [
+                OutboxFile(
+                    relativePath: "a.jpg", filename: "a.jpg", mime: "image/jpeg", byteSize: 1,
+                    attachmentUID: "p1")
+            ],
+            binding: AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "alice"),
+            resolvedMemoUID: "m1",
+            pendingEdit: PendingEdit(
+                content: "Lisbon at dusk", visibility: nil,
+                capturedAt: Date(timeIntervalSince1970: 0), fileIDs: []))
+        try await repository.save(edited)
+        await outbox.refresh()
+        #expect(outbox.jobs.map(\.id) == [edited.id], "positive control: the queue holds the edit")
+
+        let server = Self.server()
+        let trip = Trip(
+            uid: "t1", title: "Portugal", tag: "portugal", createdAt: Date(), updatedAt: Date())
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(outbox))
+        let picture = [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)]
+        let owed = await store.add(
+            attachments: picture, toTrip: trip, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(
+            owed
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldByOutbox: 1)))
+        #expect(server.calls.of(Self.inclusion).isEmpty, "a picture whose memo is owed was sent")
+
+        // The edit is sent: the capture leaves the queue, as a confirmed memo does.
+        await repository.delete(edited)
+        await outbox.refresh()
+        let sent = await store.add(
+            attachments: picture, toTrip: trip, using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(sent == .finished(.init(action: .addToTrip("t1"), asked: 1, changed: 1)))
+        #expect(bodies(server, Self.inclusion).first?["attachmentUids"] as? [String] == ["p1"])
+    }
+
+    @Test("with no outbox to ask, the app's wiring cannot tell: the picture is held, and said so")
+    func noOutboxCannotTell() async {
+        let server = Self.server()
+        let trip = Trip(
+            uid: "t1", title: "Portugal", tag: "portugal", createdAt: Date(), updatedAt: Date())
+        let store = MemoActionStore(trips: nil, outboxCheck: MemoActionStore.outboxCheck(nil))
+        let result = await store.add(
+            attachments: [MemoActionPicture(uid: "p1", memoUID: "m1", mine: true)], toTrip: trip,
+            using: server.client.handle, baseURL: Stub.baseURL)
+        #expect(
+            result
+                == .finished(
+                    .init(action: .addToTrip("t1"), asked: 1, changed: 0, heldUnchecked: 1)))
+        #expect(server.calls.of(Self.inclusion).isEmpty, "an unchecked picture was sent")
+    }
+
+    private static func scratchDefaults() -> UserDefaults {
+        UserDefaults(suiteName: "memo-actions-\(UUID().uuidString)") ?? .standard
+    }
+}
+
+// MARK: - A real outbox that sends nothing
+
+/// No account: the outbox this suite builds never acquires credentials, so it sends nothing.
+private struct SignedOut: OutboxCredentialsProviding {
+    func currentCredentials() async -> OutboxCredentials? { nil }
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool { false }
+    func stillCurrent(epoch: Int) -> Bool { false }
+}
+
+/// The network of that outbox, never reached; a server error if it were.
+private struct Unsent: OutboxHTTPPerforming {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        OutboxHTTPResponse(statusCode: 500)
+    }
+}
+
+/// No background transfers.
+private struct NoChunkSession: OutboxChunkScheduling {
+    func inFlight() async -> [OutboxTaskIdentity] { [] }
+    func upload(
+        _ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity,
+        under authority: SendAuthority, issuedUnder epoch: Int
+    ) async {}
+    func cancel(_ identities: [OutboxTaskIdentity]) async {}
+    func cancelEveryTask() async {}
+}
+
+/// A path the outbox would find usable, never changing.
+private struct UsablePath: NetworkPathProviding {
+    func currentPath() -> NetworkPath {
+        NetworkPath(usesCellular: false, isExpensive: false, isConstrained: false)
+    }
+    func onPathChange(_ handler: @escaping OutboxTrigger) {}
 }
 
 /// Lets the scripted answer reach the server it belongs to, made after it.

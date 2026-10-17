@@ -319,8 +319,9 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # 38: the composer trip chip's wire witness in MemosFeaturesTests puts a real Post through the
 # timeline's enqueue into the real outbox, fed its signed-in provider's predicate. 39: the Settings
 # app activation witness in MemosFeaturesTests drains the real outbox after a preference mirror,
-# fed its signed-in provider's predicate.
-pin "'OutboxRepository(' constructions" 39 \
+# fed its signed-in provider's predicate. 40: the memo actions' outbox witness in MemosCoreTests
+# holds a picture through the app's own outbox check, fed its signed-out provider's predicate.
+pin "'OutboxRepository(' constructions" 40 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the
