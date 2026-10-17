@@ -530,6 +530,25 @@ struct CollectionScreenTests {
         }
     }
 
+    /// The screen's own wiring, as a trip's (MEMNG-846): a tag's failed read is asked again only
+    /// by what asks on purpose, never by the screen flipping back to "not loaded".
+    @Test("a tag's drain that failed is not asked again by the screen by itself")
+    func aFailedTagDrainIsNotRetriedByItself() async {
+        let wire = TripWire()
+        wire.transport.fail()
+        let held = stores()
+        await CollectionsHost.with(screen(held, wire, Self.tag), height: 3000) { screen in
+            let failed = await screen.until { held.1.drainFailed(for: Self.tag) }
+            #expect(failed, "precondition: the drain failed")
+            let reads = wire.transport.listReads.count
+            await screen.settle(turns: 40)
+            _ = await screen.until(seconds: 2) { wire.transport.listReads.count > reads }
+            let after = wire.transport.listReads.count
+            #expect(after == reads, "the screen asked again by itself: \(reads) then \(after)")
+            #expect(held.1.drainFailed(for: Self.tag), "the failure no longer stands")
+        }
+    }
+
     @Test("a picture deleted while a tag's tiles are held leaves them, and the hero with its line")
     func aDeletedPictureLeavesTheHeldTiles() async {
         let wire = TripWire()

@@ -244,6 +244,81 @@ struct TripMemberDrainFailureTests {
         #expect(calls.get() == 2, "the invalidated trip was not read: \(calls.get()) requests")
     }
 
+    @Test("a failure answered after the session was replaced records nothing for the new one")
+    func aFailureAfterASessionChangeRecordsNothing() async throws {
+        let calls = LockedValue(0)
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if calls.get() == 1 {
+                entered.open()
+                await release.wait()
+            }
+            return Stub.empty(.serviceUnavailable)
+        }
+        let (scope, _, members) = try await trip()
+        let first = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: first)
+        members.reports(to: session)
+        let inFlight = Task { await members.drain(scope, using: first, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "no request was sent")
+        let second = SessionHandle(client: client, generation: 2)
+        session.activeHandle = second
+        release.open()
+        await inFlight.value
+
+        #expect(!members.drainFailed(for: scope), "the old session's failure holds the new one")
+        await screenRedrain(members, scope, second)
+        #expect(calls.get() == 2, "the new session's re-drain did not read: \(calls.get())")
+    }
+
+    @Test("an old drain failing after a newer one landed in its slot records nothing")
+    func aFailureOutlivedByANewerDrainRecordsNothing() async throws {
+        let calls = LockedValue(0)
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            guard calls.get() == 1 else { return TripWire.page([0, 1]) }
+            entered.open()
+            await release.wait()
+            return Stub.empty(.serviceUnavailable)
+        }
+        let (scope, _, members) = try await trip()
+        let old = Task { await members.drain(scope, using: client.handle, baseURL: Stub.baseURL) }
+        #expect(await entered.wait(), "no request was sent")
+        // The same lineage asked again after the slot was let go: a new flight, a new token.
+        members.invalidate(uid: scope.id)
+        await members.drain(scope, using: client.handle, baseURL: Stub.baseURL)
+        #expect(members.state(for: scope) == .complete, "control: the newer drain landed")
+        release.open()
+        await old.value
+
+        #expect(!members.drainFailed(for: scope), "the outlived drain's failure was recorded")
+        #expect(members.state(for: scope) == .complete, "the outlived failure took the members")
+        #expect(calls.get() == 2)
+    }
+
+    @Test("a month's failure in one zone holds no read of the same month in another")
+    func aFailureIsPerRequest() async throws {
+        let calls = LockedValue(0)
+        let client = Self.counting(calls) { Stub.empty(.serviceUnavailable) }
+        let (_, members) = await seeder.members()
+        let zurich = CollectionScopeDrainTests.scope(.month("2026-09"))
+        let tokyo = CollectionScope.automatic(
+            AutomaticCollection(
+                kind: .month("2026-09"), count: 9, cover: nil,
+                zone: try #require(TimeZone(identifier: "Asia/Tokyo"))))
+        #expect(zurich.id == tokyo.id, "control: one key for both zones")
+        await members.drain(zurich, using: client.handle, baseURL: Stub.baseURL)
+        #expect(members.drainFailed(for: zurich), "control: the failure stands")
+
+        #expect(!members.drainFailed(for: tokyo), "another zone's request is held back")
+        await screenRedrain(members, tokyo, client.handle)
+        #expect(calls.get() == 2, "the other zone was not read: \(calls.get()) requests")
+    }
+
     @Test("a refused credential is not recorded as a failure: the next credential reads again")
     func aRefusalIsNotAFailure() async throws {
         let calls = LockedValue(0)

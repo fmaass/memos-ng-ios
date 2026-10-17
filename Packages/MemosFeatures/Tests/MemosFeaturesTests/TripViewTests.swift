@@ -794,6 +794,26 @@ struct TripScreenRenderTests {
         }
     }
 
+    /// The screen's own wiring, not a copy of its guard (MEMNG-846): a re-drain keyed on "not
+    /// loaded" alone flips back after every failure and asks the server again, for ever.
+    @Test("a drain that failed is not asked again by the screen by itself")
+    func aFailedDrainIsNotRetriedByItself() async {
+        let wire = TripWire()
+        wire.transport.fail()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let failed = await screen.until { stores.1.drainFailed(for: .trip(record)) }
+            #expect(failed, "precondition: the drain failed")
+            let reads = wire.transport.listReads.count
+            await screen.settle(turns: 40)
+            _ = await screen.until(seconds: 2) { wire.transport.listReads.count > reads }
+            let after = wire.transport.listReads.count
+            #expect(after == reads, "the screen asked again by itself: \(reads) then \(after)")
+            #expect(stores.1.drainFailed(for: .trip(record)), "the failure no longer stands")
+        }
+    }
+
     @Test("a viewer open over the trip shows the page the trip was read again for")
     func anOpenViewerFollowsTheRedrain() async {
         let wire = TripWire()
