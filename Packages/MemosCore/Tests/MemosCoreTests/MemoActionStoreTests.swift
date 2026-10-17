@@ -165,15 +165,29 @@ struct MemoActionStoreTests {
                 .public, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
         }
         await arrival(of: Self.patchMemo, in: server)
-        let otherValue = await store.setVisibility(
-            .protected, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
-        let otherMemos = await store.setVisibility(
-            .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+        // Each differing call runs on its own task and is waited for with a bound, so a store
+        // that made it wait on the running call fails here instead of holding the suite.
+        let answered = LockedValue<Int>(0)
+        let otherValue = Task {
+            let result = await store.setVisibility(
+                .protected, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+            answered.set(answered.get() + 1)
+            return result
+        }
+        let otherMemos = Task {
+            let result = await store.setVisibility(
+                .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+            answered.set(answered.get() + 1)
+            return result
+        }
+        for _ in 0..<2_000 where answered.get() < 2 { try? await Task.sleep(for: .milliseconds(1)) }
+        let answeredWhileRunning = answered.get()
         await gate.open()
         _ = await first.value
 
-        #expect(otherValue == .refused)
-        #expect(otherMemos == .refused)
+        #expect(answeredWhileRunning == 2, "a differing call waited on the running one")
+        #expect(await otherValue.value == .refused)
+        #expect(await otherMemos.value == .refused)
         #expect(MemoActionStore.busySentence == "Another change is still running")
         #expect(paths(server, Self.patchMemo) == ["/api/memos/m1"])
         let after = await store.setVisibility(
@@ -326,6 +340,63 @@ struct MemoActionStoreTests {
         let live = try #require(trips.trips.first { $0.uid == uid })
         #expect(members.members(for: live).map(\.id) == [TripWire.uid(0), TripWire.uid(1)])
         #expect(members.filteredState(for: live, query: query) == .notLoaded)
+    }
+
+    // MARK: - Edges
+
+    @Test("at most 500 pictures go in one inclusion: 500 is one POST, 501 is refused unsent")
+    func theInclusionCap() async throws {
+        let server = Self.server()
+        let uid = server.seed(title: "Portugal", tag: "portugal", pictures: [0])
+        let (trips, _) = await TripSeeder(server: server).members()
+        let trip = try #require(trips.trips.first { $0.uid == uid })
+        let store = MemoActionStore(trips: trips)
+        let cap = MemoActionStore.inclusionCap
+        func pictures(_ count: Int) -> [MemoActionPicture] {
+            (0..<count).map { MemoActionPicture(uid: "c\($0)", memoUID: "m\($0)", mine: true) }
+        }
+
+        let full = await store.add(
+            attachments: pictures(cap), toTrip: trip, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        #expect(full == .finished(.init(action: .addToTrip(uid), asked: cap, changed: cap)))
+        #expect(server.calls.of(Self.inclusion).count == 1)
+
+        let over = await store.add(
+            attachments: pictures(cap + 1), toTrip: trip, using: server.client.handle,
+            baseURL: Stub.baseURL)
+        guard case .finished(let outcome) = over else {
+            Issue.record("not finished: \(over)")
+            return
+        }
+        #expect(outcome.changed == 0)
+        #expect(outcome.failure?.contains("at most 500") == true, "\(String(describing: outcome))")
+        #expect(server.calls.of(Self.inclusion).count == 1, "an inclusion over the cap was sent")
+    }
+
+    @Test("a refused credential reaches the session once and stops the run: no PATCH after it")
+    func aRefusedCredential() async {
+        let handled = LockedValue<Int>(0)
+        let server = TripServer(answer: { _, operation in
+            operation == Self.patchMemo ? Stub.empty(.unauthorized) : nil
+        })
+        let store = MemoActionStore(
+            trips: nil,
+            onUnauthorized: { _ in
+                handled.set(handled.get() + 1)
+                return .endedSession
+            })
+        let result = await store.setVisibility(
+            .public, forMemos: ["m1", "m2"], using: server.client.handle, baseURL: Stub.baseURL)
+
+        #expect(handled.get() == 1, "the refusal did not reach the session exactly once")
+        #expect(server.calls.of(Self.patchMemo).count == 1, "a PATCH went out after the refusal")
+        guard case .finished(let outcome) = result else {
+            Issue.record("not finished: \(result)")
+            return
+        }
+        #expect(outcome.changed == 0)
+        #expect(outcome.failure != nil, "a refused run said nothing")
     }
 }
 

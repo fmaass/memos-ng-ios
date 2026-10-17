@@ -51,7 +51,9 @@ struct MemoActionFlowTests {
         flow.ask(
             memos: MemoActionPicture.memos(of: chosen), visibility: .public, generation: 1,
             filter: "all")
-        #expect(flow.asking == nil)
+        #expect(flow.asking == nil, "a choice of no memo of the caller's asked")
+        flow.ask(memos: [], visibility: .protected, generation: 1, filter: "all")
+        #expect(flow.asking == nil, "an empty choice asked")
     }
 
     @Test("the answer is claimed once, synchronously; another session or filter sends nothing")
