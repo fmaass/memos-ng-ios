@@ -536,8 +536,19 @@ struct CollectionScreenTests {
     func aFailedTagDrainIsNotRetriedByItself() async {
         let wire = TripWire()
         wire.transport.fail()
+        // Held until the screen has drawn the drain in flight, as the trip's case says.
+        wire.transport.hold()
         let held = stores()
         await CollectionsHost.with(screen(held, wire, Self.tag), height: 3000) { screen in
+            defer { wire.transport.release() }
+            let drawn = await screen.until {
+                held.1.state(for: Self.tag) == .draining
+                    && TripProbe.spinners(in: screen.window) > 0
+            }
+            #expect(drawn, "precondition: the screen never drew the drain in flight")
+            guard drawn else { return }
+            let during = TripProbe.spinners(in: screen.window)
+            wire.transport.release()
             let failed = await screen.until { held.1.drainFailed(for: Self.tag) }
             #expect(failed, "precondition: the drain failed")
             let reads = wire.transport.listReads.count
@@ -546,6 +557,8 @@ struct CollectionScreenTests {
             let after = wire.transport.listReads.count
             #expect(after == reads, "the screen asked again by itself: \(reads) then \(after)")
             #expect(held.1.drainFailed(for: Self.tag), "the failure no longer stands")
+            let left = TripProbe.spinners(in: screen.window)
+            #expect(left < during, "the loading row seen was not the drain's: \(during), \(left)")
         }
     }
 

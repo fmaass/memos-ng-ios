@@ -802,7 +802,20 @@ struct TripScreenRenderTests {
         wire.transport.fail()
         let stores = stores()
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        // The failure is held until the screen has DRAWN the drain in flight: a failure answered
+        // between two updates would never show the screen "draining", and a re-drain keyed on
+        // "not loaded" alone would read true, then true, and never start again.
+        wire.transport.hold()
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            defer { wire.transport.release() }
+            let drawn = await screen.until {
+                stores.1.state(for: .trip(record)) == .draining
+                    && TripProbe.spinners(in: screen.window) > 0
+            }
+            #expect(drawn, "precondition: the screen never drew the drain in flight")
+            guard drawn else { return }
+            let during = TripProbe.spinners(in: screen.window)
+            wire.transport.release()
             let failed = await screen.until { stores.1.drainFailed(for: .trip(record)) }
             #expect(failed, "precondition: the drain failed")
             let reads = wire.transport.listReads.count
@@ -811,6 +824,8 @@ struct TripScreenRenderTests {
             let after = wire.transport.listReads.count
             #expect(after == reads, "the screen asked again by itself: \(reads) then \(after)")
             #expect(stores.1.drainFailed(for: .trip(record)), "the failure no longer stands")
+            let left = TripProbe.spinners(in: screen.window)
+            #expect(left < during, "the loading row seen was not the drain's: \(during), \(left)")
         }
     }
 
@@ -1780,6 +1795,19 @@ enum TripProbe {
     }
 
     /// The grid's tiles, top to bottom and then leading to trailing, one node per place.
+    /// The activity indicators drawn in `window`: a drain in flight shows the grid's loading row
+    /// (`LibraryGrid`'s `loadingMore`), so a count that falls once it ends ties one of them to it.
+    static func spinners(in window: UIWindow) -> Int {
+        var count = 0
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            let name = String(describing: type(of: view))
+            if view is UIActivityIndicatorView || name.contains("ActivityIndicator") { count += 1 }
+            stack.append(contentsOf: view.subviews)
+        }
+        return count
+    }
+
     static func photos(in window: UIWindow) -> [NSObject] {
         var found: [CGRect: NSObject] = [:]
         var stack: [Any] = [window]
