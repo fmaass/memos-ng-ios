@@ -49,6 +49,18 @@
 #                                     that scope N times, stopping at the first failing run
 #                                     (-test-iterations N -run-tests-until-failure), and the
 #                                     MAC_GATE_QUICK line then carries iterations=N.
+#   MAC_GATE_HOST=<ssh-alias> bin/mac-gate.sh --quick --only-testing <id> --mutants <dir>
+#                                     the REALNESS loop in one lock cycle: <dir> holds 1 to 4
+#                                     numbered unified diffs (NN-<name>.patch) that each modify
+#                                     product files no other patch touches. They are checked and
+#                                     frozen before the estate lock is requested (a bad one is
+#                                     refused there, exit 2); inside one slot span the build host
+#                                     runs the clean scope (must pass), then per mutant applies,
+#                                     rebuilds, runs the scope and restores, then rebuilds and
+#                                     runs the clean scope again and compares hashes. One
+#                                     MAC_GATE_MUTANT <name> caught|SURVIVED|BROKEN|INCONCLUSIVE
+#                                     line per mutant; the MAC_GATE_QUICK line carries
+#                                     mutants=<caught>/<total>. Not with --bundle or --iterations.
 #   bin/mac-gate.sh --classify-only   print how this branch's change set classifies, and stop.
 #                                     Needs no build host. Exit 0 = the docs-only fast path
 #                                     applies, 10 = the full gate is owed.
@@ -165,6 +177,14 @@
 #                 build image (the guard refused, or its answer could not be read), and no
 #                 valid pending marker allowed the refusal to be reported instead; nothing was
 #                 written on the host, no slot was claimed and no device was created;
+#            17 = --mutants only: the clean run passed but at least one mutant was not caught
+#                 (SURVIVED, BROKEN or INCONCLUSIVE), each named on a MAC_GATE_MUTANT_SURVIVOR line;
+#                 a failing clean run keeps its own tests code, an unsound batch
+#                 (MAC_GATE_BATCH_UNSOUND) its control's code, else 1;
+#            18 = the build host found this lane's mutant fence (a batch could neither put back nor
+#                 remove a mutated file) with a file it could not verify; MAC_GATE_MUTANT_FENCE
+#                 REFUSE lines name each file and the fence, nothing was built, and a file it could
+#                 remove is written again by the next run's rsync;
 #             1 = also locallint=1: `swift format lint` failed on the calling machine before the
 #                 estate lock was requested (the lint's own code; locallint=1 on the summary and
 #                 mode=refused in the run ledger tell it from a build-host step's 1); nothing
@@ -410,8 +430,51 @@ else
   # edit to the tree during the lint cannot change what runs. --help and --classify-only build
   # nothing and lint nothing, and neither does a run without MAC_GATE_HOST, which the copy refuses
   # before it does anything. A failure (rc 1) skips the lock; the copy refuses the run.
+  # The mutant batch's patches (MEMNG-825, scripts/mutants-check.sh) are checked here too, before
+  # the lint and before the estate lock: a patch that does not apply, or two patches on one file,
+  # would otherwise be a whole queue wait away from its refusal. The helper is read once and
+  # evaluated, like the lint's, and the bytes it judged are frozen into a private directory of its
+  # own at that moment, so an edit to <dir> during the wait for the lock cannot change what the
+  # build host applies. That directory moves into the run's copy below; a refusal or a signal before
+  # then removes it. Only an unambiguous `--mutants <dir>` is checked here; anything else is left to
+  # the copy's argument parsing, which refuses it. A refusal here is held in GATE_MUTANTS_REFUSAL and
+  # given (die_refuse, exit 2) only after the candidate removal below, which it skips together with
+  # the lint and the estate lock, exactly as a lint refusal does: a run refused before the lock may
+  # not clear a candidate that a run of the same worktree, holding the lock, is still promoting.
+  GATE_MUTANTS_FROZEN=""
+  GATE_MUTANTS_REFUSAL=""
+  gate_mutants_count=0 gate_mutants_dir="" gate_mutants_help=0 gate_prev_arg=""
+  for gate_arg in "$@"; do
+    case "$gate_arg" in --help|-h) gate_mutants_help=1 ;; esac
+    [ "$gate_prev_arg" != "--mutants" ] || gate_mutants_dir="$gate_arg"
+    [ "$gate_arg" != "--mutants" ] || gate_mutants_count=$((gate_mutants_count + 1))
+    gate_prev_arg="$gate_arg"
+  done
+  case "$gate_mutants_count:$gate_mutants_help:$gate_mutants_dir" in
+    1:0:-*|1:0:) ;;
+    1:0:*)
+      if ! gate_mutants_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+        GATE_MUTANTS_REFUSAL="--mutants: not inside a git working tree"
+      elif ! gate_mutants_src="$(cat "$gate_mutants_root/scripts/mutants-check.sh" 2>/dev/null)"; then
+        GATE_MUTANTS_REFUSAL="--mutants needs $gate_mutants_root/scripts/mutants-check.sh, which this tree does not have"
+      elif ! { eval "$gate_mutants_src" && declare -F mutants_check >/dev/null; }; then
+        GATE_MUTANTS_REFUSAL="--mutants: $gate_mutants_root/scripts/mutants-check.sh did not load"
+      elif ! GATE_MUTANTS_FROZEN="$(mktemp -d "${TMPDIR:-/tmp}/mac-gate-mutants.XXXXXX")"; then
+        GATE_MUTANTS_FROZEN=""
+        GATE_MUTANTS_REFUSAL="--mutants: cannot create a private directory to freeze the patches in"
+      else
+        trap 'rm -rf "${GATE_MUTANTS_FROZEN:?}"' EXIT
+        trap 'rm -rf "${GATE_MUTANTS_FROZEN:?}"; exit 130' INT
+        trap 'rm -rf "${GATE_MUTANTS_FROZEN:?}"; exit 143' TERM
+        trap 'rm -rf "${GATE_MUTANTS_FROZEN:?}"; exit 129' HUP
+        gate_mutants_why="$(mutants_check "$gate_mutants_root" "$gate_mutants_dir" "$GATE_MUTANTS_FROZEN")" \
+          || GATE_MUTANTS_REFUSAL="${gate_mutants_why:-"--mutants $gate_mutants_dir: the check failed without a reason"}"
+      fi
+      ;;
+  esac
   gate_lint_wanted=1
   [ -n "${MAC_GATE_HOST:-}" ] || gate_lint_wanted=0
+  [ -z "$GATE_MUTANTS_REFUSAL" ] || gate_lint_wanted=0
   for gate_arg in "$@"; do
     case "$gate_arg" in --help|-h|--classify-only) gate_lint_wanted=0 ;; esac
   done
@@ -447,7 +510,7 @@ $gate_lint_none"
   # MAC_GATE_ESTATE_LOCK, which names no host. Every refusal here comes before any lock is taken.
   gate_route_source=none
   gate_route_lock=""
-  if [ "$GATE_LOCALLINT_RC" != 1 ]; then
+  if [ "$GATE_LOCALLINT_RC" != 1 ] && [ -z "$GATE_MUTANTS_REFUSAL" ]; then
     if [ "$gate_lint_wanted" -eq 1 ] && [ "$MAC_GATE_HOST" = auto ]; then
       [ -n "${MAC_GATE_ESTATE_LOCKS:-}" ] \
         || die_estate_lock "MAC_GATE_HOST=auto needs MAC_GATE_ESTATE_LOCKS (name=lock,name=lock, in preference order)"
@@ -541,17 +604,20 @@ fi
 # local lint refused (rc 1): it never took the estate lock, and the estate lock is what kept this
 # removal from taking the candidate a run of the same worktree is still promoting in its
 # copyback; the lane lock comes too late to cover it. Such a run builds nothing and promotes
-# nothing, so a candidate beside a locallint=1 run is never that run's.
+# nothing, so a candidate beside a locallint=1 run is never that run's. A run the --mutants check
+# refused is the same case and clears nothing either; its refusal is given just below.
 early_root="$(git rev-parse --show-toplevel 2>/dev/null)" || early_root=""
 case "${MAC_GATE_ARTIFACTS:-}" in
   /*) artifacts="$MAC_GATE_ARTIFACTS" ;;
   "") artifacts="${early_root:+$early_root/.gate-artifacts}" ;;
   *) artifacts="${early_root:+$early_root/$MAC_GATE_ARTIFACTS}" ;;
 esac
-if [ -n "$artifacts" ] && [ "$GATE_LOCALLINT_RC" != 1 ]; then
+if [ -n "$artifacts" ] && [ "$GATE_LOCALLINT_RC" != 1 ] && [ -z "${GATE_MUTANTS_REFUSAL:-}" ]; then
   rm -f "$artifacts/testcount-baseline.tsv" \
     || die_refuse "cannot remove $artifacts/testcount-baseline.tsv: stale candidate left in place — not this run's"
 fi
+# The mutant check's refusal, held since the bootstrap (it took no lock and cleared nothing).
+[ -z "${GATE_MUTANTS_REFUSAL:-}" ] || die_refuse "$GATE_MUTANTS_REFUSAL"
 
 # --- the run's private copy ----------------------------------------------------------------------
 # Bash reads a script as it runs it, so an edit to this file during a run is read at the old byte
@@ -601,6 +667,12 @@ else
         && printf '%s %s\n' "$GATE_LOCALLINT_RC" "$GATE_LOCALLINT_SECS" > "$gate_run_dir/locallint.rc"; } \
       || { rm -rf "$gate_run_dir"; die_refuse "cannot hand the local lint's verdict to $gate_run_dir"; }
   fi
+  if [ -n "${GATE_MUTANTS_FROZEN:-}" ]; then
+    mv "$GATE_MUTANTS_FROZEN" "$gate_run_dir/mutants" \
+      || { rm -rf "${gate_run_dir:?}"; die_refuse "cannot move the frozen patches into $gate_run_dir"; }
+    GATE_MUTANTS_FROZEN=""
+    trap - EXIT INT TERM HUP
+  fi
   printf '%s\n' "$gate_run_dir" > "$gate_run_dir/.mac-gate-run-copy" \
     || { rm -rf "$gate_run_dir"; die_refuse "cannot mark $gate_run_dir as this run's copy"; }
   export MAC_GATE_RUN_COPY="$gate_run_dir"
@@ -637,6 +709,7 @@ QUICK=0
 QUICK_BUNDLE=""
 QUICK_ONLY_TESTING=""
 QUICK_ITERATIONS=""
+QUICK_MUTANTS_DIR=""
 # A while/shift loop rather than `for arg`, because two of these take a value. The value is
 # checked where it is read: a flag whose argument is missing would otherwise swallow the NEXT
 # flag, and `--quick --bundle --only-testing X` would run a scope nobody asked for.
@@ -659,6 +732,12 @@ while [ $# -gt 0 ]; do
         ""|-*) die_refuse "--iterations needs a positive whole number of runs (1 to 1000)" ;;
       esac
       QUICK_ITERATIONS="$2"; shift ;;
+    --mutants)
+      [ -z "$QUICK_MUTANTS_DIR" ] || die_refuse "--mutants given twice; a run carries one batch"
+      case "${2:-}" in
+        ""|-*) die_refuse "--mutants needs a directory of numbered patches (NN-<name>.patch)" ;;
+      esac
+      QUICK_MUTANTS_DIR="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die_refuse "unknown argument: $(printf '%q' "$1") (see --help)" ;;
   esac
@@ -690,6 +769,33 @@ if [ -n "$QUICK_ITERATIONS" ]; then
   if [ "${#QUICK_ITERATIONS}" -gt 4 ] || [ "$QUICK_ITERATIONS" -gt 1000 ]; then
     die_refuse "--iterations $QUICK_ITERATIONS: at most 1000 runs, each one inside the shared simulator slot"
   fi
+fi
+# A mutant batch judges every mutant by ONE named scope, once per mutant (MEMNG-825). Its patches
+# were checked and frozen by the bootstrap, before the estate lock; what this run sends is that
+# copy, never <dir> as it is now.
+MUTANT_NAMES=""
+MUTANT_FILES=""
+MUTANT_TOTAL=0
+QUICK_MUTANTS_FIELD=""
+if [ -n "$QUICK_MUTANTS_DIR" ]; then
+  [ -z "$QUICK_BUNDLE" ] \
+    || die_refuse "--mutants and --bundle: a batch judges its mutants by one named scope (--only-testing)"
+  [ -z "$QUICK_ITERATIONS" ] \
+    || die_refuse "--mutants and --iterations: a batch runs its scope once per mutant"
+  { [ "$QUICK" -eq 1 ] && [ -n "$QUICK_ONLY_TESTING" ]; } \
+    || die_refuse "--mutants needs --quick --only-testing <id>: every mutant is judged by one named scope"
+  [ -f "$GATE_RUN_COPY/mutants/.frozen" ] \
+    || die_refuse "--mutants: this run's bootstrap froze no checked patches"
+  ! grep -qF "MAC_GATE_MUTANT_PATCH_" "$GATE_RUN_COPY/mutants/"[0-9][0-9]-*.patch \
+    || die_refuse "--mutants: a frozen patch holds the heredoc terminator's prefix"
+  for gate_patch in "$GATE_RUN_COPY/mutants/"[0-9][0-9]-*.patch; do
+    gate_patch="${gate_patch##*/}"
+    MUTANT_NAMES="$MUTANT_NAMES${MUTANT_NAMES:+ }${gate_patch%.patch}"
+    MUTANT_TOTAL=$((MUTANT_TOTAL + 1))
+  done
+  MUTANT_FILES="$(cat "$GATE_RUN_COPY/mutants/"[0-9][0-9]-*.files | tr '\n' ' ')"
+  MUTANT_FILES="${MUTANT_FILES% }"
+  QUICK_MUTANTS_FIELD=" mutants=0/$MUTANT_TOTAL"
 fi
 if [ "$QUICK" -eq 1 ] && [ "$CLASSIFY_ONLY" -eq 1 ]; then
   die_refuse "--quick and --classify-only ask for different things: one builds and tests, the other only says whether a build is owed"
@@ -1009,7 +1115,7 @@ die_locked() {
   # A quick run that never got the lock built nothing, so it reports nothing built — but it still
   # reports, on its own line, because that line is what the caller reads.
   [ "${QUICK:-0}" -eq 0 ] \
-    || printf 'MAC_GATE_QUICK: lint=- build=- tests=- host=%s locallint=%s | exit=3\n' "${host:--}" "${GATE_LOCALLINT_FIELD:--}" | tee -a "$log"
+    || printf 'MAC_GATE_QUICK: lint=- build=- tests=-%s host=%s locallint=%s | exit=3\n' "${QUICK_MUTANTS_FIELD:-}" "${host:--}" "${GATE_LOCALLINT_FIELD:--}" | tee -a "$log"
   exit 3
 }
 
@@ -1095,7 +1201,7 @@ gate_ledger_append() { # $1 = the run's exit code
   local rc="$1" mode remote_text="" clock="" start="" end="" start_utc="-" end_utc="-" wall="-" slot_wait="-"
   local row t=$'\t' value
   case "$GATE_LEDGER_REFUSED:$rc" in
-    1:*|*:2|*:3|*:4|*:11|*:12|*:13|*:14|*:15|*:16) mode=refused ;;
+    1:*|*:2|*:3|*:4|*:11|*:12|*:13|*:14|*:15|*:16|*:18) mode=refused ;;
     *)
       if [ "$GATE_LEDGER_FASTPATH" -eq 1 ]; then mode=fastpath
       elif [ "${QUICK:-0}" -eq 1 ]; then mode=quick
@@ -1277,7 +1383,7 @@ quick_summary_and_exit() {
   say "script      : sha256 $GATE_SCRIPT_SHA256 (the text of bin/mac-gate.sh this run executed)"
   # The iteration count is part of what the line claims, so it rides on the line itself: a pasted
   # "tests=0" is then never mistaken for N runs when it was one, or for one when it was N.
-  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS} host=${host:--} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
+  say "MAC_GATE_QUICK: lint=$QUICK_LINT_RC build=$QUICK_BUILD_RC tests=$QUICK_TESTS_RC${QUICK_ITERATIONS:+ iterations=$QUICK_ITERATIONS}${QUICK_MUTANTS_FIELD:-} host=${host:--} locallint=${GATE_LOCALLINT_FIELD:--} | exit=$first_fail"
   say "quick       : NOT a verdict — the merge verdict is a full run of this gate"
   exit "$first_fail"
 }
@@ -1316,13 +1422,15 @@ say "--- step: selftest ---"
 selftest_rc=0
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
-# directory. These twelve must be there (the local lint's two among them: a lint that stopped
-# refusing would only cost the queue time it exists to save, and nothing else would notice): the main-bar freeze's (ADR-0008 is the owner's, and a freeze
+# directory. These fourteen must be there (the local lint's two among them: a lint that stopped
+# refusing would only cost the queue time it exists to save, and nothing else would notice; and the
+# mutant batch's: one that stopped telling caught from survived would pass every mutant): the main-bar freeze's (ADR-0008 is the owner's, and a freeze
 # whose test can vanish unnoticed is not one), the mount guard's two (a run on the wrong disk looks
 # exactly like a green one), the TestFlight cut's (the one other write path to the Mac) and the
 # release-notes rule's (the one file both the cut and the What's new screen read, MEMNG-497) and
-# the host router's (MAC_GATE_HOST=auto and the worktree run lock, MEMNG-824).
-for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh; do
+# the host router's (MAC_GATE_HOST=auto and the worktree run lock, MEMNG-824) and the build bump's
+# (the one script that writes the pair and its notes section, MEMNG-831).
+for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh mutants-test.sh bump-build-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
   if [ -x "$selftest_script" ]; then
     "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
@@ -1335,7 +1443,7 @@ done
 # And anything else that ships beside them, so a new suite is never silently ignored.
 for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
   case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh|host-routing-test.sh) continue ;;
+    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh|host-routing-test.sh|mutants-test.sh) continue ;;
   esac
   [ -x "$selftest_script" ] || continue
   "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
@@ -1866,6 +1974,24 @@ record rsync "${PIPESTATUS[0]}"
 [ "$first_fail" -eq 0 ] || end_run
 
 # --- (4) the ordered, fail-fast checks on the build host --------------------------------------
+# A mutant batch's patches travel inside the script, each a quoted heredoc under a terminator named
+# for this run, read from the copy the bootstrap froze (never from <dir>), with their file lists
+# beside them. gate_mutants_write writes them where the batch asks, outside the mirror.
+gate_mutants_header() {
+  local name term="MAC_GATE_MUTANT_PATCH_$RUN_TOKEN"
+  printf "GATE_MUTANTS='%s'\n" "$(esc "$MUTANT_NAMES")"
+  printf "GATE_MUTANT_FILES='%s'\n" "$(esc "$MUTANT_FILES")"
+  printf 'gate_mutants_write() {\n'
+  for name in $MUTANT_NAMES; do
+    printf "  cat > \"\$1/%s.patch\" <<'%s'\n" "$name" "$term"
+    cat < "$GATE_RUN_COPY/mutants/$name.patch"
+    printf '%s\n' "$term"
+    printf "  cat > \"\$1/%s.files\" <<'%s'\n" "$name" "$term"
+    cat < "$GATE_RUN_COPY/mutants/$name.files"
+    printf '%s\n' "$term"
+  done
+  printf '} # gate_mutants_write\n'
+}
 say "--- step: remote ---"
 # The warm-lane marker the router reads when every host is busy: this branch's lane on this host
 # now holds DerivedData. A marker that cannot be written costs that hint and nothing else.
@@ -1895,6 +2021,7 @@ case "$GATE_REMOTE_LOG_OFFSET" in ''|*[!0-9]*) GATE_REMOTE_LOG_OFFSET="?" ;; esa
   printf "GATE_QUICK_BUNDLE='%s'\n" "$(esc "$QUICK_BUNDLE")"
   printf "GATE_QUICK_ONLY_TESTING='%s'\n" "$(esc "$QUICK_ONLY_TESTING")"
   printf "GATE_QUICK_ITERATIONS='%s'\n" "$(esc "$QUICK_ITERATIONS")"
+  [ -z "$MUTANT_NAMES" ] || gate_mutants_header
   cat "$GATE_RUN_COPY/scripts/reap-gate-lanes.sh"
   cat "$GATE_RUN_COPY/scripts/gate-work-dir.sh"
   cat "$GATE_ADMISSION_SELF"
@@ -1982,6 +2109,101 @@ GATE_WORK="$(gate_work_dir "$GATE_ROOT" "$GATE_BRANCH")" \
 mkdir -p "$GATE_WORK" || { echo "remote: cannot create $GATE_WORK"; exit 2; }
 DERIVED="$GATE_WORK/DerivedData"
 
+# --- the mutant fence (MEMNG-825) -----------------------------------------------------------------
+# A mutant batch whose restore AND removal of a file both failed leaves the mutant in this lane's
+# mirror, and rsync's quick check (size and mtime) cannot be trusted to write it again: a leftover
+# whose size and mtime match the caller's file (a skewed clock is enough) is skipped, and the next
+# build compiles the mutant. So that batch writes a fence for this lane, one line per file,
+# `leftover <sha256 of what it left, or -> <path>`, and every later run of the lane reads it HERE:
+# after this run's rsync, before either mode builds anything. The fence is a FILE directly in the
+# gate root, `<branch, / escaped as %2F>%mutant-fence`: a `%` is a character no branch can carry
+# (the controller refuses any outside A-Za-z0-9._/-), so no lane directory, and no `.lock`, can
+# ever sit at that path. The age sweep, the pressure sweep and the reaper remove directories only
+# and never the gate root,
+# so no sweep of the lane's trees (one that fails halfway on the undeletable file included) takes
+# the fence with it. A fence the run cannot read whole (unreadable, empty, or cut short of its last
+# newline) refuses too, and nothing reads such a fence as verified. A file is cleared only when
+# it is verified: absent from the mirror (the caller has none, or this rsync would have written it);
+# bytes that are no longer the leftover's (only the rsync writes the mirror between runs, so it
+# wrote the caller's); or `removed` by an earlier fenced run, so this run's rsync had to write it
+# from the caller's tree. A file still holding the leftover's bytes is removed now and marked
+# `removed`, and the run refuses with exit 18, nothing built; one that cannot be removed keeps its
+# line and the run refuses the same way, naming the file to remove by hand. Every file verified
+# deletes the fence. Deleting the FENCE by hand skips that proof; deleting the FILE does not.
+gate_mutant_fence_name="$(printf '%s' "$GATE_BRANCH" | sed 's/%/%25/g; s,/,%2F,g')" \
+  && [ -n "$gate_mutant_fence_name" ] || { echo "remote: cannot name the mutant fence"; exit 2; }
+GATE_MUTANT_FENCE="$GATE_ROOT/$gate_mutant_fence_name%mutant-fence"
+gate_mutant_fence_add() { # PATH — one line per path, the newest leftover's bytes
+  local f="$1" sum
+  sum="$(shasum -a 256 < "$GATE_TARGET/$f" 2>/dev/null)" && sum="${sum%% *}" || sum=-
+  case "$sum" in *[!0-9a-f]*|'') sum=- ;; esac
+  if ( if [ -e "$GATE_MUTANT_FENCE" ]; then awk -v f="$f" '$3 != f' "$GATE_MUTANT_FENCE" || exit 1; fi
+       printf 'leftover %s %s\n' "$sum" "$f" ) > "$GATE_MUTANT_FENCE.new" \
+     && mv -f "$GATE_MUTANT_FENCE.new" "$GATE_MUTANT_FENCE"; then
+    echo "MUTANTS FAIL: $f is fenced in $GATE_MUTANT_FENCE; the next run of this lane refuses (18) until it is verified"
+  elif printf 'leftover %s %s\n' "$sum" "$f" >> "$GATE_MUTANT_FENCE"; then
+    echo "MUTANTS FAIL: $f is fenced in $GATE_MUTANT_FENCE (appended); the next run of this lane refuses (18) until it is verified"
+  else
+    echo "MUTANTS FAIL: $f could not be fenced either ($GATE_MUTANT_FENCE): remove $GATE_TARGET/$f on the build host before the next run of this lane"
+  fi
+}
+gate_mutant_fence_check() {
+  [ -e "$GATE_MUTANT_FENCE" ] || [ -L "$GATE_MUTANT_FENCE" ] || return 0
+  local state sum f now keep=0 written=1 next="$GATE_MUTANT_FENCE.next" snap="$GATE_MUTANT_FENCE.read"
+  if ! cat "$GATE_MUTANT_FENCE" > "$snap" 2>/dev/null || [ ! -s "$snap" ] \
+     || [ "$(tail -c 1 "$snap" | wc -l | tr -d ' ')" != 1 ]; then
+    rm -f "$snap"
+    echo "MAC_GATE_MUTANT_FENCE REFUSE $GATE_MUTANT_FENCE exit=18: the fence cannot be read whole (unreadable, empty or cut short); nothing was built. Make it readable, or remove this lane's mirror $GATE_TARGET first and the fence after it"
+    return 18
+  fi
+  : > "$next" || written=0
+  while read -r state sum f; do
+    case "$state:$f" in
+      removed:?*)
+        echo "MAC_GATE_MUTANT_FENCE verified $f: removed by an earlier run, so this run's rsync wrote it"
+        continue ;;
+      leftover:?*)
+        if [ ! -e "$GATE_TARGET/$f" ]; then
+          echo "MAC_GATE_MUTANT_FENCE verified $f: absent from the mirror after this run's rsync"
+          continue
+        fi
+        if [ "$sum" != - ] && now="$(shasum -a 256 < "$GATE_TARGET/$f")" && [ "${now%% *}" != "$sum" ]; then
+          echo "MAC_GATE_MUTANT_FENCE verified $f: rewritten since the batch left it (its bytes are not the leftover's)"
+          continue
+        fi
+        keep=1
+        if rm -f "${GATE_TARGET:?}/${f:?}" && [ ! -e "$GATE_TARGET/$f" ]; then
+          echo "MAC_GATE_MUTANT_FENCE REFUSE $f still held a mutant's bytes; removed from the mirror, so the next run's rsync writes it again"
+          [ "$written" -eq 0 ] || printf 'removed - %s\n' "$f" >> "$next" || written=0
+        else
+          echo "MAC_GATE_MUTANT_FENCE REFUSE $f still holds a mutant's bytes and cannot be removed: remove $GATE_TARGET/$f by hand, never the fence"
+          [ "$written" -eq 0 ] || printf 'leftover %s %s\n' "$sum" "$f" >> "$next" || written=0
+        fi ;;
+      *)
+        keep=1
+        echo "MAC_GATE_MUTANT_FENCE REFUSE a fence line this script cannot read: '$state $sum $f'"
+        [ "$written" -eq 0 ] || printf '%s %s %s\n' "$state" "$sum" "$f" >> "$next" || written=0 ;;
+    esac
+  done < "$snap"
+  rm -f "$snap"
+  if [ "$keep" -eq 0 ]; then
+    rm -f "$next"
+    if rm -f "$GATE_MUTANT_FENCE" && [ ! -e "$GATE_MUTANT_FENCE" ]; then
+      echo "MAC_GATE_MUTANT_FENCE cleared $GATE_MUTANT_FENCE: every fenced file verified"
+      return 0
+    fi
+    echo "MAC_GATE_MUTANT_FENCE REFUSE $GATE_MUTANT_FENCE exit=18: every file verified but the fence cannot be deleted; nothing was built"
+    return 18
+  fi
+  # The fence is rewritten only whole; a fence that could not be rewritten stays as it was, and an
+  # old `leftover` line for a file removed since reads as verified once the rsync has written it.
+  if [ "$written" -eq 1 ]; then mv -f "$next" "$GATE_MUTANT_FENCE" || rm -f "$next"; else rm -f "$next"; fi
+  echo "MAC_GATE_MUTANT_FENCE REFUSE $GATE_MUTANT_FENCE exit=18: a mutant batch left this lane's mirror unverified; nothing was built"
+  return 18
+}
+gate_mutant_fence_check || exit $?
+# --- end of the mutant fence ----------------------------------------------------------------------
+
 # --- disk hygiene -------------------------------------------------------------------------------
 # Per-branch trees are kept between runs for the incremental build, but a merged branch never
 # gates again and nothing else reaps its ~3.6G — the host filled up five times in one day this
@@ -2041,6 +2263,10 @@ GATE_CANARY_FILE=""
 # note in the lock that says a build is still running here. The note is removed only while it is
 # still ours.
 gate_give_back() {
+  # A mutant batch's applied mutant goes back first (gate_mutant_restore, in the quick block).
+  if [ -n "${GATE_MUTANT_APPLIED:-}" ]; then
+    gate_mutant_restore "$GATE_MUTANT_APPLIED" && GATE_MUTANT_APPLIED=""
+  fi
   [ -z "${GATE_CANARY_FILE:-}" ] || rm -f "$GATE_CANARY_FILE"
   GATE_CANARY_FILE=""
   gate_sim_release
@@ -3287,12 +3513,17 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
       -destination "$GATE_BUILD_DESTINATION" \
       -derivedDataPath "$DERIVED" \
       -onlyUsePackageVersionsFromResolvedFile \
-      -skipPackagePluginValidation 2>&1 | tee .gate-artifacts/quick-build.log
+      -skipPackagePluginValidation 2>&1 | tee "${QUICK_BUILD_LOG:-.gate-artifacts/quick-build.log}"
     return "${PIPESTATUS[0]}"
   }
 
-  # The tests run inside the simulator slot, on a device that exists only there.
-  s_quick_tests() { gate_sim_span s_quick_tests_on_device; }
+  # The tests run inside the simulator slot, on a device that exists only there. A mutant batch is
+  # ONE step inside ONE span (one device, one slot claim), so it classifies every expected mutant
+  # failure itself and returns non-zero only for its own verdict.
+  s_quick_tests() {
+    if [ -n "${GATE_MUTANTS:-}" ]; then gate_sim_span s_mutant_batch
+    else gate_sim_span s_quick_tests_on_device; fi
+  }
   s_quick_tests_on_device() {
     rm -rf "$QUICK_XCRESULT"
     set -- xcodebuild test-without-building \
@@ -3307,7 +3538,7 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
     # Repeat the scope, and stop at the first run that fails: xcodebuild's own exit code then says
     # whether ANY iteration failed, and the counter below checks the result bundle shows them all.
     [ -z "$GATE_QUICK_ITERATIONS" ] || set -- "$@" -test-iterations "$GATE_QUICK_ITERATIONS" -run-tests-until-failure
-    "$@" 2>&1 | tee .gate-artifacts/quick-test.log
+    "$@" 2>&1 | tee "${QUICK_TEST_LOG:-.gate-artifacts/quick-test.log}"
     quick_run_rc="${PIPESTATUS[0]}"
     # A green run of nothing is the failure this counts for. xcodebuild accepts an -only-testing
     # identifier that names no test and reports success, and Swift Testing emits no "Executed N
@@ -3319,17 +3550,21 @@ if [ "${GATE_QUICK:-0}" -eq 1 ]; then
       return "$quick_run_rc"
     fi
     if ! xcrun xcresulttool get test-results tests --path "$QUICK_XCRESULT" --format json \
-         > .gate-artifacts/quick-test-results.json; then
+         > "${QUICK_TEST_JSON:-.gate-artifacts/quick-test-results.json}"; then
       echo "QUICK FAIL: the result bundle at $QUICK_XCRESULT could not be read"
       [ "$quick_run_rc" -ne 0 ] || quick_run_rc=1
       return "$quick_run_rc"
     fi
-    /usr/bin/python3 - "$quick_scope" "$GATE_QUICK_ITERATIONS" <<'QUICKCOUNT_PY'
+    /usr/bin/python3 - "$quick_scope" "$GATE_QUICK_ITERATIONS" \
+      "${QUICK_TEST_JSON:-.gate-artifacts/quick-test-results.json}" "${QUICK_FAILED_FILE:-}" <<'QUICKCOUNT_PY'
 import json, sys
 scope = sys.argv[1]
 iterations = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 0
 bundle = scope.split("/")[0] if scope else ""
-data = json.load(open(".gate-artifacts/quick-test-results.json"))
+data = json.load(open(sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] else ".gate-artifacts/quick-test-results.json"))
+# A mutant batch asks one more question: how many cases in the scope FAILED. A non-zero exit with
+# none is not a caught mutant, so the count goes to the file the batch names, and nowhere else.
+failed_file = sys.argv[4] if len(sys.argv) > 4 else ""
 
 # A case that SKIPPED did not run, and this count exists to answer "did anything run". Several
 # suites here skip themselves when their preconditions are absent (no server credentials, no
@@ -3360,6 +3595,8 @@ def walk(node, current, ran, idle, runs):
         ran.setdefault(current, 0)
         idle.setdefault(current, 0)
     if kind == "Test Case" and current:
+        if node.get("result") == "Failed":
+            failed[current] = failed.get(current, 0) + 1
         if node.get("result") in EXECUTED:
             ran[current] = ran.get(current, 0) + 1
             runs.append((current, name, rep_groups(node) or [[]]))
@@ -3368,9 +3605,12 @@ def walk(node, current, ran, idle, runs):
     for child in node.get("children", []) or []:
         walk(child, current, ran, idle, runs)
 
-ran, idle, runs = {}, {}, []
+ran, idle, runs, failed = {}, {}, [], {}
 for root in data.get("testNodes", []) or []:
     walk(root, None, ran, idle, runs)
+if failed_file:
+    with open(failed_file, "w") as out:
+        out.write("%d\n" % (failed.get(bundle, 0) if bundle else sum(failed.values())))
 print("executed test cases for the quick scope: "
       + (", ".join("%s=%d" % (k, v) for k, v in sorted(ran.items())) or "(none)"))
 print("skipped or not run: "
@@ -3404,6 +3644,160 @@ if iterations:
 QUICKCOUNT_PY
     if [ $? -ne 0 ] && [ "$quick_run_rc" -eq 0 ]; then quick_run_rc=1; fi
     return "$quick_run_rc"
+  }
+
+  # --- the mutant batch (MEMNG-825) -------------------------------------------------------------
+  # --mutants: the patches came inside this script (gate_mutants_write, frozen and checked on the
+  # controller before its estate lock) and are written OUTSIDE the mirror, which the next rsync
+  # --delete would empty. The files they touch are copied aside byte for byte and hashed first; the
+  # clean scope must pass (the control); each mutant in turn is applied, compiled incrementally,
+  # judged by the scope and put back from that copy and touched, whatever happened to it. Restoring
+  # a source does not replace its compiled product, so the batch ends by REBUILDING and running the
+  # clean scope again, and by comparing the hashes and the directory listings with the first ones:
+  # if any of that differs, a mutant's object or the device's state may have decided a result, and
+  # the batch says it is unsound rather than attribute anything. Caught = it built, the scope
+  # exited non-zero AND the result bundle shows a failed case; a mutant that did not build is
+  # BROKEN and never tested; a non-zero exit with no failed case is INCONCLUSIVE. Both count as
+  # not caught. Patch flags stay to -p1, --dry-run, -s and -N: the build host's patch is BSD's.
+  GATE_MUTANT_DIR="$GATE_WORK/mutants"
+  GATE_MUTANT_APPLIED=""
+  gate_mutant_sums() {
+    local f
+    for f in $GATE_MUTANT_FILES; do shasum -a 256 "$GATE_TARGET/$f" || return 1; done
+  }
+  gate_mutant_listing() {
+    local f
+    for f in $GATE_MUTANT_FILES; do dirname "$f"; done | sort -u | while IFS= read -r d; do
+      echo "== $d"
+      ls -a "$GATE_TARGET/$d" || exit 1
+    done
+  }
+  # Puts one mutant's files back from the byte copy and touches them (the copy keeps the old mtime,
+  # which an incremental build would read as "unchanged since the mutant's compile"). The give-back
+  # the traps run calls it too, so a signal mid-mutant still leaves the tree clean. A file is put back
+  # only when its bytes compare equal to the copy afterwards; one that does not is REMOVED from the
+  # mirror, so no later build of this lane can compile the mutant (a missing source fails loudly)
+  # and the next run's rsync writes it again. One that cannot be removed either is fenced
+  # (gate_mutant_fence_add): rsync's size-and-mtime check could skip it, so every later run of this
+  # lane refuses until it is verified. This run builds nothing more after a failed restore.
+  # Non-zero when any file was not put back.
+  gate_mutant_restore() { # NAME
+    local f rc=0
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if cp -p "$GATE_MUTANT_DIR/orig/$f" "$GATE_TARGET/$f" && touch "$GATE_TARGET/$f" \
+         && cmp -s "$GATE_MUTANT_DIR/orig/$f" "$GATE_TARGET/$f"; then
+        continue
+      fi
+      rc=1
+      if rm -f "${GATE_TARGET:?}/${f:?}" && [ ! -e "$GATE_TARGET/$f" ]; then
+        echo "MUTANTS FAIL: $f could not be put back from the copy; removed from the mirror"
+      else
+        echo "MUTANTS FAIL: $f could not be put back from the copy nor removed"
+        gate_mutant_fence_add "$f"
+      fi
+    done < "$GATE_MUTANT_DIR/$1.files"
+    return "$rc"
+  }
+  gate_mutant_tests() { # INVOCATION — the scope once, its evidence under names of its own
+    QUICK_XCRESULT="$GATE_TARGET/.gate-artifacts/MemosNG-quick-mutant-$1.xcresult"
+    QUICK_TEST_LOG=".gate-artifacts/quick-test-$1.log"
+    QUICK_TEST_JSON=".gate-artifacts/quick-test-results-$1.json"
+    QUICK_FAILED_FILE="$GATE_MUTANT_DIR/failed-$1"
+    rm -f "$GATE_MUTANT_DIR/failed-$1"
+    s_quick_tests_on_device
+  }
+  gate_mutant_build() { # LOG
+    local rc
+    QUICK_BUILD_LOG="$1"
+    s_quick_build
+    rc=$?
+    QUICK_BUILD_LOG=""
+    return "$rc"
+  }
+  s_mutant_batch() {
+    local f name nn verdict extra apply_rc build_rc tests_rc failed caught=0 survivors="" restore_ok=1
+    local control_build control_tests manifest=same listing=same rc
+    rm -rf "${GATE_MUTANT_DIR:?}" && mkdir -p "$GATE_MUTANT_DIR/orig" && gate_mutants_write "$GATE_MUTANT_DIR" \
+      || { echo "MUTANTS FAIL: cannot write the patches into $GATE_MUTANT_DIR"; return 1; }
+    gate_mutant_sums > "$GATE_MUTANT_DIR/manifest-before.txt" \
+      && gate_mutant_listing > "$GATE_MUTANT_DIR/listing-before.txt" \
+      || { echo "MUTANTS FAIL: cannot record the hashes and listings of the files the mutants touch"; return 1; }
+    for f in $GATE_MUTANT_FILES; do
+      mkdir -p "$GATE_MUTANT_DIR/orig/$(dirname "$f")" && cp -p "$GATE_TARGET/$f" "$GATE_MUTANT_DIR/orig/$f" \
+        || { echo "MUTANTS FAIL: cannot copy $f aside"; return 1; }
+    done
+    echo "::: mutants: the clean run :::"
+    gate_mutant_tests clean
+    tests_rc=$?
+    if [ "$tests_rc" -ne 0 ]; then
+      echo "MAC_GATE_MUTANTS_CLEAN_FAILED tests_rc=$tests_rc"
+      return "$tests_rc"
+    fi
+    for name in $GATE_MUTANTS; do
+      nn="${name%%-*}"
+      echo "::: mutants: $name :::"
+      tests_rc=- extra=""
+      (cd "$GATE_TARGET" && /usr/bin/patch -p1 --dry-run -s -N < "$GATE_MUTANT_DIR/$name.patch")
+      apply_rc=$?
+      if [ "$apply_rc" -eq 0 ]; then
+        GATE_MUTANT_APPLIED="$name"
+        (cd "$GATE_TARGET" && /usr/bin/patch -p1 -s -N < "$GATE_MUTANT_DIR/$name.patch")
+        apply_rc=$?
+      fi
+      if [ "$apply_rc" -ne 0 ]; then
+        verdict=BROKEN extra=" apply_rc=$apply_rc"
+      else
+        gate_mutant_build ".gate-artifacts/mutant-$nn-build.log"
+        build_rc=$?
+        if [ "$build_rc" -ne 0 ]; then
+          verdict=BROKEN extra=" build_rc=$build_rc"
+        else
+          gate_mutant_tests "$nn"
+          tests_rc=$?
+          failed="$(cat "$GATE_MUTANT_DIR/failed-$nn" 2>/dev/null)"
+          case "$failed" in ''|*[!0-9]*) failed=0 ;; esac
+          if [ "$tests_rc" -eq 0 ]; then verdict=SURVIVED
+          elif [ "$failed" -ge 1 ]; then verdict=caught
+          else verdict=INCONCLUSIVE; fi
+        fi
+      fi
+      # The mark goes only with a restore that worked: a failed one leaves it for the give-back to
+      # try again on the way out.
+      if [ -n "$GATE_MUTANT_APPLIED" ]; then
+        if gate_mutant_restore "$name"; then GATE_MUTANT_APPLIED=""; else restore_ok=0; fi
+      fi
+      echo "MAC_GATE_MUTANT $name $verdict tests_rc=$tests_rc$extra"
+      if [ "$verdict" = caught ]; then caught=$((caught + 1)); else survivors="$survivors $name:$verdict"; fi
+      [ "$restore_ok" -eq 1 ] || { echo "MUTANTS FAIL: $name's files could not be put back; no further mutant runs"; break; }
+    done
+    control_build=-
+    control_tests=-
+    if [ "$restore_ok" -eq 1 ]; then
+      echo "::: mutants: the clean control (rebuilt after the last restore) :::"
+      gate_mutant_build ".gate-artifacts/clean-control-build.log"
+      control_build=$?
+      if [ "$control_build" -eq 0 ]; then
+        gate_mutant_tests clean-control
+        control_tests=$?
+      fi
+    fi
+    { gate_mutant_sums > "$GATE_MUTANT_DIR/manifest-after.txt" \
+      && cmp -s "$GATE_MUTANT_DIR/manifest-before.txt" "$GATE_MUTANT_DIR/manifest-after.txt"; } || manifest=differs
+    { gate_mutant_listing > "$GATE_MUTANT_DIR/listing-after.txt" \
+      && cmp -s "$GATE_MUTANT_DIR/listing-before.txt" "$GATE_MUTANT_DIR/listing-after.txt"; } || listing=differs
+    for f in $survivors; do echo "MAC_GATE_MUTANT_SURVIVOR ${f%%:*} ${f#*:}"; done
+    echo "mutants     : $caught caught; survivors:${survivors:- none}"
+    if [ "$control_build" != 0 ] || [ "$control_tests" != 0 ] || [ "$manifest" != same ] \
+       || [ "$listing" != same ] || [ "$restore_ok" -ne 1 ]; then
+      echo "MAC_GATE_BATCH_UNSOUND build_rc=$control_build tests_rc=$control_tests manifest=$manifest listing=$listing"
+      rc=1
+      case "$control_tests" in -|0) ;; *) rc="$control_tests" ;; esac
+      case "$control_build" in -|0) ;; *) rc="$control_build" ;; esac
+      return "$rc"
+    fi
+    [ -z "$survivors" ] || return 17
+    return 0
   }
 
   quick_tests_rc="-"
@@ -3508,6 +3902,22 @@ if [ "$QUICK" -eq 1 ]; then
   QUICK_LINT_RC="$(quick_field lint)"
   QUICK_BUILD_RC="$(quick_field build)"
   QUICK_TESTS_RC="$(quick_field tests)"
+  # The batch's own count, read only from what the build host printed (the selftests above it print
+  # into the same log). The total is what this run sent, so a remote that stopped after two of three
+  # still reads 2/3. A batch the remote did not report wholly caught never exits 0.
+  if [ "$MUTANT_TOTAL" -gt 0 ]; then
+    mutant_caught=0
+    case "$GATE_REMOTE_LOG_OFFSET" in
+      ''|*[!0-9]*) ;;
+      *) mutant_caught="$(tail -c +"$((GATE_REMOTE_LOG_OFFSET + 1))" "$log" | grep -Ec '^MAC_GATE_MUTANT [^ ]+ caught ')" ;;
+    esac
+    case "$mutant_caught" in ''|*[!0-9]*) mutant_caught=0 ;; esac
+    QUICK_MUTANTS_FIELD=" mutants=$mutant_caught/$MUTANT_TOTAL"
+    if [ "$mutant_caught" -lt "$MUTANT_TOTAL" ] && [ "$first_fail" -eq 0 ]; then
+      say "mutants     : $mutant_caught of $MUTANT_TOTAL reported caught by the build host; a batch not wholly caught is exit 17"
+      first_fail=17
+    fi
+  fi
 fi
 
 # --- (7) copy the evidence back ---------------------------------------------------------------

@@ -369,7 +369,7 @@ required on both commands (neither has a default; `env … bin/mac-gate.sh` expo
       testflight-cut SUMMARY: version=<v> build=<n> sha=<40> state=<state> group=<group> | exit=<rc>
 
   `state` is `VALID` (uploaded, and the read-back found it valid, attached to the group and in
-  testing), `archive-only`, `FAILED`, `TIMEOUT`, `LOCK-TIMEOUT` (the release checkout's lock),
+  testing), `archive-only`, `RESOLVED` (`--resolve-build`, below), `FAILED`, `TIMEOUT`, `LOCK-TIMEOUT` (the release checkout's lock),
   `ESTATE-LOCK-TIMEOUT`, `REMOTE-REFUSED`, `REFUSED(deadline-passed)`, `PUSH-FAILED`, `NO-REPORT` (exit 0 without the report of
   a finished lane), `UNKNOWN(ssh-lost)` or `REFUSED(<reason>)`. Only `| exit=0` with `VALID` (or `archive-only` for the dry run) is a cut.
 - **Tests.** `tests/gate/testflight-cut-test.sh` (a named gate selftest: the local half on real
@@ -380,6 +380,57 @@ required on both commands (neither has a default; `env … bin/mac-gate.sh` expo
   fastlane/test/cut_wrapper_test.rb`), `tests/gate/cut-markers-test.sh` (the proof
   and claim, the replayed race, two concurrent claims, the lock ceiling) and
   `tests/gate/cut-scripts-test.sh` (the owner's train).
+
+### 8d. The next build number — `--resolve-build` and `bin/bump-build.sh` (2026-10-16)
+
+The cut uploads exactly the pair the committed `project.yml` names, and App Store Connect refuses a
+number it already holds, so the number has to be free BEFORE the commit that the cut ships. Two
+scripts split the job: one asks App Store Connect and changes nothing, the other edits text and asks
+nothing.
+
+    env MAC_GATE_HOST=merkur MAC_GATE_ESTATE_LOCK=/home/fabian/projects/worktrees/.wp13-gate.lock bin/testflight-cut.sh --resolve-build
+    bin/bump-build.sh --build <n> --notes-file <path outside the tree>
+
+- **`--resolve-build`** has the cut's preconditions, its estate lock, its `refs/cuts/<sha>` push and
+  its one ssh call; on the Mac it regenerates the project and then runs only `fastlane prove_unused
+  version:<v> build:<n>` for n = the commit's build + 1, + 2, …, where the pair is the one the
+  AUTHORISED HEAD's `project.yml` names (`origin/main`'s, or the commit `--sha` authorised). Exit 0
+  of `prove_unused` is the answer, printed as
+
+      RESOLVED-BUILD version=<v> build=<n> probes=<k> seconds=<s>
+
+  (`k` the `prove_unused` runs, `s` the wall seconds of that loop), with the SUMMARY
+  `state=RESOLVED group=- | exit=0` and the SUMMARY's `build` the same n. A `spent` verdict moves to
+  the next number; any other failure — App Store Connect unreadable, no verdict, the markers' lock —
+  stops with `state=REFUSED(unused-unproven) … | exit=21` and no `RESOLVED-BUILD` line, because that
+  number may still be free; eight spent answers in a row (`RESOLVE_PROBE_CAP`, the one constant in
+  the Mac half's body) stop with `state=REFUSED(resolve-exhausted) … | exit=22`. `prove_unused`'s own
+  output is shown indented, so no line it prints can pass for the answer. Nothing is archived,
+  claimed or uploaded, and no lane but `prove_unused` runs; the `unused-<v>-<n>` proof it leaves is
+  the one the cut would write anyway. Resolution is not a reservation: two callers can resolve the
+  same number, the markers let only one claim it, and the cut proves it again under its own sha.
+- **`bin/bump-build.sh`** runs on a work branch, never `main`, on a clean tree with a branch checked
+  out. It refuses (exit 2, nothing written) a `--build` that is missing, not a whole number, or not
+  greater than the current build — so a re-run is a refusal, never a second section — and a notes
+  file that is missing, empty, names a tracker key, says we/us/our, carries a level-1 or level-2
+  heading outside a fence (the loader would end the section there), leaves a fence open, or would
+  make a section longer than 4000 characters (the loader's count: the section's lines joined, outer
+  whitespace stripped, characters rather than bytes). It sets BOTH `CURRENT_PROJECT_VERSION` key
+  lines with an anchored sed (the comment above them that names the key is not a key line), leaves
+  every `MARKETING_VERSION` line byte for byte, inserts `## <v> (<n>)`, a blank line and the body
+  above the newest section, re-reads the result as the loader would, and commits both files with a
+  message naming the pair (`BUMPED version=<v> build=<n> commit=<sha>`). The marketing version stays
+  a human commit. The branch then needs the full gate (its `notes` step reads the new pair) and the
+  merge before the cut, which requires `HEAD == origin/main`.
+- **Tests.** The resolve cases are in `tests/gate/testflight-cut-test.sh` (49 and 50 spent, 51 free;
+  seven spent and the eighth free; eight spent; an unproven answer at the first and at a later
+  probe; fastlane output that imitates the answer); `tests/gate/bump-build-test.sh` is a named gate
+  selftest on throwaway repositories, with `scripts/release-notes-rule.sh` as its control.
+- **Still owed: the timed check after landing.** `--resolve-build` needs the mode on `origin/main`,
+  so it runs for real only after the merge: once, timed, against merkur, recording `probes=` and
+  `seconds=` (they replace the unmeasured cap of eight), expecting the build + 1 unless that number
+  was uploaded meanwhile, and proving the answer free afterwards with `fastlane prove_unused
+  version:<v> build:<n>` exit 0 (`verify_attach` fails on absence and proves nothing here).
 
 ---
 

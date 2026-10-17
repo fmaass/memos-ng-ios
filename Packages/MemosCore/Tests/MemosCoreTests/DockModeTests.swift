@@ -608,4 +608,28 @@ struct DockModeTests {
         #expect(!DockMode.tabs.folds(on: .timeline))
         #expect(!DockMode.scope.folds(on: .timeline))
     }
+
+    /// MEMNG-822: a collection that comes on top of the Collections stack, or leaves it, opens on
+    /// the unfolded bar whatever the fold stood at; the stack of another tab's moment keeps the
+    /// fold that tab made.
+    @Test("a change of the collection on top unfolds the bar on Collections, and only there")
+    func collectionStackChangeUnfolds() {
+        check([
+            Row(from: .folded, event: .collectionStackChanged(showing: .collections), to: .tabs),
+            Row(from: .tabs, event: .collectionStackChanged(showing: .collections), to: .tabs),
+            Row(from: .folded, event: .collectionStackChanged(showing: .timeline), to: .folded),
+            Row(from: .tabs, event: .collectionStackChanged(showing: .places), to: .tabs),
+            Row(from: .scope, event: .collectionStackChanged(showing: .library), to: .scope),
+            Row(from: .folded, event: .collectionStackChanged(showing: .library), to: .folded),
+        ])
+    }
+
+    /// MEMNG-822: the modes row's Collections icon, the mirror of the scope row's Library icon.
+    @Test("the modes row's Collections icon gives the tabs back from every state")
+    func collectionsIconGivesTheTabs() {
+        check(
+            DockMode.allCases.map {
+                Row(from: $0, event: .pressedCollectionsIcon, to: .tabs)
+            })
+    }
 }

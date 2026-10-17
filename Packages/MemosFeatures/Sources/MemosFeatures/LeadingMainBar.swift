@@ -18,6 +18,9 @@ struct LeadingMainBar: View {
         case tabs
         case folded
         case scope
+        /// A collection on top of the Collections stack: the Collections icon and Photos |
+        /// Journal | Map, drawn as the scope row is (MEMNG-822).
+        case modes
     }
 
     /// Nil on the Library under a claim, where select mode's toolbar stands: the container stays
@@ -29,7 +32,11 @@ struct LeadingMainBar: View {
     let press: (MainTab) -> Void
     /// A press on the scope row's Library icon (`DockEvent.pressedLibraryIcon`).
     let pressLibraryIcon: () -> Void
+    /// A press on the modes row's Collections icon (`DockEvent.pressedCollectionsIcon`).
+    var pressCollectionsIcon: () -> Void = {}
     let scope: LibraryScopeChoice
+    /// The modes of the collection on top of the Collections stack, which the modes row draws.
+    var modes: CollectionModeChoice?
     @Namespace private var glass
     /// A press held on screen with no finger, for the simulator's screen recording; a person's
     /// press is the button's own.
@@ -91,6 +98,7 @@ struct LeadingMainBar: View {
                 // One case, so one view: the fold narrows the capsule it is.
                 case .tabs?, .folded?: capsule(folded: shape == .folded)
                 case .scope?: scopeRow
+                case .modes?: modesRow
                 case nil: EmptyView()
                 }
             }
@@ -163,6 +171,37 @@ struct LeadingMainBar: View {
             .glassEffectID(GlassID.scope, in: glass)
     }
 
+    /// The modes row (MEMNG-822): the scope row's shape, with the Collections icon in the Library
+    /// icon's place — the same glass identity, so the capsule flows into it and back — and the
+    /// collection's modes in the scope control's.
+    @ViewBuilder
+    private var modesRow: some View {
+        Button(action: pressCollectionsIcon) {
+            Image(systemName: MainTab.collections.symbol)
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(.tint)
+                .frame(width: Self.scopeIconSide, height: Self.scopeIconSide)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(MainTab.collections.title)
+        .accessibilityIdentifier(Self.modesIconIdentifier)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .glassEffectID(GlassID.main, in: glass)
+        .modifier(MainGlassMarker(shape: .modes))
+        .padding(.leading, Self.scopeIconInset)
+        if let modes {
+            CollectionModePicker(choice: modes)
+                .controlSize(.extraLarge)
+                .padding(5)
+                .glassEffect(.regular, in: .capsule)
+                .glassEffectID(GlassID.scope, in: glass)
+        }
+    }
+
+    /// What a test finds the modes row's Collections icon by.
+    static let modesIconIdentifier = "collection-modes-show-tabs"
+
     /// The selected tab's pill, the system bar's: 54 pt tall, a little wider than its tab.
     private var pill: some View {
         Capsule()
@@ -209,6 +248,7 @@ struct LeadingMainBar: View {
         case .tabs: "main-bar-tabs"
         case .folded: "main-bar-folded"
         case .scope: "main-bar-scope-icon"
+        case .modes: "main-bar-modes-icon"
         }
     }
 

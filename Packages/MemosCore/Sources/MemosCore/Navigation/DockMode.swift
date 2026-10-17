@@ -44,6 +44,13 @@ nonisolated public enum DockMode: String, Sendable, Equatable, CaseIterable {
             return tab == .library && showing == .library ? .scope : .tabs
         case .pressedLibraryIcon:
             return .tabs
+        case .pressedCollectionsIcon:
+            // The modes row's Collections icon, the Library icon's mirror (MEMNG-822).
+            return .tabs
+        case .collectionStackChanged(let showing):
+            // A new collection on top of Collections, or the root again, opens unfolded whatever
+            // the fold stood at; another tab's fold is that tab's.
+            return showing == .collections ? .tabs : self
         case .selected(let tab):
             // Leaving the Library by any route — a press elsewhere or a jump to a memo — gives
             // the tabs back, so coming back finds them. A fold is the tab's it was made on.
@@ -160,6 +167,12 @@ nonisolated public enum DockEvent: Sendable, Equatable {
     case pressedTab(MainTab, showing: MainTab)
     /// A press on the Library icon in the Library's scope toolbar.
     case pressedLibraryIcon
+    /// A press on the Collections icon in the modes row a collection puts in the main bar's
+    /// capsule (MEMNG-822): the full capsule over that collection, kept on top.
+    case pressedCollectionsIcon
+    /// The collection on top of the Collections stack changed — a push, a pop, the last pop to
+    /// the root — while `showing` was the tab on screen (MEMNG-822).
+    case collectionStackChanged(showing: MainTab)
     /// `tab` became the tab on screen, by a press or by the app.
     case selected(MainTab)
     /// One of the Library's scroll views moved while `showing` was the tab on screen. `y` is

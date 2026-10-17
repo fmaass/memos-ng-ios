@@ -717,6 +717,12 @@ struct CollectionsRootRenderTests {
             // The control: no collection screen stands before the press.
             #expect(screen.element(labelled: TripMode.journal.title) == nil)
             #expect(screen.press("#portugal2026"), "the chip took no press")
+            await screen.settle(turns: 40)
+            // MEMNG-845: a collection opens on the tabs, and its scroll brings the modes row
+            // whose Journal this waits for, as the Library's scroll brings its scope row.
+            if let scroller = TripProbe.mainScroll(in: screen.window) {
+                await TripProbe.drag(scroller, by: 240, on: screen)
+            }
             let opened = await screen.until(seconds: 10) {
                 screen.element(labelled: TripMode.journal.title) != nil
             }
@@ -1434,6 +1440,12 @@ extension CollectionsRootRenderTests {
             // The control: no collection screen stands before the press.
             #expect(screen.element(labelled: TripMode.journal.title) == nil)
             #expect(screen.press(year), "the chip took no press")
+            await screen.settle(turns: 40)
+            // MEMNG-845: a collection opens on the tabs, and its scroll brings the modes row
+            // whose Journal this waits for, as the Library's scroll brings its scope row.
+            if let scroller = TripProbe.mainScroll(in: screen.window) {
+                await TripProbe.drag(scroller, by: 240, on: screen)
+            }
             let opened = await screen.until(seconds: 10) {
                 screen.element(labelled: TripMode.journal.title) != nil
             }

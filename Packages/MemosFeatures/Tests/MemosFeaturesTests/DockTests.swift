@@ -581,4 +581,288 @@ struct DockTests {
         choice.showAll()
         #expect(abandoned == 0)
     }
+
+    // MARK: - The modes row on Collections (MEMNG-822)
+
+    /// The dock with Collections on screen and `routes` as its stack's path, each route's screen
+    /// having attached its modes when `attached`.
+    private func collectionDock(
+        _ routes: [String], attached: Bool = true
+    ) -> (dock: AppDock, modes: [String: CollectionModeChoice]) {
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        dock.collectionTrail(routes)
+        var modes: [String: CollectionModeChoice] = [:]
+        if attached {
+            for route in routes {
+                let choice = CollectionModeChoice()
+                dock.attachModes(choice, to: route)
+                modes[route] = choice
+            }
+        }
+        return (dock, modes)
+    }
+
+    private func shape(_ dock: AppDock) -> LeadingMainBar.BarShape? {
+        Tabs.leadingShape(dock, on: .collections)
+    }
+
+    /// What a collection's scroll past the threshold tells the dock: its modes row (MEMNG-845).
+    private func scrolledDown(_ dock: AppDock) {
+        dock.send(.scrolledTab(.collections, folds: true, showing: .collections))
+    }
+
+    @Test("a collection opens on the tabs; its scroll brings the modes row, as the Library's does")
+    func aCollectionOnTopScrollsToTheModesRow() {
+        let (dock, modes) = collectionDock(["A"])
+        #expect(shape(dock) == .tabs, "the collection opened on its row, not on the tabs")
+        #expect(dock.collectionModes === modes["A"], "the row is not the top screen's")
+        scrolledDown(dock)
+        #expect(shape(dock) == .modes, "the scroll folded the row instead of bringing it")
+        #expect(Tabs.leadingShape(dock, on: .library) == .tabs, "the row reached the Library")
+        #expect(collectionDock([]).dock.collectionModes == nil)
+        #expect(shape(collectionDock([]).dock) == .tabs, "the root drew a modes row")
+    }
+
+    @Test("over a collection the row's scroll follows the Library's rule: past 24 pt, back at 0")
+    func theRowFollowsTheLibrarysRule() {
+        let (dock, _) = collectionDock(["A"])
+        let owner = CollectionFeedOwner(route: AnyHashable("A"), mode: .photos)
+        var fold = DockFold()
+        func read(_ y: Double, moving: Bool = true) {
+            dock.scrolledTab(
+                .collections, owner: owner, from: Self.reading(y: y - 1),
+                to: Self.reading(y: y), committing: &fold, moving: moving)
+        }
+        read(DockMode.scopeThreshold)
+        #expect(shape(dock) == .tabs, "the row came at the threshold, not past it")
+        read(DockMode.scopeThreshold + 1, moving: false)
+        #expect(shape(dock) == .tabs, "an idle move brought the row")
+        read(DockMode.scopeThreshold + 1)
+        #expect(shape(dock) == .modes, "past the threshold the row did not come")
+        read(DockMode.scopeThreshold - 20)
+        read(1)
+        #expect(shape(dock) == .modes, "a scroll up short of the top took the row away")
+        read(0)
+        #expect(shape(dock) == .tabs, "the top did not give the tabs back")
+    }
+
+    @Test("the Collections press over a collection brings its row and pops nothing")
+    func theCollectionsPressBringsTheModesRow() {
+        let (dock, _) = collectionDock(["A", "B"])
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(shape(dock) == .modes)
+        #expect(dock.reselections[.collections, default: 0] == 0, "a reselection was counted")
+        #expect(dock.modesStack.count == 2, "the stack moved")
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(shape(dock) == .modes, "a second press took the row away")
+    }
+
+    @Test("the row's icon gives the full capsule; the Collections press there brings the row back")
+    func theModesIconGivesTheTabsAndCollectionsReturns() {
+        let (dock, _) = collectionDock(["A"])
+        scrolledDown(dock)
+        dock.send(.pressedCollectionsIcon)
+        #expect(shape(dock) == .tabs, "the icon did not give the full capsule")
+        #expect(dock.collectionModes != nil, "the collection left with the icon's press")
+        #expect(dock.reselections[.collections, default: 0] == 0)
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(shape(dock) == .modes, "the Collections press did not bring the row back")
+        #expect(dock.reselections[.collections, default: 0] == 0, "the press over A popped")
+        #expect(dock.modesStack.count == 1)
+    }
+
+    @Test("the Collections press at the root counts one reselection, and the icon there no row")
+    func theRootsPressCountsAReselection() {
+        let (dock, _) = collectionDock([])
+        dock.send(.pressedCollectionsIcon)
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(dock.reselections[.collections, default: 0] == 1)
+        #expect(shape(dock) == .tabs)
+    }
+
+    @Test("another tab gives the tabs back and keeps the collection, as leaving the Library does")
+    func anotherTabKeepsTheCollection() {
+        let (dock, _) = collectionDock(["A"])
+        scrolledDown(dock)
+        dock.send(.pressedTab(.timeline, showing: .collections))
+        dock.send(.selected(.timeline))
+        dock.send(.pressedTab(.collections, showing: .timeline))
+        dock.send(.selected(.collections))
+        #expect(shape(dock) == .tabs, "coming back kept the row")
+        #expect(dock.collectionModes != nil, "the tab switch lost the collection")
+        #expect(dock.reselections[.collections, default: 0] == 0)
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(shape(dock) == .modes, "the collection's row did not come back on its press")
+    }
+
+    @Test("the last route gone gives the full capsule, from the row and the tabs")
+    func theLastPopGivesTheTabs() {
+        let (dock, _) = collectionDock(["A"])
+        scrolledDown(dock)
+        dock.collectionTrail([])
+        #expect(dock.mode == .tabs, "the root opened folded")
+        #expect(shape(dock) == .tabs)
+        let (other, _) = collectionDock(["A"])
+        other.collectionTrail([])
+        #expect(other.mode == .tabs)
+        #expect(shape(other) == .tabs)
+    }
+
+    @Test("a path whose top is unchanged keeps the row; a new top gives the tabs")
+    func onlyANewTopResets() {
+        let (dock, modes) = collectionDock(["A", "B"])
+        scrolledDown(dock)
+        dock.collectionTrail(["A", "B"])
+        dock.attachModes(CollectionModeChoice(), to: "B")
+        #expect(shape(dock) == .modes, "the same path took the row away")
+        #expect(dock.collectionModes === modes["B"], "a second attachment replaced B's modes")
+        dock.collectionTrail(["B"])
+        #expect(shape(dock) == .modes, "a route below the top took the row away")
+        #expect(dock.collectionModes === modes["B"])
+        let (back, _) = collectionDock(["A", "B"])
+        scrolledDown(back)
+        back.collectionTrail(["A"])
+        #expect(back.mode == .tabs, "Back to A kept B's row")
+        #expect(shape(back) == .tabs)
+    }
+
+    @Test("a push from a folded root opens the collection unfolded; another tab's fold is kept")
+    func aPushUnfoldsOnCollectionsOnly() {
+        let (dock, _) = collectionDock([])
+        scrolledDown(dock)
+        dock.collectionTrail(["A"])
+        #expect(dock.mode == .tabs, "the push kept the root's fold")
+        // A path the app changes while the Timeline shows leaves the Timeline's fold.
+        let (other, _) = collectionDock(["A"])
+        other.send(.selected(.timeline))
+        other.send(.scrolledTab(.timeline, folds: true, showing: .timeline))
+        other.collectionTrail([])
+        #expect(other.mode == .folded, "a pop off screen unfolded the Timeline")
+    }
+
+    @Test("a re-tap before the top screen attached its modes, or after a switch back, pops nothing")
+    func theTopRoutesPresenceSuppressesThePop() {
+        let (dock, _) = collectionDock(["A"], attached: false)
+        #expect(shape(dock) == .tabs, "a row drawn before the screen attached its modes")
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(dock.reselections[.collections, default: 0] == 0, "the re-tap popped")
+        #expect(shape(dock) == .tabs, "a re-tap with no modes attached drew a row or a fold")
+        let choice = CollectionModeChoice()
+        dock.attachModes(choice, to: "A")
+        #expect(shape(dock) == .tabs)
+        dock.send(.selected(.timeline))
+        dock.send(.selected(.collections))
+        dock.send(.pressedTab(.collections, showing: .collections))
+        #expect(shape(dock) == .modes)
+        #expect(dock.reselections[.collections, default: 0] == 0)
+    }
+
+    @Test("modes attached before the path told the route are placed when it is, else dropped")
+    func modesAttachedEarlyArePlaced() {
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        let choice = CollectionModeChoice()
+        dock.attachModes(choice, to: "A")
+        #expect(shape(dock) == .tabs, "a row with no route on the stack")
+        dock.collectionTrail(["A"])
+        #expect(dock.collectionModes === choice)
+        let stale = AppDock()
+        stale.send(.selected(.collections))
+        stale.attachModes(CollectionModeChoice(), to: "A")
+        stale.collectionTrail([])
+        stale.collectionTrail(["A"])
+        #expect(stale.collectionModes == nil, "an attachment the path never held was kept")
+    }
+
+    @Test("Select takes the bar; its release brings back the row, or the tabs it found")
+    func aClaimTakesTheModesRow() {
+        let (dock, _) = collectionDock(["A"])
+        let select = UUID()
+        dock.claim(select, for: .select)
+        #expect(shape(dock) == nil)
+        dock.release(select)
+        #expect(shape(dock) == .tabs)
+        scrolledDown(dock)
+        dock.claim(select, for: .select)
+        #expect(shape(dock) == nil)
+        dock.release(select)
+        #expect(shape(dock) == .modes)
+    }
+
+    @Test("the modes row's control writes the choice its screen reads")
+    func theModesControlWritesTheChoice() {
+        let (dock, modes) = collectionDock(["A"])
+        scrolledDown(dock)
+        let picker = CollectionModePicker(choice: dock.collectionModes ?? CollectionModeChoice())
+        #expect(modes["A"]?.mode == .photos)
+        picker.choice.choose(.map)
+        #expect(modes["A"]?.mode == .map, "the row wrote another screen's choice")
+        #expect(shape(dock) == .modes, "the Map took the row away")
+        #expect(CollectionModePicker.identifier != LibraryScopePicker.identifier)
+    }
+
+    /// One drag of 240 pt told to `dock` as a scroll view of `route`'s screen in `mode` reports
+    /// it, the way `DockFeed` tells it; `nil` names no owner.
+    private func drag(_ dock: AppDock, _ route: String?, _ mode: TripMode) {
+        var fold = DockFold()
+        let owner = route.map { CollectionFeedOwner(route: AnyHashable($0), mode: mode) }
+        dock.scrolledTab(
+            .collections, owner: owner, from: Self.reading(y: 0), to: Self.reading(y: 240),
+            committing: &fold, moving: true)
+    }
+
+    /// A Collections reading is judged against the screen that issued it (MEMNG-822): the
+    /// collection under the top, the top in a mode it no longer shows, and a reading that names
+    /// no screen fold nothing; the top's own reading in its mode folds the bar.
+    @Test("a Collections reading counts only from the collection on top, in the mode it shows")
+    func aReadingCountsOnlyFromItsOwner() {
+        let (dock, modes) = collectionDock(["A", "B"])
+        drag(dock, "A", .photos)
+        #expect(dock.mode == .tabs, "the collection under the top folded the bar")
+        modes["B"]?.choose(.journal)
+        drag(dock, "B", .photos)
+        #expect(dock.mode == .tabs, "B's outgoing Photos folded its Journal")
+        drag(dock, nil, .journal)
+        #expect(dock.mode == .tabs, "a reading of nobody's folded the bar")
+        // The control: the top's own reading, in the mode it shows.
+        drag(dock, "B", .journal)
+        #expect(shape(dock) == .modes, "the top's own reading brought no row")
+    }
+
+    /// The Map has no feed to unfold the bar with (MEMNG-822): an outgoing Photos reading heard
+    /// after the Map was chosen folds nothing, and a fold however it came leaves the row whole;
+    /// back on Photos the fold that stands is drawn.
+    @Test("the Map keeps the row it was chosen from; an old Photos reading moves nothing")
+    func theMapHoldsItsRow() {
+        let (dock, modes) = collectionDock(["A"])
+        modes["A"]?.choose(.map)
+        drag(dock, "A", .photos)
+        #expect(dock.mode == .tabs, "the outgoing Photos reading moved the Map's bar")
+        #expect(shape(dock) == .tabs)
+        scrolledDown(dock)
+        #expect(shape(dock) == .modes, "the Map's row was compacted")
+        // Back on Photos the same row stands: no mode folds a collection to the one icon.
+        modes["A"]?.choose(.photos)
+        #expect(shape(dock) == .modes, "the row did not stand on Photos")
+    }
+
+    /// A push or Back unfolds the bar (`collectionStackChanged`); the screen it moved away from
+    /// goes on reporting while it goes, and those readings must not fold the bar back.
+    @Test("an outgoing collection's reading after a push, a Back or the last pop folds nothing")
+    func anOutgoingCollectionsReadingFoldsNothing() {
+        let (dock, _) = collectionDock(["A"])
+        dock.collectionTrail(["A", "B"])
+        dock.attachModes(CollectionModeChoice(), to: "B")
+        drag(dock, "A", .photos)
+        #expect(dock.mode == .tabs, "A's reading after the push folded B's bar")
+        #expect(shape(dock) == .tabs, "A's reading after the push brought B's row")
+        dock.collectionTrail(["A"])
+        drag(dock, "B", .photos)
+        #expect(dock.mode == .tabs, "B's reading after Back folded A's bar")
+        dock.collectionTrail([])
+        drag(dock, "A", .photos)
+        #expect(dock.mode == .tabs, "A's reading after the last pop folded the root's bar")
+        #expect(shape(dock) == .tabs)
+    }
 }

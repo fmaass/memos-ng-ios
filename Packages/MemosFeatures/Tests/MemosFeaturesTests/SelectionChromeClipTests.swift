@@ -40,7 +40,7 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
-        "clip 781: a press on the selected Collections tab takes a pushed trip back to the root",
+        "clip 781: a re-tap over a trip returns its modes row; Back shows the root's +",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )
     func clipCollectionsRetap() async {
@@ -51,11 +51,46 @@ extension MediaImageLoaderTests {
             #expect(await ClipStage.served(transport, TripRows.list, atLeast: 1))
             await ClipStage.settle(window, seconds: 2)
             #expect(await ClipStage.scene("781a-collections-retap"))
-            // The driver opened a trip and pressed Collections again: the root stands, its + with
-            // it, which a pushed trip covers.
+            // The driver opened a trip, pressed the modes row's Collections icon, pressed the
+            // Collections tab again — which brings the row back over the trip (MEMNG-822, amending
+            // MEMNG-781) — and pressed Back: the root stands, its + with it, which a trip covers.
             let plus = CollectionsScreen.newTripButton
             let root = await ClipStage.showsSoon(plus, in: window)
             #expect(root, "after the re-tap the Collections root's + is not on screen")
+        }
+    }
+
+    @Test(
+        "clip 822: a collection's Photos | Journal | Map in the main bar's capsule",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipCollectionModesBar() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .collections, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, TripRows.list, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            #expect(await ClipStage.scene("822-collection-modes-bar"))
+            // The driver's last touch is Back from the trip's modes row: the root's +.
+            let plus = CollectionsScreen.newTripButton
+            let root = await ClipStage.showsSoon(plus, in: window)
+            #expect(root, "after Back the Collections root's + is not on screen")
+        }
+    }
+
+    @Test(
+        "clip 845: the Library's scope row, the reference the modes row is matched to",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipLibraryScopeRow() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            #expect(await ClipStage.scene("845a-library-scope-row"))
         }
     }
 

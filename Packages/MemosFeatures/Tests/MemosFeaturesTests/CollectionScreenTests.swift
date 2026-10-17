@@ -20,6 +20,9 @@ struct CollectionScreenTests {
     private let bob = TimelineSnapshotIdentity(
         server: URL(string: "https://memos.example.invalid")!, subject: "bob")
     private let identity = MediaIdentity()
+    /// The screen's modes, chosen here as the main bar's modes row chooses them (MEMNG-822): the
+    /// row under the hero is gone, and no bar is drawn over a screen hosted alone.
+    private let modes = CollectionModeChoice()
 
     init() {
         MediaImageLoader.store = MediaImageStore(
@@ -63,7 +66,7 @@ struct CollectionScreenTests {
             NavigationStack {
                 TripView(
                     scope: scope, openedUnder: alice, trips: stores.0, memberStore: stores.1,
-                    identity: who, access: { access })
+                    identity: who, access: { access }, modes: modes)
             }
         }
         .environment(dock ?? AppDock())
@@ -477,10 +480,10 @@ struct CollectionScreenTests {
         await CollectionsHost.with(screen(held, wire, Self.year), height: 3000) { screen in
             let grid = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
             #expect(grid, "Photos: \(TripProbe.tiles(in: screen.window))")
-            #expect(TripProbe.pressAtOnce(TripMode.journal.title, on: screen))
+            modes.choose(.journal)
             let journal = await screen.until { screen.says("Arrived in Lisbon") }
             #expect(journal, "Journal: \(wire.transport.memoReads)")
-            #expect(TripProbe.pressAtOnce(TripMode.map.title, on: screen))
+            modes.choose(.map)
             await screen.settle(turns: 10)
             let uids = TripMapPresentation.memberUids(of: Self.year, in: held.1)
             #expect(uids == Set(Self.files), "Map: \(String(describing: uids))")
@@ -621,7 +624,7 @@ struct CollectionScreenTests {
         let wire = TripWire()
         let held = stores()
         await CollectionsHost.with(screen(held, wire, Self.tag), height: 3000) { screen in
-            #expect(TripProbe.pressAtOnce(TripMode.journal.title, on: screen))
+            modes.choose(.journal)
             let both = await screen.until {
                 TripProbe.card(saying: "Arrived in Lisbon", in: screen.window) != nil
                     && TripProbe.card(saying: "Tram up to the castle", in: screen.window) != nil
@@ -667,7 +670,7 @@ struct CollectionScreenTests {
             let drawnDevice = device.map { screen.says($0) } ?? false
             #expect(spanned, "the span: \(String(describing: line)); device's: \(drawnDevice)")
 
-            #expect(TripProbe.pressAtOnce(TripMode.journal.title, on: screen))
+            modes.choose(.journal)
             let instant =
                 ISO8601DateFormatter().date(from: TripTransport.edgeStamp) ?? .distantPast
             var calendar = Calendar(identifier: .gregorian)
@@ -741,7 +744,7 @@ struct CollectionScreenTests {
                 // Asked under Photos and held there, so the answer reaches the other mode's hero.
                 let asked = await screen.until { media.asked("old") > 0 }
                 #expect(asked, "precondition: the hero asked for its picture")
-                #expect(TripProbe.pressAtOnce(modes[mode].title, on: screen))
+                self.modes.choose(modes[mode])
                 await screen.settle(turns: 10)
                 media.release()
             }

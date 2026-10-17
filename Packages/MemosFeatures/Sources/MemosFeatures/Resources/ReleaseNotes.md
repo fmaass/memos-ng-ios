@@ -5,6 +5,30 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (52)
+
+- When a trip, tag, month or year is open, the bottom capsule now behaves as it does in the Library: it opens with the four tabs, and the Photos, Journal and Map tabs take their place once the grid scrolls.
+- Scrolling back to the top morphs the three tabs back into the four. Tapping the Collections icon brings the four back at any time, and tapping Collections again brings the three.
+- The Map keeps whichever capsule was showing when it was chosen.
+- Please open a trip, scroll down and back up, tap the Collections icon and then the Collections tab, and compare the motion with the Library's Years, Months and All.
+
+## 2.4.0 (51)
+
+- When a trip, tag, month or year is open, the Photos, Journal and Map tabs now sit in the bottom capsule, where the Library's Years, Months and All tabs are, instead of in a row under the cover picture. Photos is chosen when the collection opens, and the grid starts right under the cover.
+- Scrolling the grid folds the capsule down to the four icons. Tapping the Collections icon brings the three tabs back, and Back returns to the Collections list with the four icons.
+- Select mode's toolbar takes the bar's place as before, and the three tabs return when Select ends.
+- Please open a trip and a tag card, switch between the three tabs, scroll down, tap the Collections icon, and go back.
+
+## 2.4.0 (50)
+
+- A tag, month or year card on the Collections tab now opens its own collection screen, with the card's cover picture and name on top and the Photos, Journal and Map tabs below, instead of jumping to the Library.
+- Photos lists that collection's pictures newest first, in the same grid as a trip, and they can be selected, shared and deleted from there.
+- Journal shows the memos of the collection: every memo carrying the tag, or every memo from that month or year.
+- Map shows the places of the collection's pictures.
+- Trip-only actions such as renaming, changing the dates or removing a picture stay off these automatic collections.
+- In a trip's Journal, two memos from the same day now have a gap between them, as the Timeline has.
+- Please open a tag card, a month card and a year card, try the three tabs on each, and open the Journal of a trip that has two memos on one day.
+
 ## 2.4.0 (49)
 
 - A memo whose pictures have all finished uploading is created right away instead of waiting for the next cold start of the app.

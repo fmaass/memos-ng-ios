@@ -17,6 +17,9 @@ import UIKit
 @MainActor
 @Suite("Trip map", .serialized, .mediaGlobals)
 struct TripMapTests {
+    /// The screen's Photos | Journal | Map, held here: the row that writes it is the main bar's,
+    /// which a screen hosted alone does not draw (MEMNG-822).
+    private let modes = CollectionModeChoice()
     private let root = FileManager.default.temporaryDirectory
         .appending(path: "trip-map").appending(path: UUID().uuidString)
     private let alice = TimelineSnapshotIdentity(
@@ -289,7 +292,7 @@ struct TripMapTests {
         return NavigationStack {
             TripView(
                 trip: record, trips: stores.0, memberStore: stores.1, identity: alice,
-                access: { access })
+                access: { access }, modes: modes)
         }
         .environment(\.placesStageProbe, probe)
         .environment(\.locale, Locale(identifier: "en_GB"))
@@ -303,7 +306,7 @@ struct TripMapTests {
         let stores = await stores(wire)
         let record = stores.2
         await CollectionsHost.with(host(stores, wire, record), height: 1400) { screen in
-            let chosen = await screen.until { TripProbe.pressAtOnce("Map", on: screen) }
+            let chosen = await screen.until { choose(.map) }
             #expect(chosen, "the Map chip took no press")
             _ = await screen.until { wire.transport.markerReads == 1 }
             #expect(wire.transport.markerReads == 1, "choosing Map read no markers")
@@ -325,14 +328,13 @@ struct TripMapTests {
         let stores = await stores(wire)
         let record = stores.2
         await CollectionsHost.with(host(stores, wire, record), height: 1400) { screen in
-            let chosen = await screen.until { TripProbe.pressAtOnce("Map", on: screen) }
+            let chosen = await screen.until { choose(.map) }
             #expect(chosen, "the Map chip took no press")
             #expect(
                 await screen.until {
                     TripProbe.identified(TripMapPresentation.mapIdentifier, in: screen.window)
                 }, "no map: \(TripProbe.labels(in: screen.window))")
-            let chip = screen.element(labelled: "Map")
-            #expect(chip?.accessibilityTraits.contains(.selected) == true)
+            #expect(modes.mode == .map)
             #expect(!screen.says(TripMapPresentation.emptyTitle))
         }
     }
@@ -343,7 +345,7 @@ extension TripMapTests {
     private func onMap(
         _ screen: PressProbe.Screen, _ probe: PlacesStageProbe, staged: [String]
     ) async -> Bool {
-        _ = await screen.until { TripProbe.pressAtOnce("Map", on: screen) }
+        _ = await screen.until { choose(.map) }
         return await screen.until { probe.staged == staged && probe.presenting != nil }
     }
 
@@ -612,5 +614,13 @@ extension TripMapTests {
             #expect(chosen, "the row chose no cover")
             #expect(wire.transport.trips.rows.first?.cover == "t1", "the server holds no cover")
         }
+    }
+}
+
+extension TripMapTests {
+    /// Chooses `mode` as the main bar's modes row does.
+    fileprivate func choose(_ mode: TripMode) -> Bool {
+        modes.choose(mode)
+        return true
     }
 }

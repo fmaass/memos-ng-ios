@@ -11,356 +11,45 @@ dependency check runs on the Mac build host through one script:
 
     MAC_GATE_HOST=merkur.local bin/mac-gate.sh
 
-Inside the pfadfinder-lane container the same gate takes the jupiter-local estate lock ITSELF —
-`MAC_GATE_ESTATE_LOCK` names the lock file that is the estate-wide exclusion for Mac gates (this
-script's own lock is per branch and serialises nothing across repos), and the run then stamps
-`lock_requested`/`lock_acquired` into its log and its row in `worktrees/gate-runs.tsv`. Never wrap
-that command in an outer `flock` on the same file as well: the gate would wait on itself forever.
-It names the build host by the ssh alias `merkur`, the only name the container's key is bound to
-(`merkur.local` does not authenticate there):
+Inside the pfadfinder-lane container the gate takes the estate lock itself (never wrap it in an
+outer `flock` on that file) and names the build host by the ssh alias `merkur`:
 
     `env MAC_GATE_ESTATE_LOCK=/home/fabian/projects/worktrees/.wp13-gate.lock MAC_GATE_HOST=merkur bin/mac-gate.sh`
 
-**The gate can pick the build host itself (MEMNG-824).** `MAC_GATE_HOST=auto` with the per-host lock
-map `MAC_GATE_ESTATE_LOCKS=merkur=/home/fabian/projects/worktrees/.wp13-gate.lock,mars=/home/fabian/projects/worktrees/.mars-gate.lock`
-(preference order, names limited to the mount guard's profiles) tries each host's lock with
-`flock -n` in map order and takes the first that is free AND answers `ssh -o BatchMode=yes -o
-ConnectTimeout=10 <host> true` under `timeout 30`. With every host busy it probes the busy ones and
-waits, blocking, on the host named by `<artifacts>/lane-host` (written by every run that reaches
-the remote step: `<host> <branch> <UTC> <run token>`; read only for this branch and under 24 h
-old), else on the first answering host in map order; a host that stops answering during that wait
-is let go and the choice is made again. No answering host, `auto` without the map, or a name the
-gate does not know refuses with exit 15 before any lock. The choice is one `route       :
-host=<h> reason=<…> worktree_wait=<s>s pid=<n> token=<t>` line in the run log, `host=<name>` sits
-on `mac-gate SUMMARY:` and `MAC_GATE_QUICK:` just before `locallint=`, and the run ledger's rows
-carry it as a 13th field (`host`; the 13-name header is written only into a new or empty ledger,
-so an older ledger keeps its 12-name header above mixed 12/13-field rows). An explicit host with
-`MAC_GATE_ESTATE_LOCK` behaves as before; an explicit host with only the map takes its own entry.
-Every run that builds or tests — explicit or `auto` — also holds the worktree's run lock,
-`<artifacts>/.run.lock` (a kernel `flock` on descriptor 7, taken after the local lint and before the
-estate lock, released only when the run's process exits), so two runs of one worktree never
-overlap on two hosts over one artifacts directory; it carries one informational `pid= token=
-host=` line and needs no reclaim. Every line that closes descriptor 9 for a child or a subshell
-closes 7 too, the router's own `exec 9>&-` lines excepted; `tests/gate/host-routing-test.sh`, a
-named selftest, holds all of it. `bin/testflight-cut.sh` does not take `auto`: keep its explicit
-host and lock.
-
-It refuses (exit 2) if the tree has no HEAD or if its remote target resolves outside
-`~/build/memos-ng-ios/gate/`, mirrors the worktree with `rsync --delete`, and runs, fail-fast:
-`bin/generate.sh` (which also asserts the version keys in the generated project) → the
-entitlement greps (the app declares EXACTLY ONE keychain access group, the credentials one,
-read by index because the first entry is the default an unqualified add lands in; the app group
-is deliberately absent from `keychain-access-groups` — a raw `group.…` entry can never match the
-profile's `TEAMID.*` pattern and breaks device signing, and the app's keychain access to it rides
-on the application-groups entitlement instead; the share extension declares no keychain group;
-both declare the app group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
-check (below) → `xcodebuild build-for-testing` on the generic simulator destination, outside the
-host slot (`bin/mac-gate.sh:1752`) → `xcodebuild test-without-building` of all five test bundles on
-this run's private device, inside the host slot (`:1765`, `:1776`; the slot is below) → a read-back
-of the BUILT app and .appex, its build settings queried on the same generic destination (each one's `PrivacyInfo.xcprivacy`, held per bundle to exactly its declared required-reason
-codes by `scripts/privacy-manifest-verdict.py`, its version keys and its export-compliance answer) →
-a rebuild of every package with its warnings fatal, each against the tracked `Package.resolved`
-copied beside its manifest and refused any version that file does not name, so a fresh upstream
-tag cannot reach this step alone (`swift build -warnings-as-errors` for the four that declare
-macOS; MemosFeatures through `xcodebuild` for the simulator, where the fatality comes from its own
-manifest) → the dependency-rule greps → the incarnation-order rule
-(`scripts/incarnation-order-rule.sh`: in `SessionStore.swift` each of `park`, `establish`,
-`failSignIn`, `persist`, `putBack` and `wipeCredential` calls `endIncarnation(` before its first
-write of `client` or `credential` — a sender off the main actor checks the incarnation, never the
-handle — with every pinned site found once and the functions writing the handle being exactly that
-set as the control) → the share-link rule
-(`scripts/sharelink-rule.sh`: the literal `ShareLink` appears in no file under
-`Packages/MemosFeatures`, with `import SwiftUI` under its sources as the control) → the
-text-selection rule (`scripts/textselection-rule.sh`: the literal `textSelection` appears in no
-file matching `Packages/MemosFeatures/Sources/MemosFeatures/Settings/ManageTokens*.swift`, so the
-Copy button — which hands over a pasteboard item that expires — is the one way a minted token's
-plaintext leaves the screen, with the exact path `…/Settings/ManageTokensScreen.swift` naming
-`copySecret` as the control; memo text keeps its selection, it is not a credential) → the
-token-screen button rule (`scripts/managetokens-buttonstyle-rule.sh`: the word-bounded literal
-`Button` appears nowhere in `…/Settings/ManageTokensScreen.swift`, because a card there is one
-List row and a default-styled control in it is pressed by a tap anywhere in that row, with
-`CardButton(` at least six times outside any comment in the same file as the control and one uncommented
-`.buttonStyle(.borderless)` line in `Design/CardButton.swift` as a hint that is not a fence) → the
-picture-list forwarding rule (`scripts/picturelist-forwarding-rule.sh`: in each of `TimelineView.swift`
-and `MemoDetailView.swift` the literal `listing: submission.pictures` appears on exactly one
-uncommented line — neither save call site can be reached from a test, both being private functions
-behind a sheet that never presents — with the `attaching:` forwarding beside it as the control) → the
-main-bar freeze rule (`scripts/mainbar-freeze-rule.sh`, the executable half of ADR-0008: outside
-comments `LeadingMainBar(` is constructed on exactly one line of the Features sources and that line
-is in `Dock.swift`, no line ends in the bare name (a construction split across lines), `Dock.swift`
-hides the system tab bar and pins its minimise behaviour to `.never`, every line naming `.tabBar`
-also says `.hidden` (so a modifier split across lines cannot show it), `tabViewBottomAccessory`, `role: .search` and `BarStyle` appear nowhere and
-`placement: .bottomBar` not in `MediaLibraryView.swift`, `LeadingMainBar.swift` keeps the whole
-declaration lines of `leadingInset` 21, `height` 62 and the `pillTravel` spring (response 0.35,
-damping ratio 0.7), and the one-bar, edge-fade, leading 6 and 7, bubble 1–3 and fold-film render
-tests and DockModeTests' fold table keep their exact `@Test("…")` lines — so a rename, a deletion
-or a trait such as `.disabled` fails it — while neither test file carries a `.disabled` or
-`.enabled(if:` trait anywhere and the `@Suite` line the render tests' extension belongs to, in
-`MediaImageLoaderTests.swift`, is pinned whole, with the type declared once in `LeadingMainBar.swift`, at
-least two `safeAreaBar(edge: .bottom)` lines and each test file's `@Test(` count as the controls;
-its own test, `tests/gate/mainbar-freeze-rule-test.sh`, is a selftest every run names) → the
-generated-surface rule (`scripts/openapi-coverage-rule.sh`: every operationId in the vendored
-document is either named in the generator config's inclusion list or is one of the named
-exclusions, with the operation count it read as the control) → the release-notes rule
-(`scripts/release-notes-rule.sh`, step `notes`: the first `MARKETING_VERSION` and
-`CURRENT_PROJECT_VERSION` key lines of `project.yml` head exactly one `## <version> (<build>)`
-section, outside code fences, of `Packages/MemosFeatures/Sources/MemosFeatures/Resources/ReleaseNotes.md`
-— the one file the TestFlight cut sends and the What's new screen shows — with the count of
-sections read as the control; its selftest `tests/gate/release-notes-rule-test.sh` is one every run
-names) → the
-per-bundle test-count check, which asks two questions: whether every bundle EXECUTED at least one
-case, and whether each bundle's executed count is still at or above the row
-`tests/gate/testcount-baseline.tsv` records for it (`bundle<TAB>count`, one row per bundle, no
-header; the arithmetic is `scripts/testcount-verdict.sh`). A count below its row fails the step
-naming the bundle, the baseline and the observed count. Equal or above passes, and a rise never
-asks for the baseline to be touched. The baseline must name exactly the bundles the run wanted,
-neither short of one nor naming one more, so a run whose bundle list differs from the tracked
-baseline fails at testcount, and that is intended: the full gate's verdict is only valid over the
-default bundle list, and adding or removing a bundle re-records the baseline in the same change. A
-baseline that is absent, unreadable or malformed fails too — a count nobody recorded is not a zero.
-What the comparison catches is the loss of a test that RAN: it does not catch the deletion of a
-test that was skipped, nor a reduction that stays inside headroom accumulated since the baseline
-was last recorded — and because the baseline is re-recorded from a branch's final tree before it
-merges, headroom at a merge is zero. Every run that obtained the counts writes them to
-`.gate-artifacts/testcount-baseline.tsv` before any of them is judged, so a deliberate reduction is
-recorded with `cp .gate-artifacts/testcount-baseline.tsv tests/gate/testcount-baseline.tsv` and
-never by hand. A candidate at that path was put there by the run you are reading — pass or fail —
-through its validated copyback and nothing else: the run's first act, before it reads its
-arguments or refuses anything, removes any candidate at that path — with one exception: a run the
-local lint refused never took the estate lock that serialises that removal against a run of the
-same worktree still promoting its own, so it leaves any earlier candidate in place, which is why a
-candidate beside a `locallint=1` run is never that run's; the copyback first discards
-every staging folder present, which at that point can only be one an earlier run abandoned,
-because the lane lock serialises runs of a branch (a shared explicit `MAC_GATE_ARTIFACTS` across
-branches is outside that promise), and then lands in `.gate-artifacts/incoming-<run token>/`, never
-at that path; and
-`scripts/testcount-candidate-owner.sh` promotes the candidate only when it came back beside this
-run's token in `run-token`, the stamp the build host writes on the same chain that clears its
-artifacts folder. So a run that never obtained counts — no result bundle, a failing `xcresulttool`,
-JSON it cannot parse or walk — exits non-zero and leaves no candidate, and neither does a step that
-an earlier failing step skipped, nor a run interrupted before the promotion. A run that refused
-before it began names, in its refusal, any file it could not clear. The documented path is
-`<repo root>/.gate-artifacts/testcount-baseline.tsv` or `$MAC_GATE_ARTIFACTS/testcount-baseline.tsv`;
-a run that can resolve neither has no such path and clears none — it cannot identify its
-destination, which says nothing about a candidate elsewhere on disk.
-Changing that tracked file is a reviewed act that an audit of the change has to see and justify — a
-reduction is named in the change that makes it, with the tests it retired — and no mechanism in the
-gate accepts or rejects a baseline change on its own. It ends with one summary line of every step's exit code and
-returns the first non-zero one. The `.xcresult` and any screenshots come back to
-`MAC_GATE_ARTIFACTS` (default `.gate-artifacts/`, gitignored).
-
-Three steps run before any of that, on the machine you are working from. The first is the local
-lint (`scripts/local-lint.sh`, MEMNG-807): the same `swift format lint --strict --recursive .` over
-the caller's repository root, in the bootstrap, before the estate lock is even requested and so
-before the lane lock — a formatting error used to wait out the whole queue only to fail the build
-host's first step. It takes a native `swift format` on PATH first, then the docker image
-`swift:6.3` when it is already on the machine (`docker run --rm --pull never --network none -v
-<tree>:/src:ro`, never pulled); every one of its calls, the version probes included, is bounded by
-`timeout -k 10`, which sends KILL ten seconds after a TERM that was ignored; either must report
-the build host's major, and neither is ever asked to rewrite. A failure refuses the run there with
-the lint's own exit code, 1: no estate lock taken, no ssh, no test-count candidate cleared, the
-lint's lines and its verdict in the run log, `locallint=1` on the summary (or the quick line) and
-`mode=refused` in the run ledger. No such tool — the pfadfinder-lane
-container has neither — falls through to the build host's lint alone and says why in the log, as
-does a tool that ended without a verdict (any code but 0 or 1); the field is then `locallint=-`.
-Both lines carry `locallint=` just before `| exit=`; the quick line's `lint=` is still the build
-host's. A run's output is what it was plus the bootstrap's start notice (`mac-gate: linting …
-before the estate lock is requested`), the `--- step: locallint ---` heading with the lint's
-lines, its verdict and status lines, and the build host's version line. It runs on the docs-only
-fast path too (a clean tree lints in about a minute), and never
-on `--help`, `--classify-only` or a run without `MAC_GATE_HOST`. Its verdict line,
-`MAC_GATE_LOCALLINT rc=… local=… version=… mac=…`, names the local swift-format and the build
-host's as pinned in the script (6.3.0, read 2026-10-13); the build host's own lint step prints
-`MAC_GATE_SWIFTFORMAT version=…`, so one run log holds both for comparison. An implementer that
-cannot build can still lint, with the docker form from the worktree root — `docker run --rm -v
-"$PWD":/src:ro -w /src swift:6.3 swift format lint --strict --recursive .` — so no review round
-reaches the Mac with a formatting error. Its selftests are `tests/gate/local-lint-test.sh` (the
-helper against fake tools, and the real image where it is present) and
-`tests/gate/local-lint-refusal-path-test.sh` (the refusal before the estate lock, while another
-process holds it); both are named selftests. The second step is the classifier test
-(`tests/gate/fastpath-classify-test.sh`), which checks the gate's own docs-only classifier against
-throwaway repositories it builds itself — it is the gate's integrity check and runs on every gate.
-Then the change set is classified: what this branch changed against `origin/main` (merge-base,
-renames not followed, so a rename is judged by both of its names) plus everything staged, edited or
-untracked in the working tree. When every one of those paths is documentation or repository
-metadata — `docs/`, any `.md`, `.gitignore`, `.gitattributes`, `.editorconfig`, `CODEOWNERS`,
-`LICENSE` — and none of them is a symbolic link, the gate reports `PASS (fast path: docs-only)`,
-names every changed path and the base it measured from, and copies nothing to the build host.
-Anything else meets the full gate: `project.yml`, every manifest, xcconfig, entitlement and plist,
-every source file, this script and its own tests. A package's bundled resource
-(`Packages/*/Sources/*/Resources/*`) is never docs-only, whatever its extension, so a change to the
-release notes alone meets the full gate and its `notes` step. The release-version check runs on both paths, so
-a version bump can never take the fast path. Every run writes what it classified to
+Docs-only change sets take a fast path; every run writes what it classified to
 `.gate-artifacts/classification.txt`, fast path or not. `bin/mac-gate.sh --classify-only` prints
 that classification and stops, without needing a build host.
 
 Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-gate.sh --quick
-[--bundle <name>|--only-testing <id>]` runs the selftests, the release-version check, the
-classification, the same lane lock and run admission, then rsyncs and — reusing the lane's
-DerivedData — lints, generates, compiles for testing on the generic destination and runs the named
-bundle or suite on a private device of its own inside the host slot (`bin/mac-gate.sh:2380`, `:2394`) (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
-pins and the entitlement, dependency-rule, share-link, text-selection and token-screen button
-greps and the generated-surface rule. The
-lint is the same `swift format lint --strict --recursive .` the full gate runs, it comes first, and
-a lint error stops the run there: generate, build and tests are not invoked and the exit is the
-lint's own code. `--iterations <N>` (1 to 1000, refused without `--only-testing`) repeats that one
-scope with `-test-iterations N -run-tests-until-failure`, fails when any run fails or the result
-bundle shows a case run fewer than N times, and adds `iterations=N` to the quick line. It prints its own
-`MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> locallint=<rc|-> | exit=<rc>` and is never a verdict, because only
-the full gate writes `mac-gate SUMMARY`.
-
-Each branch has its own lane on the build host — `~/build/memos-ng-ios/gate/<branch>` for the
-mirror and `~/build/memos-ng-ios/work/<branch>` for its DerivedData — and runs of one branch are
-serialised by a lock on that lane: a second live run says who holds it and stops (exit 3). The
-tree's retention policy is two lock-aware sweeps that a full run reaches, each subject to its own
-preconditions (the docs-only fast path reaches neither). Before anything is copied, and only after a successful pruned fetch with
-the standard refspec, unlocked lanes older than 24 hours whose branch exists neither locally nor
-on origin are reaped, the current lane always protected, with each reaped lane's size and the
-data volume's free space logged before and after. After the mirror is in place, when the root
-volume has less than 15G free, unlocked sibling trees go oldest-stamped first — gate lanes, then
-work lanes — until 20G is free or nothing unlocked remains, each removed path and the free space
-afterwards logged. The reaper and the shared lock predicate live in `scripts/reap-gate-lanes.sh`
-and are exercised by `tests/gate/reap-lanes-test.sh`; the pressure sweep is `gate_pressure_sweep` in
-the same file (`scripts/reap-gate-lanes.sh:37`), called by the build host's script
-(`bin/mac-gate.sh:1237`) and by the admission's disk reading (`:1112`), its thresholds not under test. So a lane is eligible once its branch
-is absent from both inventories, it is unlocked, and both of its directories are older than 24
-hours by their modification time — an already-old lane qualifies the moment its branch goes —
-and it disappears on the next full run whose fetch was accepted: an opportunity, not a deadline. A full
-run whose build-host steps failed and that reaches its remote summary also tries to remove its own
-`warnings/` rebuild trees there, never through a path that is not its own physical path (a run
-interrupted on the way does not), keeping its DerivedData (`gate_drop_failed_rebuilds`, same file and test); a run that
-passed keeps them for the next incremental build.
-
-**One simulator phase at a time on the build host, admitted by condition.** Before anything is
-copied, run admission (`bin/mac-gate.sh:1129`, `scripts/gate-admission.sh:636`) requires the host's
-free space plus this lane's own trees to cover a run's peak (12 GiB) and a 3 GiB reserve, polling
-every 60 s up to a 6 h ceiling; it refuses with exit 12 at the ceiling and 13 after three
-consecutive polls it could not measure. The 12 GiB is a provisional allowance rounded up from a measurement:
-one cold-lane full gate on 2026-09-27 (`MAC_GATE_HOST=merkur.local bin/mac-gate.sh` at 6d6bf81),
-sampled every ~16 s with `df -Pk /` and `du -sk` of the lane's trees and its simulator device —
-9.4G the largest sampled sum, 11.2G the recorded bound, though the record's own parts do not add
-up to them and its raw samples were not kept (the detail is the comment above
-`GATE_ADMISSION_NEED_KB` in `bin/mac-gate.sh`). The old load gate is gone, and with it the «proceeding
-anyway» after its wait: an unmeasured reading is a refusal, never an admission. The simulator span
-is the host-wide slot `~/build/.gate-slots/sim`, shared by every repo's gate: a run claims it by
-rename(2) (`scripts/gate-admission.sh:378`) just before it creates its device and releases it just
-after that device's deletion is confirmed (`bin/mac-gate.sh:1288`, `:1438`, `:1447`). The wait
-(`scripts/gate-admission.sh:511`) holds until the slot is free AND free space ≥ 8 GiB, memory free
-≥ 20 %, load ≤ 24 and no booted device named `gate-*`, `mac-gate-iphone-*` or `mac-gate-ipad-*`
-other than the holder's; each wait logs who holds the slot and which term failed, and the ceiling
-refuses with exit 11 (12 when free space is the only failing term). Swap in use is on every wait
-line (`swap_used=`) and is never a term: the host idles at about 6 GiB of swap held by long-lived
-desktop applications, so a swap bound would hold every run to its ceiling. A
-holder is recovered only when its pid is gone, no process of its process group lives, and its
-devices are confirmed deleted under the reap mutex, the holder's token re-checked twice
-(`:248`, `:464`); a live holder is never taken, and one whose pid is gone but whose group lives is
-logged `ORPHAN-HOLDER` and waited for. The run's own release comes before the build host's summary,
-checked (`scripts/gate-admission.sh:433`); the EXIT, INT, TERM and HUP traps repeat it
-(`bin/mac-gate.sh:1277-1280`) and a PIPE trap moves output to a file so a dropped ssh still ends
-in that release (`:1283`). Its handler writes one line into that file at once
-(`scripts/gate-admission.sh:679`): bash 3.2 keeps a failed write's bytes buffered, and every later
-`$(…)` would carry them into its value — the release then misread its own token and kept the slot
-(2026-09-30). A run whose ssh went away before it claimed the slot stops waiting with `slot=14`
-(`:526`), rather than testing, hours later, for a controller that is gone. Two residuals are stated, not
-closed: it detects a broken output connection, not a dead controller, so an orphaned ssh client
-that keeps draining output is not caught; and a drop is noticed only at the remote's next write,
-so a waiter can claim the slot before its first failed write (the `slot-claimed` line, `:405`).
-Neither can make two holders or release live work. A release that cannot confirm the run's processes and devices gone keeps
-the slot, marked `state=cleanup-failed`, and reports `simrelease=1`; the next waiter's recovery
-retries it. Two states need a human, and the log line names the step: `REAP-DEAD`
-(`scripts/gate-admission.sh:476`) — a recoverer died holding the reap mutex, so recovery stays
-blocked until its pid is confirmed gone and `ssh merkur rm -rf ~/build/.gate-slots/reap` clears it;
-`DEVICE-STUCK` (`:299`, `:317`) — three deletes could not remove the run's device (or a shared one
-will not shut down), the slot stays fenced, and once nothing of that run is alive the one udid the
-line names is deleted with `xcrun simctl delete <udid>` — never a fleet-wide `simctl` operation.
-Every slot event is a `GATE_SLOT <utc> token=<run token>` line on the build host — `slot-claimed`,
-`device-created udid=…`, `device-deletion-confirmed udid=…`, `slot-released`. `MAC_GATE_SIMULATOR`
-names an existing shared device instead: the run claims the slot all the same, creates and deletes
-nothing, and its release shuts that device down and confirms it (`bin/mac-gate.sh:1288-1306`). The
-claim writes that device's UDID into the record it renames into place, and a claim without a valid
-one is never attempted (`scripts/gate-admission.sh:378`); a shared record that names no device is
-fenced by cleanup and recovery alike, never released (`:322`). Devices are read from `simctl list
-devices -j`, unavailable runtimes included, and any record without a UDID, a state or a name makes
-the whole reading unmeasured, never «none left» (`:170`); the run admission's disk reading on the
-build host goes through the same checked readers, since no pipefail reaches `ssh bash -s` (`:130`).
-The summary line carries `admit=`, `slot=` and `simrelease=` as exit codes (`bin/mac-gate.sh:1131`,
-`:2543-2544`), and `slot_wait=` (seconds waited) and `disk=` (GiB free at admission) as
-information (`:1132`, `:2547`); `slot=-` means the build host's script never reported its slot. The
-helper is vendored byte-identical by the other iOS repos: `scripts/GATE_ADMISSION_SOURCE` records
-the reference commit and its sha256, and `tests/gate/admission-test.sh`, one of the selftests every
-run needs (`bin/mac-gate.sh:689`), checks that sha and every case above against fake readers.
-
-**The build root must be the build host's own image (MEMNG-602).** A full or quick run's first contact
-with the build host is the `--- step: mount ---`, after the classification and before the
-preflight's first write: it pipes `scripts/gate-mount-guard.sh` from the run's private copy (it is
-one of `GATE_RUN_HELPERS`) to `ssh bash -s` and asks `gate_mount_guard report memos-ng-ios/gate
-memos-ng-ios/work`, under `timeout 30`. The guard first picks its profile by a PAIR read on the host — its
-`LocalHostName` (`scutil --get LocalHostName`, lower-cased) and its hardware `IOPlatformUUID` (`ioreg`,
-read once and reused for the marker check) — and each profile is a block of literals naming both
-halves of its pair: `merkur` on `ABED54FD-4031-53B1-9951-E8FF4DE51F69` — volume UUID
-`EE4304C8-021C-489D-B57B-6D846E76B1CF`, bundle `/Volumes/lexosaurus/caches/merkur_build.sparsebundle`,
-sentinel `.NOT-MOUNTED-merkur_build`, agent `live.discomarder.merkur-build-image`; `mars` on
-`639B86D9-17FA-5EBE-8A66-530B948476BE` — volume UUID `4FBC8F45-0C6B-45C4-AF86-411A2B7B2789`, bundle
-`/Volumes/flexosaurus/caches/mars_build.sparsebundle`, sentinel `.NOT-MOUNTED-mars_build`, agent
-`live.discomarder.mars-build-image`; both rooted at `/Users/fabian/build`. Any mismatch — an unknown name, a
-known name on the other host's or unknown hardware (a host renamed to the other's name), either
-read failing, timing out, empty or malformed — is `MOUNT REFUSE no mount profile for host <name>
-(<hardware UUID or unmeasured: …>)` with `mountguard=enforced marker=not-read`, rc 16, in either
-mode: no marker is read and no pending state is ever reported for a host without a profile, so a
-renamed host fails closed and never selects the other's. A third host needs a code change. The verdict line names the host it chose (`MOUNT OK host=<host> uuid=… dev=…`,
-`MOUNT REFUSE host=<host> …`). The guard then reads the volume at `~/build` — the recorded
-UUID, apfs, mounted exactly there with ownership, attached from the one sparse bundle, a mount
-boundary below `$HOME`, the unmounted directory's sentinel hidden — and this repo's two subtrees on
-it, read-only. Its refusal is `mount=16` and the run ends there with exit 16 (`mode=refused` in the
-run ledger): nothing was written on the host, no lock taken, no slot claimed, no device created,
-and no further ssh is made — a signal during the step's ssh included, because the device give-back
-stays off until the step has accepted the answer. The whole answer is judged: exit 0 and exactly two
-lines, `MOUNT OK|REFUSE …` then `mountguard=<state> marker=<one of the guard's marker states>`,
-agreeing, with a `pending:` state only beside `marker=valid`; anything else — a missing helper, a
-failed or timed-out ssh, an extra line, stderr noise — is a refusal too, its answer quoted in the log.
-While a valid pending marker `~/.config/build-mount-guard/pending` on the host (this host's
-`IOPlatformUUID`, a window of at most 72 h, `now < expires`) exists, a refusal is reported instead:
-`mount=0` with `mountguard=pending:REFUSE` on the summary; otherwise the summary carries
-`mountguard=enforced` (or `pending:OK`). Renewing the marker needs the orchestrator's approval and a
-second renewal the owner's. After the image comes unmounted, recovery is manual: `launchctl
-kickstart -k gui/501/<the host's agent label>`, which the refusal line names. No environment
-variable moves the root, the UUID, the bundle path or the label on either host — only the readers,
-`scutil` included, are replaceable, for the tests. One LaunchAgent program,
-`scripts/merkur/build-image-mount.sh`, serves both hosts through the same profile (the bundle's
-volume and its log derived from it), each host's agent defined by
-`scripts/<host>/live.discomarder.<host>-build-image.plist` and held by
-`tests/gate/build-image-mount-test.sh`. The remote free-space line after
-the sweep reads the target's volume, never `/`. `tests/gate/mount-guard-test.sh` holds the guard and
-`tests/gate/mount-refusal-path-test.sh` the gate's refusal path; both are named selftests.
+[--bundle <name>|--only-testing <id>]`; its `MAC_GATE_QUICK:` line is never a verdict, because
+only the full gate writes `mac-gate SUMMARY`.
 
 A task is not done until that summary line reads `| exit=0`. Never cite a piped or filtered
 summary — the exit code is the verdict.
-
-The gate keeps its own complete log of every run at
-`MAC_GATE_ARTIFACTS/mac-gate-<branch>-<run token>.log` and names that path two lines before its
-verdict, so two runs — two branches, or two runs of the same branch — can never write the same
-file. The line between them is `script      : sha256 <hex>`, the text of `bin/mac-gate.sh` the run
-executed: a run copies the script, and the helpers it hands to the build host or runs at the end
-(`scripts/reap-gate-lanes.sh`, `gate-work-dir.sh`, `gate-root-refusal.sh`,
-`testcount-candidate-owner.sh`, taken from the caller's repository), into a private directory under
-`$TMPDIR` at start and execs the copy, so an edit to the tree while a run is under way cannot change
-what it runs (`tests/gate/private-copy-test.sh` edits the script and a helper mid-run). The
-selftests under `tests/gate/` and the tree mirrored to the build host are still read from the tree. Any redirect of a gate's output by a caller uses a path unique to the branch and the run
-too, never a generic name in a shared directory: that is how one run's evidence gets truncated
-mid-write by another's (`tests/gate/concurrent-log-test.sh` holds the gate to its half of it).
-A worktree's `.gate-artifacts/` goes with the worktree at merge-closeout, so the run's row in the
-estate ledger (`MAC_GATE_RUNS_LEDGER`, default `/home/fabian/projects/worktrees/gate-runs.tsv`)
-names a durable copy instead: on its way out, after everything else it writes, the run copies its
-complete log, byte for byte, to `MAC_GATE_RUNS_LOGS` (default `gate-logs/` beside the ledger) as
-`memos-ng-ios-<branch>-<run token>.log`, fast path included. A copy that cannot be made keeps the
-row on the local log behind one `LEDGER-LOG-KEPT-LOCAL <why>` line and never changes the run's exit
-code (`tests/gate/estate-ledger-test.sh`, case 22).
 
 **Git is the only medium between the two machines.** The gate directory is a mirror, never a
 checkout, and it is never opened in Xcode. A hands-on clone on the Mac lives at
 `~/projects/memos-ng-ios`, is never an rsync target, and nothing writes there. The lane's TestFlight
 cut (`bin/testflight-cut.sh`) pushes commits to `~/build/memos-ng-ios/release/repo.git` (create-only
 `refs/cuts/*`) and builds in `release/work` — the only other write path to the Mac.
+
+Everything else about the gate is read on demand: before running, changing or diagnosing it, read
+the file that governs the topic. Each holds its lines moved verbatim from this section.
+
+- `docs/gate/host-routing.md` — the container's estate lock, `MAC_GATE_HOST=auto` host pick and
+  the per-worktree run lock (MEMNG-824).
+- `docs/gate/pipeline.md` — the full gate's fail-fast step chain and every `scripts/*-rule.sh` it runs.
+- `docs/gate/testcount-baseline.md` — the per-bundle test-count check, its baseline and candidate
+  copyback, the summary line and the returned artifacts.
+- `docs/gate/preflight-and-fastpath.md` — the local lint before the estate lock (MEMNG-807), the
+  classifier selftest and the docs-only fast path.
+- `docs/gate/quick-mode-and-mutants.md` — `--quick`, `--iterations` and the `--mutants` realness
+  loop (MEMNG-825) with its fence.
+- `docs/gate/lane-retention.md` — per-branch lanes, the lane lock (exit 3) and the reap and pressure sweeps.
+- `docs/gate/run-admission.md` — disk admission, the host-wide simulator slot, its recovery states
+  and the vendored admission helper.
+- `docs/gate/mount-guard.md` — the build-root mount guard (MEMNG-602): host profiles, pending marker, recovery.
+- `docs/gate/run-logs.md` — per-run logs, the private script copy and the estate ledger's durable log copies.
 
 ## The dependency rule
 

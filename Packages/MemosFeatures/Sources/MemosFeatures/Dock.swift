@@ -45,8 +45,53 @@ final class AppDock {
     /// How many times each tab was pressed while it was already the one on screen (MEMNG-781):
     /// what a tab's root watches to go back to its root. Observed, so a root sees each press.
     private(set) var reselections: [MainTab: Int] = [:]
+    /// The Collections stack's routes, bottom to top, each with the modes its screen attached
+    /// (MEMNG-822). Its order is the stack's path as `collectionTrail(_:)` last told it, never an
+    /// appearance: a sheet, a tab switch or a late disappearance leaves the path as it was, and
+    /// so the row.
+    private(set) var modesStack: [CollectionModesEntry] = []
+    /// Modes a screen attached before the path holding its route was told: the next path places
+    /// them, or drops them when it does not hold the route. Not observed: nothing is drawn from it.
+    @ObservationIgnored private var unplaced: [AnyHashable: CollectionModeChoice] = [:]
 
     init() {}
+
+    /// The modes of the collection on top of the Collections stack: nil at the root, and before
+    /// that collection's screen attached them.
+    var collectionModes: CollectionModeChoice? { modesStack.last?.choice }
+
+    /// The Collections stack's path as it stands (MEMNG-822): the order of `modesStack`, each
+    /// route keeping the modes it holds. A change of the route on top — a push, a pop, the last
+    /// pop to the root — gives the tabs back (`DockEvent.collectionStackChanged`), as the Library
+    /// opens on them; a path whose top is the same, a route below it gone or the same path told
+    /// again, keeps what stands.
+    func collectionTrail(_ routes: [AnyHashable]) {
+        let top = modesStack.last?.route
+        var kept = modesStack
+        modesStack = routes.map { route in
+            if let index = kept.firstIndex(where: { $0.route == route }) {
+                return kept.remove(at: index)
+            }
+            return CollectionModesEntry(route: route, choice: unplaced[route])
+        }
+        unplaced = [:]
+        guard modesStack.last?.route != top else { return }
+        // Before any tab is known there is no fold of Collections' to reset.
+        if let showing { send(.collectionStackChanged(showing: showing)) }
+    }
+
+    /// `route`'s screen hands the dock its modes, for the row the bar draws while that route is on
+    /// top. Nothing when the route already holds modes; never undone by the screen, because a
+    /// route leaves only with the path (`collectionTrail(_:)`).
+    func attachModes(_ choice: CollectionModeChoice, to route: AnyHashable) {
+        guard let index = modesStack.lastIndex(where: { $0.route == route }) else {
+            // The screen can appear before the path that pushed it is told.
+            unplaced[route] = choice
+            return
+        }
+        guard modesStack[index].choice == nil else { return }
+        modesStack[index].choice = choice
+    }
 
     var isTakenOver: Bool { !claims.isEmpty }
 
@@ -80,17 +125,29 @@ final class AppDock {
 
     func send(_ event: DockEvent) {
         let shown = showing
+        var row = false
         switch event {
         // A press moves the selection to the tab pressed, the tab showing pressed again included.
         case .pressedTab(let tab, let from):
             showing = tab
-            if tab == from { reselections[tab, default: 0] += 1 }
+            if tab == .collections, from == .collections, !modesStack.isEmpty {
+                // Over a collection the re-tap brings its modes row and pops nothing, as the
+                // Library pressed where it shows brings its scope row: the root is reached by
+                // Back (MEMNG-822, which amends MEMNG-781's re-tap; MEMNG-845). Keyed on the
+                // route on top, so a re-tap before its screen attached its modes pops nothing
+                // either, and draws no row it has not got.
+                row = collectionModes != nil
+            } else if tab == from {
+                reselections[tab, default: 0] += 1
+            }
         case .selected(let tab):
             showing = tab
-        case .pressedLibraryIcon, .scrolled, .scrolledTab:
+        case .pressedLibraryIcon, .pressedCollectionsIcon, .scrolled, .scrolledTab,
+            .collectionStackChanged:
             break
         }
-        let next = mode.after(event)
+        // Over a collection the dock's fold IS its modes row (`MainTabs.leadingShape`).
+        let next = row ? DockMode.folded : mode.after(event)
         if next != mode || showing != shown { swappedAt = .now }
         if next != mode { mode = next }
     }
@@ -147,6 +204,13 @@ final class AppDock {
         scrolled(to: y, by: kind)
     }
 
+    /// Whether `owner` is the collection on top of Collections, showing the mode it was drawn in.
+    /// A reading that names no owner is nobody's.
+    func owns(_ owner: CollectionFeedOwner?) -> Bool {
+        guard let owner, let top = modesStack.last else { return false }
+        return top.route == owner.route && top.choice?.mode == owner.mode
+    }
+
     /// One reading of `tab`'s own scroll view — the Timeline's — committed by that scroll view's
     /// `fold` (`DockFold`): the leading bar's fold and unfold (MEMNG-690). The dock hears a
     /// decision only where it changes what stands, so a run of readings that commits the fold
@@ -154,12 +218,35 @@ final class AppDock {
     /// Library's jumps, landings and settling are the Library's alone, so none of them is asked.
     func scrolledTab(
         _ tab: MainTab,
+        owner: CollectionFeedOwner? = nil,
         from previous: DockScrollReading,
         to now: DockScrollReading,
         committing fold: inout DockFold,
         moving: Bool
     ) {
         guard !isTakenOver, let showing, tab == showing else { return }
+        // A Collections reading counts only from the collection on top, in the mode it shows:
+        // an outgoing scroll view's last readings would otherwise fold the Map, or undo the
+        // unfold a push or Back gave (MEMNG-822).
+        if tab == .collections {
+            guard owns(owner), moving else { return }
+            // A collection's modes row comes and goes on the Library's scope rule, not on the
+            // Timeline's runs (MEMNG-845, `DockMode.after(.scrolled)`): past the threshold the
+            // row, a scroll back to the top the tabs, between the two nothing. A reading counts
+            // only while the scroll view moves, the Library's "a scroll alone" for a feed that
+            // has no landing to tell apart.
+            let row: Bool
+            if now.y > DockMode.scopeThreshold {
+                row = true
+            } else if now.y <= 0 {
+                row = false
+            } else {
+                return
+            }
+            guard row != mode.folds(on: tab) else { return }
+            send(.scrolledTab(tab, folds: row, showing: showing))
+            return
+        }
         // The travel is the content offset's own, not `y`'s: the Timeline's large title folding
         // into the inline bar mid-drag takes its 52 pt off the top inset, `y` (offset + inset)
         // falls by it while the content goes on down, and read as travel that is a run back up —
@@ -284,6 +371,59 @@ struct LibraryScopePicker: View {
     static let identifier = "library-scope"
 }
 
+/// One route of the Collections stack and the modes its screen attached, nil until it has.
+struct CollectionModesEntry {
+    let route: AnyHashable
+    var choice: CollectionModeChoice?
+}
+
+/// The collection screen, and the mode it was drawn in, that a Collections scroll reading came
+/// from (MEMNG-822). A Photos or Journal scroll view whose screen is going — another mode chosen,
+/// a collection pushed over it, Back — goes on reporting until SwiftUI removes it, so the dock
+/// judges each reading against the identity that issued it, never against the screen on top.
+struct CollectionFeedOwner {
+    let route: AnyHashable
+    let mode: TripMode
+}
+
+/// Photos | Journal | Map of one collection's screen (MEMNG-822). The screen keeps it and reads
+/// it; the modes row the main bar draws while that screen's route is on top writes it.
+@MainActor
+@Observable
+final class CollectionModeChoice {
+    private(set) var mode: TripMode = .photos
+
+    init() {}
+
+    func choose(_ chosen: TripMode) {
+        mode = chosen
+    }
+}
+
+/// Photos | Journal | Map as the system's segmented control in the modes row (MEMNG-822), at the
+/// Library scope control's width, so the row stands as wide as the scope row does.
+struct CollectionModePicker: View {
+    let choice: CollectionModeChoice
+
+    var body: some View {
+        Picker(
+            "Collection view",
+            selection: Binding(get: { choice.mode }, set: { choice.choose($0) })
+        ) {
+            ForEach(TripMode.allCases, id: \.self) { mode in
+                Text(mode.title).tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .frame(width: LibraryScopePicker.width)
+        .accessibilityIdentifier(Self.identifier)
+    }
+
+    /// What the control is found by, in a test and by VoiceOver's rotor alike.
+    static let identifier = "collection-modes"
+}
+
 /// The four tabs, each with its own navigation stack and scroll position (MEMNG-666). The bar is
 /// the app's own (`LeadingMainBar`, MEMNG-690): one Liquid Glass capsule at the leading edge that
 /// narrows to the selected tab's icon on the Timeline's scroll and morphs into the Library's scope
@@ -327,7 +467,9 @@ struct MainTabs<Screen: View>: View {
                 // came before that (MEMNG-690 phase 3, quick run 4).
                 press: { Self.pressing(selection: $selection, dock: dock).wrappedValue = $0 },
                 pressLibraryIcon: { dock.send(.pressedLibraryIcon) },
-                scope: scope
+                pressCollectionsIcon: { dock.send(.pressedCollectionsIcon) },
+                scope: scope,
+                modes: dock.collectionModes
             )
         }
         .environment(dock)
@@ -346,7 +488,15 @@ struct MainTabs<Screen: View>: View {
     /// stands, and nothing under a claim — select mode's toolbar is the Library's own.
     static func leadingShape(_ dock: AppDock, on tab: MainTab) -> LeadingMainBar.BarShape? {
         switch dock.bar(on: tab) {
-        case .tabs: return dock.mode.folds(on: tab) ? .folded : .tabs
+        case .tabs:
+            // Over a collection the fold is its modes row, never the one icon: the row stands
+            // as the Library's scope row does — the tabs at the top, the row once it scrolls,
+            // the tabs again at the top or on the row's icon (MEMNG-845). The Map, which has no
+            // scroll feed, keeps whichever stood when it was chosen.
+            if tab == .collections, !dock.modesStack.isEmpty {
+                return dock.mode.folds(on: tab) && dock.collectionModes != nil ? .modes : .tabs
+            }
+            return dock.mode.folds(on: tab) ? .folded : .tabs
         case .scope: return .scope
         case .select, .none: return nil
         }
@@ -425,8 +575,12 @@ extension View {
     /// Tells the dock each time the scroll view inside this view is scrolled: how far it then
     /// stands from the top of its content, 0 at rest, negative while rubber-banding. The Library's
     /// scroll views feed it, and the Timeline's list (`tab`), whose scrolls fold the leading bar.
-    func feedsDock(_ dock: AppDock?, on tab: MainTab = .library) -> some View {
-        modifier(DockFeed(dock: dock, tab: tab))
+    /// A collection screen's feed names its `owner`, without which a Collections reading counts
+    /// for nothing.
+    func feedsDock(
+        _ dock: AppDock?, on tab: MainTab = .library, owner: CollectionFeedOwner? = nil
+    ) -> some View {
+        modifier(DockFeed(dock: dock, tab: tab, owner: owner))
     }
 }
 
@@ -439,6 +593,8 @@ private struct DockFeed: ViewModifier {
     let dock: AppDock?
     /// The tab whose scroll view this is: the Library's three, or the Timeline's list.
     let tab: MainTab
+    /// The collection screen and mode this scroll view was drawn for, on Collections.
+    let owner: CollectionFeedOwner?
     /// Per scroll view: each of the Library's three has its own layout to settle. A reference
     /// rather than observed state, for the reason `LibraryGrid`'s `onScreen` is one: it is asked
     /// on every reading, and nothing is drawn from it.
@@ -469,7 +625,8 @@ private struct DockFeed: ViewModifier {
                     from: previous, to: now, judgedBy: &fence.judge, moving: fence.moving)
             } else {
                 dock?.scrolledTab(
-                    tab, from: previous, to: now, committing: &fence.fold, moving: fence.moving)
+                    tab, owner: owner, from: previous, to: now, committing: &fence.fold,
+                    moving: fence.moving)
             }
         }
         .onScrollPhaseChange { old, phase in

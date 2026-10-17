@@ -42,8 +42,8 @@ extension CollectionRoute: @MainActor StackRoute {
 }
 
 /// A trip, in Photos mode (MEMNG-714): its hero — the cover, the title, the span and the count —
-/// the `Photos | Journal | Map` chips, and every one of its pictures and videos oldest first, as
-/// one flat block: the Library's All without its days (MEMNG-740, `LibraryGridGrouping.flat`).
+/// its `Photos | Journal | Map` in the main bar's capsule (MEMNG-822), and every one of its
+/// pictures and videos oldest first, as one flat block: the Library's All without its days (MEMNG-740, `LibraryGridGrouping.flat`).
 ///
 /// **The grid is the Library's.** `LibraryGrid` is hosted over the trip's DRAINED members
 /// (`TripMemberStore.members(for:)`), which are what the server's member route answers — the
@@ -116,8 +116,10 @@ struct TripView: View {
     /// The stack this screen was pushed onto, which it leaves once its trip is gone.
     let trail: Binding<[CollectionRoute]>
     @State private var manage: TripManage
-    /// The chip that is chosen: Photos until somebody picks another.
-    @State private var mode = TripMode.photos
+    /// The mode that is chosen, Photos until somebody picks another in the modes row the main bar
+    /// draws for this screen (MEMNG-822): the screen keeps the choice, the bar only writes it.
+    @State private var modes: CollectionModeChoice
+    private var mode: TripMode { modes.mode }
     /// Whether Trip Dates is up.
     @State private var editingSpan = false
 
@@ -185,13 +187,14 @@ struct TripView: View {
         access: @escaping () -> CollectionsAccess?,
         trail: Binding<[CollectionRoute]> = .constant([]),
         manage: TripManage = TripManage(),
+        modes: CollectionModeChoice = CollectionModeChoice(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
         now: @escaping () -> Date = { Date() }
     ) {
         self.init(
             scope: .trip(trip), openedUnder: identity, trips: trips, memberStore: memberStore,
-            identity: identity, access: access, trail: trail, manage: manage,
+            identity: identity, access: access, trail: trail, manage: manage, modes: modes,
             viewerTransport: viewerTransport, shareLane: shareLane, now: now)
     }
 
@@ -204,6 +207,7 @@ struct TripView: View {
         access: @escaping () -> CollectionsAccess?,
         trail: Binding<[CollectionRoute]> = .constant([]),
         manage: TripManage = TripManage(),
+        modes: CollectionModeChoice = CollectionModeChoice(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
         now: @escaping () -> Date = { Date() }
@@ -216,6 +220,7 @@ struct TripView: View {
         self.access = access
         self.trail = trail
         _manage = State(initialValue: manage)
+        _modes = State(initialValue: modes)
         self.viewerTransport = viewerTransport
         self.shareLane = shareLane
         self.now = now
@@ -710,6 +715,9 @@ struct TripView: View {
                     endSelect()
                 }
             }
+            // The modes row in the main bar is this screen's while its route is on top. Never
+            // detached on disappearing: the route leaves the dock only with the stack's path.
+            .onAppear { dock?.attachModes(modes, to: CollectionRoute(scope: scope)) }
             // The dock is one for every tab: a claim left behind would take the bar off them all.
             .onDisappear {
                 selection.close()
@@ -798,6 +806,12 @@ struct TripView: View {
     /// The trip's members that know where they were taken, on the Places map (MEMNG-719): the
     /// hero above it, so the chips stay in reach. Keyed on the account, so a change of account
     /// drops the map's markers, sheet and viewer with its store (`TripMapScreen`).
+    /// Who this screen's `mode` scroll view reports as: its readings count only while this
+    /// collection is on top in that mode (`AppDock.owns`).
+    private func feedOwner(_ mode: TripMode) -> CollectionFeedOwner {
+        CollectionFeedOwner(route: AnyHashable(CollectionRoute(scope: scope)), mode: mode)
+    }
+
     private func tripMap(_ shown: CollectionScope) -> some View {
         TripMapScreen(
             scope: shown, members: memberStore, access: access, redrain: { await drain() },
@@ -850,7 +864,7 @@ struct TripView: View {
         .listStyle(.plain)
         // The Timeline's own gap between cards: a day's cards stood flush without it (MEMNG-820).
         .listRowSpacing(Self.journalCardGap)
-        .feedsDock(dock, on: .collections)
+        .feedsDock(dock, on: .collections, owner: feedOwner(.journal))
         // On the list, not beside the grid's viewer: one presentation per view. Its pages are
         // re-signed by reading the journal again; `memos` is read in the body, so that read
         // re-presents them with its copies.
@@ -925,7 +939,7 @@ struct TripView: View {
         .environment(\.signedURLRefresher, refresher)
         // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the
         // Collections tab's, so it counts only while that tab is on screen (MEMNG-715).
-        .feedsDock(dock, on: .collections)
+        .feedsDock(dock, on: .collections, owner: feedOwner(.photos))
     }
 
     /// The Photos-style hero (owner, 12:35 CEST 2026-10-14): the cover from edge to edge with the
@@ -984,8 +998,6 @@ struct TripView: View {
                         .foregroundStyle(.red)
                         .accessibilityIdentifier(Self.errorLineID)
                 }
-                TripModeRow(chosen: mode) { mode = $0 }
-                    .padding(.top, DesignTokens.Space.tight)
             }
             .padding(.horizontal, DesignTokens.Space.roomy)
         }
@@ -1653,33 +1665,6 @@ enum TripMode: CaseIterable, Hashable {
     }
 
     var isAvailable: Bool { true }
-}
-
-/// The `Photos | Journal | Map` chips under the hero: the chosen one marked, a press choosing.
-struct TripModeRow: View {
-    let chosen: TripMode
-    let choose: (TripMode) -> Void
-
-    var body: some View {
-        HStack(spacing: DesignTokens.Space.snug) {
-            ForEach(TripMode.allCases, id: \.self) { mode in
-                let chosen = mode == self.chosen
-                Button(mode.title) { choose(mode) }
-                    .buttonStyle(.plain)
-                    .font(.subheadline.weight(.medium))
-                    .padding(.horizontal, DesignTokens.Space.regular)
-                    .padding(.vertical, DesignTokens.Space.snug)
-                    .background(
-                        chosen
-                            ? AnyShapeStyle(DesignTokens.accent.opacity(0.2))
-                            : AnyShapeStyle(.quaternary),
-                        in: .capsule
-                    )
-                    .disabled(!mode.isAvailable)
-                    .accessibilityAddTraits(chosen ? .isSelected : [])
-            }
-        }
-    }
 }
 
 /// The Trip screen's Manage menu, as a flow: the question on screen, and what its answer may do.
