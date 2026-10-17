@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -32,6 +32,9 @@ IDB = os.path.expanduser("~/Library/Python/3.9/bin/idb")
 SCENES = [
     "779a-library-filter-menu",
     "779b-library-select-show-selected",
+    "780a-trip-filter-menu",
+    "780b-trip-ellipsis-menu",
+    "780c-trip-select-remove",
     "781a-collections-retap",
     "783-collection-cards",
     "822-collection-modes-bar",
@@ -157,6 +160,92 @@ class Driver:
         time.sleep(2.5)
         self.tap("Close")
         time.sleep(2)
+
+    def scene_780a(self):
+        # One test holds the three trip scenes: this one opens Portugal, 780b and 780c go on in
+        # it. The trip's filter is the screen's own, unfiltered on every launch.
+        time.sleep(2)
+        self.tap("Portugal")
+        time.sleep(3.5)
+        self.tap("Filter")
+        time.sleep(2.5)
+        # The menu's rows, or the scene stops; a nested menu's label may carry its value.
+        for row in ("All Items", "Captured by me", "Sort By", "Removed from trip"):
+            self.find(row, prefix=True)
+        self.tap("Visibility", prefix=True)   # the nested menu: Any, Public, Just us
+        time.sleep(3)
+        self.find("Just us")
+        self.tap("Any")   # the choice in force: the menu closes, nothing changes
+        time.sleep(2)
+        self.tap("Filter")
+        time.sleep(2.5)
+        self.tap("Videos")   # the trip holds pictures only: the grid empties
+        time.sleep(3.5)
+        self.tap("Filter")
+        time.sleep(2.5)
+        self.tap("All Items")   # and fills again
+        time.sleep(3.5)
+
+    def scene_780b(self):
+        # The ellipsis menu, named Manage for VoiceOver; left by a touch outside it, on the
+        # navigation bar's title, so nothing in it is chosen.
+        time.sleep(1.5)
+        self.tap("Manage")
+        time.sleep(2.5)
+        for row in ("Rename", "Trip Dates", "Delete Trip"):
+            self.find(row)
+        time.sleep(1.5)
+        self.dismiss_menu()
+        time.sleep(2)
+        try:
+            self.find("Delete Trip", attempts=1)
+        except RuntimeError:
+            return
+        raise RuntimeError("the ellipsis menu is still open after a touch outside it")
+
+    def scene_780c(self):
+        time.sleep(1.5)
+        self.tap("Select")
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if len(tiles) < 2:
+            raise RuntimeError("fewer than two tiles on screen to select: %d" % len(tiles))
+        for tile in tiles[:2]:
+            x, y = self.centre(tile)
+            self.tap_at(x, y, "tile %r" % tile.get("AXLabel"))
+            time.sleep(1)
+        time.sleep(1)
+        self.tap("More")   # select mode's actions menu
+        time.sleep(2.5)
+        self.find("Set visibility for 2 memos", prefix=True)   # the nested menu, above the red row
+        time.sleep(1.5)
+        self.tap("Remove 2 pictures from trip", prefix=True)   # the row ends in an ellipsis
+        time.sleep(2.5)
+        self.find("Remove 2 pictures from Portugal?")
+        self.find("They stay in your library.")
+        time.sleep(2)
+        self.tap("Cancel")
+        time.sleep(2)
+        self.tap("Close")   # select mode ends; the trip's Filter is back
+        time.sleep(2.5)
+
+    def dismiss_menu(self):
+        """A touch outside an open menu closes it and reaches nothing under it: the navigation
+        bar's title, else where iOS draws it."""
+        titles = [
+            e for e in self.elements()
+            if e.get("AXLabel") == "Portugal" and e["frame"]["y"] < 130
+        ]
+        if titles:
+            x, y = self.centre(titles[0])
+            self.tap_at(x, y, "outside the menu, on the title")
+        else:
+            self.tap_at(201, 80, "outside the menu, by place")
 
     def scene_781a(self):
         # MEMNG-822 amends the re-tap: over a trip it returns the modes row, and Back reaches

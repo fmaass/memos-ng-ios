@@ -10,7 +10,8 @@ import UIKit
 
 @testable import MemosFeatures
 
-/// The simulator clips WPN-12 and WPN-13 owe before they merge (MEMNG-779, MEMNG-781, MEMNG-783):
+/// The simulator clips WPN-12 and WPN-13 owe before they merge (MEMNG-779, MEMNG-780, MEMNG-781,
+/// MEMNG-783):
 /// the real `MainTabView` over a scripted server, held on the simulator's screen while a driver
 /// OUTSIDE the app records it (`simctl io recordVideo`) and touches it (`idb ui tap`) — a SwiftUI
 /// `Menu` opens only on a real touch, which nothing inside the process can give. The driver is
@@ -80,7 +81,34 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
-        "clip 845: the Library's scope row, the reference the modes row is matched to",
+        "clip 780: a trip's Filter and ellipsis menus; select mode's Remove asked, then cancelled",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipTripMenus() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .collections, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, TripRows.list, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver opens Portugal, then its Filter menu: a kind picked and put back.
+            #expect(await ClipStage.scene("780a-trip-filter-menu"))
+            await ClipStage.settle(window, seconds: 1)
+            // The ellipsis menu, left with nothing chosen.
+            #expect(await ClipStage.scene("780b-trip-ellipsis-menu"))
+            await ClipStage.settle(window, seconds: 1)
+            // Two tiles chosen, Remove asked, Cancel, select mode closed.
+            #expect(await ClipStage.scene("780c-trip-select-remove"))
+            // Nothing was removed and select mode is over: the trip's own Filter stands again,
+            // and the server never heard an exclusion.
+            let filter = await ClipStage.showsSoon(TripView.filterButton, in: window)
+            #expect(filter, "after Cancel and Close the trip's Filter is not on screen")
+            #expect(transport.trips.calls(TripRows.exclude).isEmpty)
+        }
+    }
+
+    @Test(
+        "clip 845:the Library's scope row, the reference the modes row is matched to",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )
     func clipLibraryScopeRow() async {
@@ -404,10 +432,13 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
         if !(value("cursor") ?? "").isEmpty { return json("[]") }
         var items: [String]
         if let tag = value("tag") {
+            // Each of a trip's pictures on a memo of its own, so select mode's "Set visibility
+            // for N memos" counts the pictures chosen (MEMNG-780's clip).
             items = (0..<6).map { index in
                 item(
                     "\(tag)-\(index)",
-                    taken: "2026-03-\(String(format: "%02d", 12 + index * 3))T10:00:00Z")
+                    taken: "2026-03-\(String(format: "%02d", 12 + index * 3))T10:00:00Z",
+                    memo: "memo-\(tag)-\(index)")
             }.reversed()
         } else {
             items = (1...12).reversed().flatMap { day in
@@ -425,19 +456,22 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
         return json("[\(items.joined(separator: ","))]")
     }
 
-    private nonisolated static func item(_ uid: String, taken: String, wide: Bool = true) -> String
-    {
-        """
-        {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
-        "width":\(wide ? 1200 : 800),"height":\(wide ? 800 : 1200),"mine":true,\
-        "hasPrint":false,"hasLegacyPrint":false,"webReady":true,"renditions":[],"tags":[],\
-        "orphan":true,"memoUid":null,"takenAt":"\(taken)","filename":"\(uid).jpg",\
-        "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
-        "previewUrl":"/api/attachments/\(uid)/mobile","webUrl":"/api/attachments/\(uid)/web",\
-        "posterUrl":"/api/attachments/\(uid)/poster",\
-        "downloadUrl":"/api/attachments/\(uid)/download",\
-        "printUrl":"/api/attachments/\(uid)/print"}
-        """
+    private nonisolated static func item(
+        _ uid: String, taken: String, wide: Bool = true, memo: String? = nil
+    ) -> String {
+        let memoUid = memo.map { "\"\($0)\"" } ?? "null"
+        return """
+            {"uid":"\(uid)","mime":"image/jpeg","status":"ready","blurhash":null,\
+            "width":\(wide ? 1200 : 800),"height":\(wide ? 800 : 1200),"mine":true,\
+            "hasPrint":false,"hasLegacyPrint":false,"webReady":true,"renditions":[],"tags":[],\
+            "orphan":\(memo == nil),"memoUid":\(memoUid),\
+            "takenAt":"\(taken)","filename":"\(uid).jpg",\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb",\
+            "previewUrl":"/api/attachments/\(uid)/mobile","webUrl":"/api/attachments/\(uid)/web",\
+            "posterUrl":"/api/attachments/\(uid)/poster",\
+            "downloadUrl":"/api/attachments/\(uid)/download",\
+            "printUrl":"/api/attachments/\(uid)/print"}
+            """
     }
 
     private nonisolated static func bucket(_ key: String, count: Int, cover: String) -> String {
