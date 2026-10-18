@@ -97,6 +97,27 @@ class Driver:
             time.sleep(0.5)
         raise RuntimeError("no element identified %r on screen (scene %s)" % (identifier, self.scene))
 
+    def find_in_bar(self, label, attempts=10):
+        """A navigation-bar item by its label. On iOS 26.5 idb's describe-all lists the bar as one
+        empty Group, so the bar is asked point by point along its centre line instead; the
+        element describe-point returns carries its own frame, which is what gets tapped."""
+        for _ in range(attempts):
+            for x in range(8, 402, 12):
+                try:
+                    element = json.loads(self.idb("ui", "describe-point", str(x), "84", "--json"))
+                except (RuntimeError, ValueError):
+                    continue
+                if isinstance(element, list):
+                    element = element[0] if element else None
+                if isinstance(element, dict) and element.get("frame") and element.get("AXLabel") == label:
+                    return element
+            time.sleep(0.5)
+        raise RuntimeError("no bar item labelled %r (scene %s)" % (label, self.scene))
+
+    def tap_bar(self, label):
+        x, y = self.centre(self.find_in_bar(label))
+        self.tap_at(x, y, repr(label))
+
     def tap_segment(self, identifier, index, count, why):
         """A segment of a segmented control by its place: idb's describe-all stops at the
         control (a TabGroup carrying the identifier) and lists none of its segments."""
@@ -167,7 +188,7 @@ class Driver:
         time.sleep(2)
         self.tap("Portugal")
         time.sleep(3.5)
-        self.tap("Filter")
+        self.tap_bar("Filter")
         time.sleep(2.5)
         # The menu's rows, or the scene stops; a nested menu's label may carry its value.
         for row in ("All Items", "Captured by me", "Sort By", "Removed from trip"):
@@ -177,11 +198,11 @@ class Driver:
         self.find("Just us")
         self.tap("Any")   # the choice in force: the menu closes, nothing changes
         time.sleep(2)
-        self.tap("Filter")
+        self.tap_bar("Filter")
         time.sleep(2.5)
         self.tap("Videos")   # the trip holds pictures only: the grid empties
         time.sleep(3.5)
-        self.tap("Filter")
+        self.tap_bar("Filter")
         time.sleep(2.5)
         self.tap("All Items")   # and fills again
         time.sleep(3.5)
@@ -190,7 +211,7 @@ class Driver:
         # The ellipsis menu, named Manage for VoiceOver; left by a touch outside it, on the
         # navigation bar's title, so nothing in it is chosen.
         time.sleep(1.5)
-        self.tap("Manage")
+        self.tap_bar("Manage")
         time.sleep(2.5)
         for row in ("Rename", "Trip Dates", "Delete Trip"):
             self.find(row)
@@ -205,7 +226,7 @@ class Driver:
 
     def scene_780c(self):
         time.sleep(1.5)
-        self.tap("Select")
+        self.tap_bar("Select")
         time.sleep(2)
         tiles = [
             e for e in self.elements()
@@ -220,7 +241,7 @@ class Driver:
             self.tap_at(x, y, "tile %r" % tile.get("AXLabel"))
             time.sleep(1)
         time.sleep(1)
-        self.tap("More")   # select mode's actions menu
+        self.tap_bar("More")   # select mode's actions menu
         time.sleep(2.5)
         self.find("Set visibility for 2 memos", prefix=True)   # the nested menu, above the red row
         time.sleep(1.5)
@@ -231,21 +252,14 @@ class Driver:
         time.sleep(2)
         self.tap("Cancel")
         time.sleep(2)
-        self.tap("Close")   # select mode ends; the trip's Filter is back
+        self.tap_bar("Close")   # select mode ends; the trip's Filter is back
         time.sleep(2.5)
 
     def dismiss_menu(self):
-        """A touch outside an open menu closes it and reaches nothing under it: the navigation
-        bar's title, else where iOS draws it."""
-        titles = [
-            e for e in self.elements()
-            if e.get("AXLabel") == "Portugal" and e["frame"]["y"] < 130
-        ]
-        if titles:
-            x, y = self.centre(titles[0])
-            self.tap_at(x, y, "outside the menu, on the title")
-        else:
-            self.tap_at(201, 80, "outside the menu, by place")
+        """A touch outside an open menu closes it and reaches nothing under it. Not the title: on
+        iOS 26.5 the ellipsis menu opens over the bar (x 44-294, y 62-219, Rename first), so a
+        touch on the title or at 201,80 chooses Rename. Right of the menu, mid-screen, is clear."""
+        self.tap_at(380, 500, "outside the menu, right of it")
 
     def scene_781a(self):
         # MEMNG-822 amends the re-tap: over a trip it returns the modes row, and Back reaches
