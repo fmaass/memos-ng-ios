@@ -54,6 +54,12 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// persisted, unlike `order`: a tag left over from last time is a filter silently hiding
     /// pictures, which is the worse failure.
     public private(set) var tag: String?
+    /// "Captured by me" (MEMNG-787): only the signed-in account's own pictures, `mine=true` on the
+    /// wire. Changed only through `setMine`, and not persisted, for `tag`'s reason.
+    public private(set) var mine = false
+    /// Who may see the memo a picture hangs on (MEMNG-787). Changed only through `setVisibility`,
+    /// and not persisted, for `tag`'s reason.
+    public private(set) var visibility = MediaVisibilityFilter.any
 
     private var nextCursor: String?
     /// The page size `nextCursor` was minted under. A continuation is resent "with the same
@@ -163,6 +169,34 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     public func setTag(_ tag: String?) {
         guard tag != self.tag else { return }
         self.tag = tag
+        items = []
+        forgetPages()
+        nextCursor = nil
+        hasMore = true
+        lastError = nil
+        generation += 1
+    }
+
+    /// Narrows the grid to my own pictures, or widens it back to everyone's (MEMNG-787). It resets
+    /// exactly what a tab change resets, for the same reason: the rows and the cursor describe the
+    /// list under the previous choice.
+    public func setMine(_ mine: Bool) {
+        guard mine != self.mine else { return }
+        self.mine = mine
+        startOver()
+    }
+
+    /// Narrows the grid to the pictures of memos of one visibility, or widens it back to Any
+    /// (MEMNG-787), resetting what a tab change resets.
+    public func setVisibility(_ visibility: MediaVisibilityFilter) {
+        guard visibility != self.visibility else { return }
+        self.visibility = visibility
+        startOver()
+    }
+
+    /// What every change of the list's query resets: the rows, the pages they came on, the cursor,
+    /// the error line, and the generation, so a page in flight for the old query lands nowhere.
+    private func startOver() {
         items = []
         forgetPages()
         nextCursor = nil
@@ -289,6 +323,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     filter: lineage.filter,
                     order: lineage.order,
                     tag: lineage.tag,
+                    mine: lineage.mine,
+                    visibility: lineage.visibility,
                     cursor: cursor,
                     limit: limit,
                     baseURL: baseURL
@@ -493,18 +529,22 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         }
     }
 
-    /// Which list a page in flight belongs to — the generation, the filter, the direction AND the
-    /// tag, because any of them moving makes the answer a continuation of something nobody is
-    /// reading any more.
+    /// Which list a page in flight belongs to — the generation, the filter, the direction, the
+    /// tag AND the audience (MEMNG-787), because any of them moving makes the answer a
+    /// continuation of something nobody is reading any more.
     private struct Lineage: Equatable {
         var generation: Int
         var filter: MediaLibraryFilter
         var order: MediaLibraryOrder
         var tag: String?
+        var mine: Bool
+        var visibility: MediaVisibilityFilter
     }
 
     private var lineage: Lineage {
-        Lineage(generation: generation, filter: filter, order: order, tag: tag)
+        Lineage(
+            generation: generation, filter: filter, order: order, tag: tag, mine: mine,
+            visibility: visibility)
     }
 
     /// Which lineage the first page in flight belongs to, or nil when none is. `isLoading` alone
@@ -540,6 +580,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 filter: lineage.filter,
                 order: lineage.order,
                 tag: lineage.tag,
+                mine: lineage.mine,
+                visibility: lineage.visibility,
                 cursor: nil,
                 limit: limit,
                 baseURL: baseURL
@@ -604,6 +646,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     filter: lineage.filter,
                     order: lineage.order,
                     tag: lineage.tag,
+                    mine: lineage.mine,
+                    visibility: lineage.visibility,
                     cursor: cursor,
                     limit: limit,
                     baseURL: baseURL
@@ -743,6 +787,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     filter: lineage.filter,
                     order: lineage.order,
                     tag: lineage.tag,
+                    mine: lineage.mine,
+                    visibility: lineage.visibility,
                     cursor: cursor,
                     limit: limit,
                     baseURL: baseURL
@@ -910,6 +956,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         filter: MediaLibraryFilter,
         order: MediaLibraryOrder,
         tag: String?,
+        mine: Bool = false,
+        visibility: MediaVisibilityFilter = .any,
         bucket: String? = nil,
         timeZone: String? = nil,
         cursor: String?,
@@ -930,7 +978,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     // Where a walk STARTS, never where it ends (an automatic collection's month or
                     // year, MEMNG-817); nil for every other caller, so their requests are unchanged.
                     bucket: bucket,
-                    tz: timeZone
+                    tz: timeZone,
+                    // "Captured by me" and Visibility (MEMNG-787): absent unless chosen.
+                    mine: apiMine(mine),
+                    visibility: visibility.apiVisibility
                 )
             )
         )

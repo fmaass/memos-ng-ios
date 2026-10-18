@@ -37,8 +37,8 @@ public enum LibraryScope: String, Sendable, Equatable, CaseIterable, Identifiabl
 }
 
 /// The buckets a view of this scope may draw, or nil when the store's list does not answer the
-/// selection on screen: the size this scope is drawn from, the kind and tag the grid is narrowed
-/// to, and the zone the store counts in.
+/// selection on screen: the size this scope is drawn from, the kind, tag and audience the grid is
+/// narrowed to (MEMNG-787), and the zone the store counts in.
 ///
 /// Every field is matched because the store keeps its last list when a read fails. One store
 /// serves both views, so a switch leaves the other view's list in it until the new read lands — a
@@ -50,6 +50,8 @@ public func bucketsShown(
     for scope: LibraryScope,
     filter: MediaLibraryFilter,
     tag: String?,
+    mine: Bool,
+    visibility: MediaVisibilityFilter,
     timeZoneIdentifier: String,
     buckets: [LibraryBucket],
     answering request: LibraryBucketRequest?
@@ -59,6 +61,8 @@ public func bucketsShown(
         size: size,
         filter: filter,
         tag: tag,
+        mine: mine,
+        visibility: visibility,
         timeZoneIdentifier: timeZoneIdentifier
     )
     guard request == wanted else { return nil }

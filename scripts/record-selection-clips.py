@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -11,9 +11,11 @@ Per scene the test writes `clip-ready` = `<scene> <nonce>` into the host app's t
 script starts `simctl io <udid> recordVideo` into `<out>/<scene>.mov`, answers `clip-recording`
 with the same nonce once the first frame is in, gives the scene's touches through `idb ui`
 (a SwiftUI Menu opens only on a real touch), stops the recording with SIGINT (which finalises the
-movie) and answers `clip-finished`. A ready file older than this script's start, or a nonce it
-already answered, is never taken. `--settings` records one more scene with no test behind it, once
-the tests are over: the Settings app's page for the app, scrolled to its Storage group.
+movie) and answers `clip-finished` = `<scene> ok|failed <nonce>`: a scene whose touches or movie
+failed says so, and the test fails on it rather than on the next scene's silence. A ready file
+older than this script's start, or a nonce it already answered, is never taken. `--settings`
+records one more scene with no test behind it, once the tests are over: the Settings app's page
+for the app, scrolled to its Storage group.
 
 Exit: 0 every expected scene recorded at >= 2 s; 1 anything else; 2 usage.
 """
@@ -32,6 +34,9 @@ IDB = os.path.expanduser("~/Library/Python/3.9/bin/idb")
 SCENES = [
     "779a-library-filter-menu",
     "779b-library-select-show-selected",
+    "780a-trip-filter-menu",
+    "780b-trip-ellipsis-menu",
+    "780c-trip-select-remove",
     "781a-collections-retap",
     "783-collection-cards",
     "822-collection-modes-bar",
@@ -93,6 +98,27 @@ class Driver:
                 return hits[0]
             time.sleep(0.5)
         raise RuntimeError("no element identified %r on screen (scene %s)" % (identifier, self.scene))
+
+    def find_in_bar(self, label, attempts=10):
+        """A navigation-bar item by its label. On iOS 26.5 idb's describe-all lists the bar as one
+        empty Group, so the bar is asked point by point along its centre line instead; the
+        element describe-point returns carries its own frame, which is what gets tapped."""
+        for _ in range(attempts):
+            for x in range(8, 402, 12):
+                try:
+                    element = json.loads(self.idb("ui", "describe-point", str(x), "84", "--json"))
+                except (RuntimeError, ValueError):
+                    continue
+                if isinstance(element, list):
+                    element = element[0] if element else None
+                if isinstance(element, dict) and element.get("frame") and element.get("AXLabel") == label:
+                    return element
+            time.sleep(0.5)
+        raise RuntimeError("no bar item labelled %r (scene %s)" % (label, self.scene))
+
+    def tap_bar(self, label):
+        x, y = self.centre(self.find_in_bar(label))
+        self.tap_at(x, y, repr(label))
 
     def tap_segment(self, identifier, index, count, why):
         """A segment of a segmented control by its place: idb's describe-all stops at the
@@ -157,6 +183,92 @@ class Driver:
         time.sleep(2.5)
         self.tap("Close")
         time.sleep(2)
+
+    def scene_780a(self):
+        # One test holds the three trip scenes: this one opens Portugal, 780b and 780c go on in
+        # it. The trip's filter is the screen's own, unfiltered on every launch.
+        time.sleep(2)
+        self.tap("Portugal")
+        time.sleep(3.5)
+        self.tap_bar("Filter")
+        time.sleep(2.5)
+        # The menu's rows, or the scene stops; a nested menu's label may carry its value.
+        for row in ("All Items", "Captured by me", "Sort By", "Removed from trip"):
+            self.find(row, prefix=True)
+        self.tap("Visibility", prefix=True)   # the nested menu: Any, Public, Just us
+        time.sleep(3)
+        self.find("Just us")
+        self.tap("Any")   # the choice in force: the menu closes, nothing changes
+        time.sleep(2)
+        self.tap_bar("Filter")
+        time.sleep(2.5)
+        self.tap("Videos")   # the trip holds pictures only: the grid empties
+        time.sleep(3.5)
+        self.tap_bar("Filter")
+        time.sleep(2.5)
+        self.tap("All Items")   # and fills again
+        time.sleep(3.5)
+
+    def scene_780b(self):
+        # The ellipsis menu, named Manage for VoiceOver; left by a touch outside it, on the
+        # navigation bar's title, so nothing in it is chosen.
+        time.sleep(1.5)
+        self.tap_bar("Manage")
+        time.sleep(2.5)
+        for row in ("Rename", "Trip Dates", "Delete Trip"):
+            self.find(row)
+        time.sleep(1.5)
+        self.dismiss_menu()
+        time.sleep(2)
+        try:
+            self.find("Delete Trip", attempts=1)
+        except RuntimeError:
+            return
+        raise RuntimeError("the ellipsis menu is still open after a touch outside it")
+
+    def scene_780c(self):
+        time.sleep(1.5)
+        self.tap_bar("Select")
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if len(tiles) < 2:
+            raise RuntimeError("fewer than two tiles on screen to select: %d" % len(tiles))
+        for tile in tiles[:2]:
+            x, y = self.centre(tile)
+            self.tap_at(x, y, "tile %r" % tile.get("AXLabel"))
+            time.sleep(1)
+        time.sleep(1)
+        self.tap_bar("More")   # select mode's actions menu
+        time.sleep(2.5)
+        self.find("Remove 2 pictures from trip", prefix=True)   # the menu is open
+        # Visibility belongs to a memo, not to the pictures select mode chooses: no row for it.
+        offered = [
+            e.get("AXLabel") for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Set visibility")
+        ]
+        if offered:
+            raise RuntimeError("select mode's More offers a visibility row: %r" % offered)
+        time.sleep(1.5)
+        self.tap("Remove 2 pictures from trip", prefix=True)   # the row ends in an ellipsis
+        time.sleep(2.5)
+        self.find("Remove 2 pictures from Portugal?")
+        self.find("They stay in your library.")
+        time.sleep(2)
+        self.tap("Cancel")
+        time.sleep(2)
+        self.tap_bar("Close")   # select mode ends; the trip's Filter is back
+        time.sleep(2.5)
+
+    def dismiss_menu(self):
+        """A touch outside an open menu closes it and reaches nothing under it. Not the title: on
+        iOS 26.5 the ellipsis menu opens over the bar (x 44-294, y 62-219, Rename first), so a
+        touch on the title or at 201,80 chooses Rename. Right of the menu, mid-screen, is clear."""
+        self.tap_at(380, 500, "outside the menu, right of it")
 
     def scene_781a(self):
         # MEMNG-822 amends the re-tap: over a trip it returns the modes row, and Back reaches
@@ -297,7 +409,8 @@ class Driver:
 
     # --- one recorded scene ----------------------------------------------------------------------
     def record(self, scene, answer):
-        """Records `scene`; `answer(name)` writes a handshake file, or does nothing without a test."""
+        """Records `scene`; `answer(name, verdict)` writes a handshake file, or does nothing without
+        a test."""
         self.scene = scene
         self.step = 0
         movie = os.path.join(self.out, scene + ".mov")
@@ -330,15 +443,17 @@ class Driver:
         except subprocess.TimeoutExpired:
             recorder.kill()
             failure = failure or RuntimeError("recordVideo outlived SIGINT by 15 s")
-        answer("clip-finished")
+        duration = None
+        if not failure:
+            duration = subprocess.run(
+                ["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", movie], capture_output=True, text=True).stdout.strip()
+            log("scene %s: %s lasts %s s" % (scene, movie, duration))
+            if not duration or float(duration) < 2.0:
+                failure = RuntimeError("clip %s lasts %r s, under 2 s" % (movie, duration))
+        answer("clip-finished", "failed" if failure else "ok")
         if failure:
             raise RuntimeError("scene %s: %s" % (scene, failure))
-        duration = subprocess.run(
-            ["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nw=1:nk=1", movie], capture_output=True, text=True).stdout.strip()
-        log("scene %s: %s lasts %s s" % (scene, movie, duration))
-        if not duration or float(duration) < 2.0:
-            raise RuntimeError("clip %s lasts %r s, under 2 s" % (movie, duration))
         return duration
 
 
@@ -407,11 +522,12 @@ def main():
         if scene not in expected:
             log("RECORD FAIL: the test asked for an unknown scene %r" % scene)
             put(tmp, "clip-recording", "%s %s" % (scene, nonce))
-            put(tmp, "clip-finished", "%s %s" % (scene, nonce))
+            put(tmp, "clip-finished", "%s failed %s" % (scene, nonce))
             sys.exit(1)
         try:
             durations[scene] = driver.record(
-                scene, lambda name, s=scene, n=nonce: put(tmp, name, "%s %s" % (s, n)))
+                scene, lambda name, verdict=None, s=scene, n=nonce: put(
+                    tmp, name, " ".join(f for f in (s, verdict, n) if f)))
         except Exception as error:
             log("RECORD FAIL: %s" % error)
             sys.exit(1)
@@ -424,7 +540,7 @@ def main():
                            check=True, capture_output=True, timeout=60)
             time.sleep(3)
             durations["781b-settings-storage"] = driver.record(
-                "settings-storage", lambda name: None)
+                "settings-storage", lambda name, verdict=None: None)
             os.replace(os.path.join(args.out, "settings-storage.mov"),
                        os.path.join(args.out, "781b-settings-storage.mov"))
         except Exception as error:

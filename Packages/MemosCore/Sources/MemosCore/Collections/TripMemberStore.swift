@@ -72,6 +72,28 @@ public final class TripMemberStore {
     private var drained: [String: Drained] = [:]
     private var flights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
     private var removedResults: [String: (lineage: Lineage, state: TripRemovedState)] = [:]
+    /// The grid's filtered read of a trip (MEMNG-780), one per trip: the query it answered beside
+    /// the drain. Apart from `drained`, which the hero, the Journal, the Map and the Removed list
+    /// read, so a filter never moves them.
+    private var filteredDrains: [String: (query: TripMemberQuery, drain: Drained)] = [:]
+    /// The filtered read on the wire, per trip: its query and the token that owns the slot. A read
+    /// of another query takes the slot; the one it took lands nothing.
+    private var filteredFlights: [String: FilteredFlight] = [:]
+    /// The query the grid last chose for each trip, set in the turn that asks for it: what a
+    /// renewal asked under an earlier choice is measured against (`renewFiltered`). An
+    /// invalidation keeps it — the grid still shows that choice.
+    private var activeQueries: [String: TripMemberQuery] = [:]
+    /// The filtered read that failed, per trip: its query and lineage. Apart from "not read", so
+    /// the grid does not take a failure for an invalidation and ask again by itself; a new read,
+    /// an invalidation or another lineage ends it.
+    private var filteredFailures: [String: (lineage: Lineage, query: TripMemberQuery)] = [:]
+
+    private struct FilteredFlight {
+        let lineage: Lineage
+        let query: TripMemberQuery
+        let token: Int
+        let task: Task<Void, Never>
+    }
     private var removedFlights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] =
         [:]
     private var nextToken = 0
@@ -450,6 +472,116 @@ public final class TripMemberStore {
         lastError = nil
     }
 
+    // MARK: - The grid's filter (MEMNG-780)
+
+    /// Reads the trip's members as `query` asks — its kind as `type`, its order as `order` —
+    /// into the filtered slot, page after page to the cap, as the drain does. The unfiltered
+    /// query sends nothing: the grid then shows the drained members, and a filtered read still
+    /// out is retired, so its answer lands nowhere. A read of the same lineage and query on the
+    /// wire is joined; one of another query takes the slot, and the earlier one's pages are
+    /// dropped on arrival.
+    public func drainFiltered(
+        _ trip: Trip, query: TripMemberQuery, using handle: SessionHandle, baseURL: URL
+    ) async {
+        activeQueries[trip.uid] = query
+        guard !query.isUnfiltered else {
+            filteredFlights[trip.uid] = nil
+            return
+        }
+        let lineage = stamp(trip.uid, handle)
+        if let running = filteredFlights[trip.uid], running.lineage == lineage,
+            running.query == query
+        {
+            await running.task.value
+            return
+        }
+        filteredFailures[trip.uid] = nil
+        nextToken += 1
+        let token = nextToken
+        let task = Task { await self.runFiltered(lineage, query, token: token, handle, baseURL) }
+        filteredFlights[trip.uid] = FilteredFlight(
+            lineage: lineage, query: query, token: token, task: task)
+        await task.value
+    }
+
+    /// A renewal of the filtered read for fresh signatures, asked under `query` (the signed-URL
+    /// refresher's, after its unfiltered drain): read only while `query` is still the one the
+    /// grid chose, checked in this turn, so a choice made while the drain was out is never
+    /// overwritten by the one it replaced. Nothing for the unfiltered query.
+    public func renewFiltered(
+        _ trip: Trip, query: TripMemberQuery, using handle: SessionHandle, baseURL: URL
+    ) async {
+        guard !query.isUnfiltered, activeQueries[trip.uid] == query else { return }
+        await drainFiltered(trip, query: query, using: handle, baseURL: baseURL)
+    }
+
+    /// Whether the grid's read of `query` failed under the current lineage and nothing has asked
+    /// again since: then the grid shows the error, not a read that never ends.
+    public func filteredFailed(for trip: Trip, query: TripMemberQuery) -> Bool {
+        guard let failure = filteredFailures[trip.uid], failure.query == query else { return false }
+        return current(failure.lineage)
+    }
+
+    /// What the grid shows for `query`: the drained members for the unfiltered one, else the
+    /// filtered read of exactly that query and the current lineage, less what this app took out of
+    /// the trip (`stillMembers`); nil while there is none.
+    public func filteredMembers(for trip: Trip, query: TripMemberQuery) -> [LibraryRow]? {
+        if query.isUnfiltered { return held(trip.uid) == nil ? nil : members(for: trip) }
+        guard let held = filteredDrains[trip.uid], held.query == query, current(held.drain.lineage)
+        else { return nil }
+        return stillMembers(held.drain.rows, of: trip)
+    }
+
+    /// Where the grid's read for `query` stands; the drain's own state for the unfiltered one.
+    public func filteredState(for trip: Trip, query: TripMemberQuery) -> TripMemberState {
+        if query.isUnfiltered { return state(for: trip) }
+        if let flight = filteredFlights[trip.uid], flight.query == query { return .draining }
+        guard let held = filteredDrains[trip.uid], held.query == query, current(held.drain.lineage)
+        else { return .notLoaded }
+        return held.drain.complete ? .complete : .truncated
+    }
+
+    private func runFiltered(
+        _ lineage: Lineage, _ query: TripMemberQuery, token: Int, _ handle: SessionHandle,
+        _ baseURL: URL
+    ) async {
+        let uid = lineage.uid
+        defer { if filteredFlights[uid]?.token == token { filteredFlights[uid] = nil } }
+        var rows: [LibraryRow] = []
+        var cursor: String?
+        var complete = true
+        do {
+            repeat {
+                let page = try await Self.page(
+                    handle.client, uid: uid, cursor: cursor, limit: pageSize, baseURL: baseURL,
+                    query: query)
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                guard stillCurrent(lineage), filteredFlights[uid]?.token == token else {
+                    MemosLog.api.info("a trip's filtered page answered for a moved slot")
+                    return
+                }
+                rows = MediaLibraryStore.merged(rows, with: page.items, filter: query.filter)
+                cursor = page.nextCursor
+                if rows.count >= memberCap, rows.count > memberCap || cursor != nil {
+                    complete = false
+                    rows = Array(rows.prefix(memberCap))
+                    break
+                }
+            } while cursor != nil
+        } catch {
+            if stillCurrent(lineage), filteredFlights[uid]?.token == token {
+                filteredFailures[uid] = (lineage, query)
+            }
+            await report(error, handle: handle) {
+                self.stillCurrent(lineage) && self.filteredFlights[uid]?.token == token
+            }
+            return
+        }
+        let landed = Lineage(revision: trips.revision, session: lineage.session, uid: uid)
+        filteredDrains[uid] = (query, Drained(lineage: landed, rows: rows, complete: complete))
+        lastError = nil
+    }
+
     // MARK: - The app's own exclusions (MEMNG-793)
 
     /// Records an exclusion the server acknowledged, or ends one at Add Back's acknowledgement.
@@ -640,10 +772,16 @@ public final class TripMemberStore {
             flights = [:]
             removedResults = [:]
             removedFlights = [:]
+            filteredDrains = [:]
+            filteredFlights = [:]
+            filteredFailures = [:]
             return
         }
         drained[uid] = nil
         flights[uid] = nil
+        filteredDrains[uid] = nil
+        filteredFlights[uid] = nil
+        filteredFailures[uid] = nil
         removedResults[uid] = nil
         removedFlights[uid] = nil
     }
@@ -848,13 +986,22 @@ public final class TripMemberStore {
         return session.nothingEstablishedSince(handle)
     }
 
-    /// One page of the member route: every kind, oldest taken first.
+    /// One page of the member route: every kind, oldest taken first — or, for the grid's filter,
+    /// the query's kind and order (MEMNG-780). The default is the request this route always had.
     static func page(
-        _ client: any APIProtocol, uid: String, cursor: String?, limit: Int, baseURL: URL
+        _ client: any APIProtocol, uid: String, cursor: String?, limit: Int, baseURL: URL,
+        query: TripMemberQuery = .unfiltered
     ) async throws -> (items: [LibraryRow], nextCursor: String?) {
+        // Members of the generated enums, as `MediaLibraryStore.page` writes its order: what the
+        // generator calls those types is its own to decide. No kind is the parameter ABSENT.
         let input = Operations.ListMembersApiCollectionsUidAttachmentsGet.Input(
             path: .init(uid: uid),
-            query: .init(limit: limit, cursor: cursor, order: .takenAsc)
+            query: .init(
+                _type: query.filter == .images ? .image : query.filter == .videos ? .video : nil,
+                limit: limit, cursor: cursor,
+                order: query.order == .newestFirst ? .takenDesc : .takenAsc,
+                // Absent unless chosen, so the default is exactly the drain's request (MEMNG-787).
+                mine: apiMine(query.mine), visibility: query.visibility.apiVisibility)
         )
         switch try await client.listMembersApiCollectionsUidAttachmentsGet(input) {
         case .ok(let ok):
@@ -867,4 +1014,31 @@ public final class TripMemberStore {
         default: throw StoreFailure.documentedRefusal
         }
     }
+}
+
+/// The trip grid's Kind and Sort (MEMNG-780), "Captured by me" and Visibility (MEMNG-787): the
+/// Library's choices, read by the server through the member route's `type`, `order`, `mine` and
+/// `visibility`. The default — every kind, oldest first, everyone's, any visibility — is the
+/// drain itself, so it sends no read of its own. Every part of it is in the filtered read's
+/// slot, failure record and renewal check, because they compare the whole value.
+public struct TripMemberQuery: Sendable, Hashable {
+    public var filter: MediaLibraryFilter
+    public var order: MediaLibraryOrder
+    public var mine: Bool
+    public var visibility: MediaVisibilityFilter
+
+    public init(
+        filter: MediaLibraryFilter = .all, order: MediaLibraryOrder = .oldestFirst,
+        mine: Bool = false, visibility: MediaVisibilityFilter = .any
+    ) {
+        self.filter = filter
+        self.order = order
+        self.mine = mine
+        self.visibility = visibility
+    }
+
+    /// Every kind, oldest taken first, everyone's, any visibility: what the drain reads.
+    public static let unfiltered = TripMemberQuery()
+
+    public var isUnfiltered: Bool { self == .unfiltered }
 }

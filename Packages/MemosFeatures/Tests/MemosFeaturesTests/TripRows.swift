@@ -56,6 +56,7 @@ nonisolated final class TripRows: @unchecked Sendable {
     private var keys: [String: String] = [:]
     private var failing: Set<String> = []
     private var held: Set<String> = []
+    private var heldWhere: [String: @Sendable (String) -> Bool] = [:]
     private var log: [Call] = []
     private var served: [String] = []
     private var writes = 0
@@ -122,7 +123,16 @@ nonisolated final class TripRows: @unchecked Sendable {
     func fail(_ operations: Set<String>) { lock.withLock { failing = operations } }
     /// From here on `operation` waits before it answers, until `release`.
     func hold(_ operation: String) { lock.withLock { _ = held.insert(operation) } }
-    func release(_ operation: String) { lock.withLock { _ = held.remove(operation) } }
+    func release(_ operation: String) {
+        lock.withLock {
+            _ = held.remove(operation)
+            heldWhere[operation] = nil
+        }
+    }
+    /// From here on the requests of `operation` whose path `matches` wait, until `release`.
+    func hold(_ operation: String, where matches: @escaping @Sendable (String) -> Bool) {
+        lock.withLock { heldWhere[operation] = matches }
+    }
 
     /// Answers a collection route, or nil for any other operation.
     func answer(
@@ -138,7 +148,9 @@ nonisolated final class TripRows: @unchecked Sendable {
         let path = request.path ?? ""
         let call = Call(operation: operationID, path: path, body: data)
         lock.withLock { log.append(call) }
-        while lock.withLock({ held.contains(operationID) }) {
+        while lock.withLock({
+            held.contains(operationID) || heldWhere[operationID]?(path) == true
+        }) {
             try await Task.sleep(for: .milliseconds(20))
         }
         lock.withLock { served.append(operationID) }
@@ -214,7 +226,7 @@ nonisolated final class TripRows: @unchecked Sendable {
             query["tag"] = row.tag
             query["spanStart"] = row.spanStart
             query["spanEnd"] = row.spanEnd
-            for name in ["cursor", "limit", "order", "type"] {
+            for name in ["cursor", "limit", "order", "type", "mine", "visibility"] {
                 if let value = Self.query(path, name) { query[name] = value }
             }
             let listed = try await listing(query)

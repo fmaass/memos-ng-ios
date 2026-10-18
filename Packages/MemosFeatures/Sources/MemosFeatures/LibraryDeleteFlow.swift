@@ -42,8 +42,24 @@ public final class LibraryDeleteFlow {
     /// Which run is the live one. Moved by `abandon`: a run that set out under another number has
     /// no screen left to answer to, so it changes neither the stage nor the message when it ends.
     private var run = 0
+    /// The screen's one result banner, when it has one (`SelectBanner`): the toast says what this
+    /// flow said only as long as nothing newer was said there.
+    private let banner: SelectBanner?
 
-    public init() {}
+    public init(banner: SelectBanner? = nil) {
+        self.banner = banner
+    }
+
+    /// The toast's sentence, and the banner's when there is one: published when there is one to
+    /// say, retired — if it is still the one shown — when there is none.
+    private func say(_ text: String?) {
+        message = text
+        if let text {
+            banner?.publish(text, from: .delete)
+        } else {
+            banner?.retire(.delete)
+        }
+    }
 
     /// The pictures a question is open about, or nil while none is. What the alert binds to.
     public var asking: [String]? {
@@ -106,7 +122,7 @@ public final class LibraryDeleteFlow {
         let previous = stage
         stage = Self.next(stage, on: event)
         // A new question is not the last run's report.
-        if case .tapped = event, stage != previous { message = nil }
+        if case .tapped = event, stage != previous { say(nil) }
         return Self.deletes(stage) != nil && Self.deletes(previous) == nil
     }
 
@@ -129,7 +145,7 @@ public final class LibraryDeleteFlow {
         // is gone, and must not surface over whatever select mode is opened next.
         guard run == mine else { return outcome }
         stage = Self.next(stage, on: .returned)
-        message = outcome.flatMap(Self.resultText)
+        say(outcome.flatMap(Self.resultText))
         return outcome
     }
 
@@ -140,12 +156,12 @@ public final class LibraryDeleteFlow {
     public func abandon() {
         run += 1
         stage = .idle
-        message = nil
+        say(nil)
     }
 
     /// The toast has been read, or has timed out.
     public func dismissMessage() {
-        message = nil
+        say(nil)
     }
 
     /// What the alert asks. It names the count, so the yes is an answer about THIS many pictures,

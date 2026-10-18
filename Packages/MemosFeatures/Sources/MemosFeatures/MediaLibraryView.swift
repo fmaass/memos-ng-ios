@@ -48,8 +48,14 @@ struct MediaLibraryView: View {
     @State private var sharing = MediaBatchShareFlow()
     /// The running share batch, cancelled when select mode ends so its download stops early.
     @State private var shareTask: Task<Void, Never>?
-    /// Select mode's Delete: the question, and the run its yes starts (MEMNG-589).
-    @State private var deleting = LibraryDeleteFlow()
+    /// Select mode's Delete (MEMNG-589) and memo actions (MEMNG-788), around the one result
+    /// banner they share (`SelectResults`): the toast shows whichever spoke last.
+    @State private var results = SelectResults()
+    private var deleting: LibraryDeleteFlow { results.deleting }
+    /// Select mode's memo actions (MEMNG-788): Add to trip and the last run's banner.
+    private var acting: MemoActionFlow { results.acting }
+    @Environment(MemoActionStore.self) private var actions: MemoActionStore?
+    @Environment(TripStore.self) private var trips: TripStore?
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
     @State private var dockClaim = UUID()
     /// What the zoom transition matches the viewer to: the tile it grew out of.
@@ -108,8 +114,8 @@ struct MediaLibraryView: View {
             .safeAreaBar(edge: .bottom) {
                 if bottomBar == .select {
                     VStack(spacing: DesignTokens.Space.tight) {
-                        if let message = deleting.message {
-                            LibraryDeleteToast(text: message) { deleting.dismissMessage() }
+                        if let message = results.banner.message {
+                            LibraryDeleteToast(text: message) { results.banner.dismiss() }
                         }
                         LibrarySelectToolbar(
                             count: selection.count,
@@ -213,6 +219,8 @@ struct MediaLibraryView: View {
                 scope: choice.scope,
                 filter: library?.filter,
                 tag: library?.tag,
+                mine: library?.mine,
+                visibility: library?.visibility,
                 subject: session.state.user?.subject
             )
         ) {
@@ -280,6 +288,7 @@ struct MediaLibraryView: View {
             } else {
                 abandonShare()
                 deleting.abandon()
+                acting.abandon()
                 dock?.release(dockClaim)
             }
         }
@@ -291,6 +300,7 @@ struct MediaLibraryView: View {
             selection.close()
             abandonShare()
             deleting.abandon()
+            acting.abandon()
             dock?.release(dockClaim)
         }
     }
@@ -351,6 +361,8 @@ struct MediaLibraryView: View {
             for: scope,
             filter: library.filter,
             tag: library.tag,
+            mine: library.mine,
+            visibility: library.visibility,
             timeZoneIdentifier: store.timeZoneIdentifier,
             buckets: store.buckets,
             answering: store.loadedRequest
@@ -440,6 +452,8 @@ struct MediaLibraryView: View {
                     for: .all,
                     filter: library.filter,
                     tag: library.tag,
+                    mine: library.mine,
+                    visibility: library.visibility,
                     timeZoneIdentifier: store.timeZoneIdentifier,
                     buckets: store.buckets,
                     answering: store.loadedRequest
@@ -472,14 +486,38 @@ struct MediaLibraryView: View {
         .refreshable { await refreshAll() }
     }
 
-    /// All's pull-to-refresh: the list and the day buckets its headings count from, read side by
-    /// side, so a day that gained a picture is not drawn under its old count. The buckets go
-    /// through the store's refreshing read, so a read still pending from before the pull cannot
-    /// answer for it.
-    private func refreshAll() async {
-        async let list: Void = load()
-        async let counts: Void = loadBuckets(refreshing: true)
-        _ = await (list, counts)
+    /// All's pull-to-refresh, and a memo action's re-read: the list and the day buckets its
+    /// headings count from, read side by side, so a day that gained a picture is not drawn under
+    /// its old count. The buckets go through the store's refreshing read, so a read still pending
+    /// from before the pull cannot answer for it. Each read goes out only under `issued` — the
+    /// generation the action ran under, or the one current when the pull began — taken at its own
+    /// issuance (`LibraryRefresh`).
+    private func refreshAll(issuedUnder issued: Int? = nil) async {
+        guard let generation = issued ?? session.activeHandle?.generation else { return }
+        let size = choice.scope.bucketSize
+        await LibraryRefresh.both(
+            issuedUnder: generation,
+            current: { [session] in
+                guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
+                else { return nil }
+                return (handle, baseURL)
+            },
+            list: { [library] handle, baseURL in
+                await library?.refresh(using: handle, baseURL: baseURL)
+            },
+            counts: { [library, buckets] handle, baseURL in
+                guard let library, let buckets, let size else { return }
+                await buckets.refresh(
+                    size: size,
+                    filter: library.filter,
+                    tag: library.tag,
+                    mine: library.mine,
+                    visibility: library.visibility,
+                    using: handle,
+                    baseURL: baseURL
+                )
+            }
+        )
     }
 
     /// The title, the line naming what the grid holds, and the filter menu that changes it.
@@ -492,10 +530,13 @@ struct MediaLibraryView: View {
             ),
             select: choice.scope == .all ? { selection.begin() } : nil,
             selecting: selection.isActive,
+            menuRows: selectRows,
             close: { selection.close() }
         ) {
             LibraryFilterMenuContent(
                 filter: filterBinding(library),
+                mine: mineBinding(library),
+                visibility: visibilityBinding(library),
                 order: sortBinding(library),
                 groupByDay: groupByDayBinding,
                 tileLayout: tileLayoutBinding
@@ -513,6 +554,31 @@ struct MediaLibraryView: View {
             set: { chosen in
                 guard chosen != library.filter else { return }
                 library.setFilter(chosen)
+                Task { await load() }
+            }
+        )
+    }
+
+    /// "Captured by me" (MEMNG-787): a new list, read from its first page as a kind is; the buckets
+    /// follow through their task key, which names it. Not persisted, as the kind is not.
+    private func mineBinding(_ library: MediaLibraryStore) -> Binding<Bool> {
+        Binding(
+            get: { library.mine },
+            set: { chosen in
+                guard chosen != library.mine else { return }
+                library.setMine(chosen)
+                Task { await load() }
+            }
+        )
+    }
+
+    /// Visibility (MEMNG-787), as "Captured by me".
+    private func visibilityBinding(_ library: MediaLibraryStore) -> Binding<MediaVisibilityFilter> {
+        Binding(
+            get: { library.visibility },
+            set: { chosen in
+                guard chosen != library.visibility else { return }
+                library.setVisibility(chosen)
                 Task { await load() }
             }
         )
@@ -603,6 +669,68 @@ struct MediaLibraryView: View {
         )
     }
 
+    /// The Library's query as one value: what a visibility question is fenced by (MEMNG-788).
+    private var filterKey: String {
+        guard let library else { return "" }
+        return [
+            "\(library.filter)", "\(library.order)", library.tag ?? "", "\(library.mine)",
+            "\(library.visibility)",
+        ].joined(separator: "|")
+    }
+
+    /// The chosen pictures as the memo actions see them, in the order chosen.
+    private var chosenPictures: [MemoActionPicture] {
+        selection.rows(in: library?.items ?? []).map(MemoActionPicture.init)
+    }
+
+    private var selectRows: [SelectAction] {
+        Self.selectRows(
+            memos: MemoActionPicture.memos(of: chosenPictures),
+            free: actions != nil
+                && LibrarySelectionPresentation.actionsEnabled(
+                    count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning),
+            tagged: (trips?.trips ?? []).filter { $0.tag != nil }
+        ) { addToTrip($0) }
+    }
+
+    /// Select mode's actions menu (MEMNG-788): Add to trip, a submenu of the `tagged` trips, drawn
+    /// disabled while none of the chosen pictures is on a memo of mine (`memos` empty) or the
+    /// menu is not `free`. No visibility row: visibility belongs to a memo, and what select mode
+    /// chooses is pictures. A function of its inputs because a SwiftUI `Menu` in the screen's
+    /// content hands UIKit no rows until a real touch opens it, so no hosted test can read them.
+    static func selectRows(
+        memos: [String], free: Bool, tagged: [Trip], add: @escaping (Trip) -> Void
+    ) -> [SelectAction] {
+        let tripRows = tagged.map { trip in
+            SelectAction(id: "add-to-\(trip.uid)", title: trip.title, systemImage: "suitcase") {
+                add(trip)
+            }
+        }
+        return [
+            SelectAction(
+                id: "add-to-trip", title: MemoActionFlow.addRowTitle, systemImage: "suitcase",
+                disabled: !free || memos.isEmpty || tagged.isEmpty, children: tripRows)
+        ]
+    }
+
+    /// A trip of the submenu: the chosen pictures go to it in one inclusion; no question, it
+    /// changes no visibility and is undone by Remove.
+    private func addToTrip(_ trip: Trip) {
+        guard let actions, let handle = session.activeHandle, let baseURL = session.serverBaseURL
+        else { return }
+        let chosen = chosenPictures
+        Task {
+            await acting.perform(
+                issuedUnder: handle.generation,
+                current: { [session] in session.activeHandle?.generation },
+                rereads: [{ await refreshAll(issuedUnder: handle.generation) }]
+            ) {
+                await actions.add(
+                    attachments: chosen, toTrip: trip, using: handle, baseURL: baseURL)
+            }
+        }
+    }
+
     /// The alert's yes. The session handle is taken HERE, at the answer, and the whole run goes out
     /// on it (`MediaLibraryStore.delete`). Claimed synchronously, before any task, for the reason
     /// `MemoDetailView.sendPictureDelete` gives.
@@ -687,6 +815,8 @@ struct MediaLibraryView: View {
                 size: size,
                 filter: library.filter,
                 tag: library.tag,
+                mine: library.mine,
+                visibility: library.visibility,
                 using: handle,
                 baseURL: baseURL
             )
@@ -695,6 +825,8 @@ struct MediaLibraryView: View {
                 size: size,
                 filter: library.filter,
                 tag: library.tag,
+                mine: library.mine,
+                visibility: library.visibility,
                 using: handle,
                 baseURL: baseURL
             )
@@ -733,6 +865,8 @@ private struct BucketListKey: Equatable {
     let scope: LibraryScope
     let filter: MediaLibraryFilter?
     let tag: String?
+    let mine: Bool?
+    let visibility: MediaVisibilityFilter?
     let subject: String?
 }
 

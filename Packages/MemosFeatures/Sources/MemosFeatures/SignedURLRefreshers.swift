@@ -216,16 +216,21 @@ final class TripURLRefresher: SignedURLRefreshing {
     /// lease, and the store starts nothing for it. Nil reads nothing for an automatic collection;
     /// a trip's reads are fenced by its record instead.
     let lease: TripMemberStore.CoverLease?
+    /// The grid's filter when the refresher was made (MEMNG-780): a filtered grid draws the
+    /// filtered read's copies, so that read is made again too.
+    let query: TripMemberQuery
 
     init(
         members: TripMemberStore, trips: TripStore, scope: CollectionScope,
-        session: IssuingSession, lease: TripMemberStore.CoverLease?
+        session: IssuingSession, lease: TripMemberStore.CoverLease?,
+        query: TripMemberQuery = .unfiltered
     ) {
         self.members = members
         self.trips = trips
         self.scope = scope
         self.session = session
         self.lease = lease
+        self.query = query
     }
 
     var owner: AnyObject { members }
@@ -233,12 +238,14 @@ final class TripURLRefresher: SignedURLRefreshing {
     /// The session is read in the turn that enters the store, for `MemoURLRefresher`'s reason.
     /// `uid` is the picture whose signature lapsed; the trip read again is this refresher's own.
     func signatureExpired(uid: String) {
-        Task { [members, trips, scope = self.scope, session, lease] in
+        Task { [members, trips, scope = self.scope, session, lease, query] in
             guard let handle = session.handle(), let baseURL = session.baseURL() else { return }
             switch scope {
             case .trip(let opened):
                 guard let trip = trips.trips.first(where: { $0.uid == opened.uid }) else { return }
                 await members.drain(trip, using: handle, baseURL: baseURL)
+                // Fenced by the store against the grid's choice NOW, not the one captured here.
+                await members.renewFiltered(trip, query: query, using: handle, baseURL: baseURL)
             case .automatic:
                 guard let lease else { return }
                 await members.drain(scope, under: lease, using: handle, baseURL: baseURL)

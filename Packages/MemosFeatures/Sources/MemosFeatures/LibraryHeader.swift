@@ -16,7 +16,7 @@ struct LibraryHeader<MenuContent: View>: View {
     var select: (() -> Void)?
     /// Whether the grid is in select mode, which swaps the controls on the right.
     var selecting = false
-    /// Select mode's actions menu: none on the Library yet (WPN-14 adds them).
+    /// Select mode's actions menu: Add to trip (MEMNG-788).
     var menuRows: [SelectAction] = []
     var close: () -> Void = {}
     @ViewBuilder let menu: () -> MenuContent
@@ -117,9 +117,9 @@ struct HeaderGlassCircle: View {
 }
 
 /// The round filter button's menu, in the Photos app's shape (MEMNG-779, WPN-12 phase 1): the
-/// kinds as an inline Picker under the heading "Filter", which is what draws the checkmark on the
-/// chosen row; a divider; then a nested "Sort By" menu whose label says the order in force, and a
-/// nested "View Options" menu holding Group by Day (MEMNG-818) and the tile layout (MEMNG-821).
+/// shared filter rows (`MediaFilterRows` — the kinds, "Captured by me" and Visibility); a
+/// divider; then a nested "Sort By" menu whose label says the order in force, and a nested
+/// "View Options" menu holding Group by Day (MEMNG-818) and the tile layout (MEMNG-821).
 ///
 /// The tags are not here — they are reached from Collections — and neither is clearing the media
 /// cache, which is the Settings app's Storage group (MEMNG-781).
@@ -128,9 +128,31 @@ struct LibraryFilterMenuContent: View {
     static let symbol = "line.3.horizontal.decrease"
 
     @Binding var filter: MediaLibraryFilter
+    @Binding var mine: Bool
+    @Binding var visibility: MediaVisibilityFilter
     @Binding var order: MediaLibraryOrder
     @Binding var groupByDay: Bool
     @Binding var tileLayout: LibraryTileLayout
+
+    var body: some View {
+        MediaFilterRows(filter: $filter, mine: $mine, visibility: $visibility)
+        Divider()
+        SortByMenu(order: $order)
+        ViewOptionsMenu(groupByDay: $groupByDay, tileLayout: $tileLayout)
+    }
+}
+
+/// The filter rows the Library's menu and a trip's share (MEMNG-787), one copy for both: the
+/// kinds as an inline Picker under "Filter"; "Captured by me" as a Toggle — its own row with a
+/// checkmark, because it combines with whichever kind is chosen; then the nested Visibility menu.
+struct MediaFilterRows: View {
+    /// The toggle row's words and glyph.
+    static let capturedByMe = "Captured by me"
+    static let capturedByMeSymbol = "person.crop.circle"
+
+    @Binding var filter: MediaLibraryFilter
+    @Binding var mine: Bool
+    @Binding var visibility: MediaVisibilityFilter
 
     var body: some View {
         Picker("Filter", selection: $filter) {
@@ -139,9 +161,43 @@ struct LibraryFilterMenuContent: View {
             }
         }
         .pickerStyle(.inline)
-        Divider()
-        SortByMenu(order: $order)
-        ViewOptionsMenu(groupByDay: $groupByDay, tileLayout: $tileLayout)
+        Toggle(Self.capturedByMe, systemImage: Self.capturedByMeSymbol, isOn: $mine)
+        LibraryVisibilityMenu(visibility: $visibility)
+    }
+}
+
+/// The nested "Visibility" menu: its label carries the choice in force as a second line, as Sort
+/// By's does, and opening it shows Any, Public and Just us with a checkmark on the current one.
+struct LibraryVisibilityMenu: View {
+    @Binding var visibility: MediaVisibilityFilter
+
+    var body: some View {
+        Menu {
+            Picker("Visibility", selection: $visibility) {
+                ForEach(MediaVisibilityFilter.allCases) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            Text("Visibility")
+            Text(visibility.label)
+                .font(.caption)
+        }
+        .accessibilityLabel("Visibility")
+        .accessibilityValue(visibility.label)
+    }
+}
+
+extension MediaVisibilityFilter {
+    /// The row a menu draws: the memo visibilities' own words (`MemoVisibility.label`), and "Any".
+    var label: String {
+        switch self {
+        case .any: "Any"
+        case .public: MemoVisibility.public.label
+        case .justUs: MemoVisibility.protected.label
+        }
     }
 }
 

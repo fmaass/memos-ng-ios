@@ -65,37 +65,11 @@ public struct LibrarySelection: Sendable, Equatable {
         }
     }
 
-    /// Whether every picture in `rows` is chosen, mine or another member's (MEMNG-684) — what the
-    /// header's toggle shows, and what makes its next tap a clear. False over an empty view: there
-    /// is nothing there for a tap to clear.
-    public func coversAll(in rows: [LibraryRow]) -> Bool {
-        !rows.isEmpty && rows.allSatisfy { members.contains($0.id) }
-    }
-
-    /// Chooses every picture in `rows`, mine or another member's, after the ones already chosen
-    /// and in the grid's order. What a delete may take of them is `deletable(in:)`'s question.
-    public mutating func selectAll(in rows: [LibraryRow]) {
-        guard isActive else { return }
-        for row in rows where members.insert(row.id).inserted {
-            uids.append(row.id)
-        }
-    }
-
     /// Empties the selection and stays in select mode.
     public mutating func clear() {
         uids = []
         members = []
         narrowed = false
-    }
-
-    /// The header's round toggle: select all in view, and the same tap again clears.
-    public mutating func toggleAll(in rows: [LibraryRow]) {
-        guard isActive else { return }
-        if coversAll(in: rows) {
-            clear()
-        } else {
-            selectAll(in: rows)
-        }
     }
 
     /// The header's close button: select mode ends and nothing stays chosen — nor narrowed — so

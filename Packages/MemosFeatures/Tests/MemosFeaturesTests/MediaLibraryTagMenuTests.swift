@@ -129,14 +129,16 @@ struct LibraryFilterMenuRenderTests {
     private struct FilterHarness: View {
         @State var filter: MediaLibraryFilter
         @State var order: MediaLibraryOrder
+        @State var mine = false
+        @State var visibility = MediaVisibilityFilter.any
         @State var groupByDay = true
         @State var tileLayout = LibraryTileLayout.mixed
 
         var body: some View {
             List {
                 LibraryFilterMenuContent(
-                    filter: $filter, order: $order, groupByDay: $groupByDay,
-                    tileLayout: $tileLayout)
+                    filter: $filter, mine: $mine, visibility: $visibility, order: $order,
+                    groupByDay: $groupByDay, tileLayout: $tileLayout)
             }
         }
     }
@@ -245,7 +247,7 @@ struct LibraryFilterMenuRenderTests {
     private static func isSortBy(_ label: String) -> Bool { label.hasPrefix("Sort By") }
 
     @Test(
-        "the filter menu lists Filter, its three kinds, a divider, Sort By and View Options, nothing else"
+        "the filter menu: Filter, kinds, Captured by me, Visibility, Sort By, View Options"
     )
     func filterMenuRows() async {
         let window = Self.host(FilterHarness(filter: .all, order: .newestFirst))
@@ -260,9 +262,16 @@ struct LibraryFilterMenuRenderTests {
 
         // Exactly these, in this order: no tag row, no "Clear media cache", no second sort group,
         // and View Options last (MEMNG-818).
-        let drawn = found.map { Self.isSortBy($0.label) ? "Sort By" : $0.label }
+        // "Captured by me" and Visibility (MEMNG-787) sit between the kinds and Sort By.
+        let drawn = found.map {
+            Self.isSortBy($0.label)
+                ? "Sort By" : $0.label.hasPrefix("Visibility") ? "Visibility" : $0.label
+        }
         #expect(
-            drawn == ["Filter", "All Items", "Photos", "Videos", "Sort By", "View Options"],
+            drawn == [
+                "Filter", "All Items", "Photos", "Videos", "Captured by me", "Visibility",
+                "Sort By", "View Options",
+            ],
             "the menu draws \(found.map(\.label))")
         let ticked = found.filter(\.selected).map(\.label)
         #expect(ticked == ["All Items"], "ticked: \(ticked)")
@@ -285,7 +294,8 @@ struct LibraryFilterMenuRenderTests {
         // out, so it is read from the menu's own body — the picker, the Divider, the nested Sort
         // By menu, then the nested View Options menu, in that order and nothing between.
         let content = LibraryFilterMenuContent(
-            filter: .constant(.all), order: .constant(.newestFirst), groupByDay: .constant(true),
+            filter: .constant(.all), mine: .constant(false), visibility: .constant(.any),
+            order: .constant(.newestFirst), groupByDay: .constant(true),
             tileLayout: .constant(.mixed))
         let parts =
             Mirror(reflecting: content.body).descendant("value").map { tuple in
@@ -295,6 +305,20 @@ struct LibraryFilterMenuRenderTests {
         #expect(parts.count == 4 && parts[1] == "Divider", "no divider second: \(parts)")
         #expect(parts.count == 4 && parts[2] == "SortByMenu", "Sort By is not third: \(parts)")
         #expect(parts.last == "ViewOptionsMenu", "View Options is not last: \(parts)")
+        #expect(parts.first == "MediaFilterRows", "the shared rows are not first: \(parts)")
+
+        // The shared rows (MEMNG-787): the kinds' Picker, the "Captured by me" Toggle, then the
+        // nested Visibility menu, one copy for the Library and the trip alike.
+        let shared = MediaFilterRows(
+            filter: .constant(.all), mine: .constant(false), visibility: .constant(.any))
+        let rows =
+            Mirror(reflecting: shared.body).descendant("value").map { tuple in
+                Mirror(reflecting: tuple).children.map { "\(type(of: $0.value))" }
+            } ?? []
+        #expect(rows.count == 3, "the shared rows are \(type(of: shared.body))")
+        #expect(rows.first?.contains("Picker<") == true, "no kind picker first: \(rows)")
+        #expect(rows.count == 3 && rows[1].hasPrefix("Toggle"), "no toggle second: \(rows)")
+        #expect(rows.last == "LibraryVisibilityMenu", "no Visibility menu last: \(rows)")
 
         // View Options' own two groups (MEMNG-821): the toggle, a divider, then the layout pair.
         let options = ViewOptionsMenuContent(
@@ -432,5 +456,22 @@ struct LibraryFilterMenuRenderTests {
         #expect(
             lines.map(\.label) == ["Sort By", "Oldest First"],
             "the label shows \(lines.map(\.label)) under Oldest First")
+    }
+}
+
+// MARK: - Captured by me and Visibility (MEMNG-787)
+
+extension LibraryFilterMenuRenderTests {
+    /// Any, Public, Just us — the memo visibilities' own words where one exists, and never
+    /// Private, which nobody else can see and so is no filter of a shared library.
+    @Test("Visibility offers Any, Public and Just us in the app's own words, and no Private")
+    func visibilityRows() {
+        let labels = MediaVisibilityFilter.allCases.map(\.label)
+        #expect(labels == ["Any", "Public", "Just us"], "\(labels)")
+        #expect(MediaVisibilityFilter.public.label == MemoVisibility.public.label)
+        #expect(MediaVisibilityFilter.justUs.label == MemoVisibility.protected.label)
+        #expect(MediaVisibilityFilter.allCases.compactMap(\.visibility) == [.public, .protected])
+        #expect(MediaFilterRows.capturedByMe == "Captured by me")
+        #expect(MediaFilterRows.capturedByMeSymbol == "person.crop.circle")
     }
 }
