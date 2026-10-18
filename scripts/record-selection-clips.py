@@ -11,9 +11,11 @@ Per scene the test writes `clip-ready` = `<scene> <nonce>` into the host app's t
 script starts `simctl io <udid> recordVideo` into `<out>/<scene>.mov`, answers `clip-recording`
 with the same nonce once the first frame is in, gives the scene's touches through `idb ui`
 (a SwiftUI Menu opens only on a real touch), stops the recording with SIGINT (which finalises the
-movie) and answers `clip-finished`. A ready file older than this script's start, or a nonce it
-already answered, is never taken. `--settings` records one more scene with no test behind it, once
-the tests are over: the Settings app's page for the app, scrolled to its Storage group.
+movie) and answers `clip-finished` = `<scene> ok|failed <nonce>`: a scene whose touches or movie
+failed says so, and the test fails on it rather than on the next scene's silence. A ready file
+older than this script's start, or a nonce it already answered, is never taken. `--settings`
+records one more scene with no test behind it, once the tests are over: the Settings app's page
+for the app, scrolled to its Storage group.
 
 Exit: 0 every expected scene recorded at >= 2 s; 1 anything else; 2 usage.
 """
@@ -243,7 +245,14 @@ class Driver:
         time.sleep(1)
         self.tap_bar("More")   # select mode's actions menu
         time.sleep(2.5)
-        self.find("Set visibility for 2 memos", prefix=True)   # the nested menu, above the red row
+        self.find("Remove 2 pictures from trip", prefix=True)   # the menu is open
+        # Visibility belongs to a memo, not to the pictures select mode chooses: no row for it.
+        offered = [
+            e.get("AXLabel") for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Set visibility")
+        ]
+        if offered:
+            raise RuntimeError("select mode's More offers a visibility row: %r" % offered)
         time.sleep(1.5)
         self.tap("Remove 2 pictures from trip", prefix=True)   # the row ends in an ellipsis
         time.sleep(2.5)
@@ -400,7 +409,8 @@ class Driver:
 
     # --- one recorded scene ----------------------------------------------------------------------
     def record(self, scene, answer):
-        """Records `scene`; `answer(name)` writes a handshake file, or does nothing without a test."""
+        """Records `scene`; `answer(name, verdict)` writes a handshake file, or does nothing without
+        a test."""
         self.scene = scene
         self.step = 0
         movie = os.path.join(self.out, scene + ".mov")
@@ -433,15 +443,17 @@ class Driver:
         except subprocess.TimeoutExpired:
             recorder.kill()
             failure = failure or RuntimeError("recordVideo outlived SIGINT by 15 s")
-        answer("clip-finished")
+        duration = None
+        if not failure:
+            duration = subprocess.run(
+                ["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=nw=1:nk=1", movie], capture_output=True, text=True).stdout.strip()
+            log("scene %s: %s lasts %s s" % (scene, movie, duration))
+            if not duration or float(duration) < 2.0:
+                failure = RuntimeError("clip %s lasts %r s, under 2 s" % (movie, duration))
+        answer("clip-finished", "failed" if failure else "ok")
         if failure:
             raise RuntimeError("scene %s: %s" % (scene, failure))
-        duration = subprocess.run(
-            ["/opt/homebrew/bin/ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nw=1:nk=1", movie], capture_output=True, text=True).stdout.strip()
-        log("scene %s: %s lasts %s s" % (scene, movie, duration))
-        if not duration or float(duration) < 2.0:
-            raise RuntimeError("clip %s lasts %r s, under 2 s" % (movie, duration))
         return duration
 
 
@@ -510,11 +522,12 @@ def main():
         if scene not in expected:
             log("RECORD FAIL: the test asked for an unknown scene %r" % scene)
             put(tmp, "clip-recording", "%s %s" % (scene, nonce))
-            put(tmp, "clip-finished", "%s %s" % (scene, nonce))
+            put(tmp, "clip-finished", "%s failed %s" % (scene, nonce))
             sys.exit(1)
         try:
             durations[scene] = driver.record(
-                scene, lambda name, s=scene, n=nonce: put(tmp, name, "%s %s" % (s, n)))
+                scene, lambda name, verdict=None, s=scene, n=nonce: put(
+                    tmp, name, " ".join(f for f in (s, verdict, n) if f)))
         except Exception as error:
             log("RECORD FAIL: %s" % error)
             sys.exit(1)
@@ -527,7 +540,7 @@ def main():
                            check=True, capture_output=True, timeout=60)
             time.sleep(3)
             durations["781b-settings-storage"] = driver.record(
-                "settings-storage", lambda name: None)
+                "settings-storage", lambda name, verdict=None: None)
             os.replace(os.path.join(args.out, "settings-storage.mov"),
                        os.path.join(args.out, "781b-settings-storage.mov"))
         except Exception as error:

@@ -16,7 +16,7 @@ struct LibraryHeader<MenuContent: View>: View {
     var select: (() -> Void)?
     /// Whether the grid is in select mode, which swaps the controls on the right.
     var selecting = false
-    /// Select mode's actions menu: Add to trip and Set visibility (MEMNG-788).
+    /// Select mode's actions menu: Add to trip (MEMNG-788).
     var menuRows: [SelectAction] = []
     var close: () -> Void = {}
     @ViewBuilder let menu: () -> MenuContent

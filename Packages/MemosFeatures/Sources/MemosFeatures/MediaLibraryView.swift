@@ -52,9 +52,8 @@ struct MediaLibraryView: View {
     /// banner they share (`SelectResults`): the toast shows whichever spoke last.
     @State private var results = SelectResults()
     private var deleting: LibraryDeleteFlow { results.deleting }
-    /// Select mode's memo actions (MEMNG-788): the visibility question and the last run's banner.
+    /// Select mode's memo actions (MEMNG-788): Add to trip and the last run's banner.
     private var acting: MemoActionFlow { results.acting }
-    @State private var askingVisibility = false
     @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     @Environment(TripStore.self) private var trips: TripStore?
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
@@ -148,20 +147,6 @@ struct MediaLibraryView: View {
                         Button("Cancel", role: .cancel) { deleting.claim(.cancelled) }
                     } message: {
                         Text(LibraryDeleteFlow.explanation)
-                    }
-                    // Set visibility's question (MEMNG-788), on a view of its own.
-                    .background {
-                        Color.clear.alert(
-                            MemoActionFlow.question(
-                                acting.asking?.memos.count ?? 0,
-                                to: acting.asking?.visibility ?? .public),
-                            isPresented: $askingVisibility
-                        ) {
-                            Button(MemoActionFlow.confirmTitle) { confirmVisibility() }
-                            Button("Cancel", role: .cancel) { acting.cancel() }
-                        } message: {
-                            Text(MemoActionFlow.explanation)
-                        }
                     }
                 } else if dock != nil, Self.footRow(bottomBar) != nil {
                     // The room of the app's bar (`footRow`, MEMNG-690), which `MainTabs` keeps
@@ -288,11 +273,6 @@ struct MediaLibraryView: View {
             await loadBuckets()
         }
         // A picture that leaves the grid leaves the selection with it.
-        // A visibility question asked under one query is no question under another.
-        .onChange(of: filterKey) {
-            acting.void()
-            askingVisibility = false
-        }
         .onChange(of: library?.items) { _, items in
             selection.prune(keeping: items ?? [])
         }
@@ -703,67 +683,34 @@ struct MediaLibraryView: View {
         selection.rows(in: library?.items ?? []).map(MemoActionPicture.init)
     }
 
-    /// Select mode's actions menu (MEMNG-788): Add to trip, a submenu of the trips that have a
-    /// tag, and Set visibility for the chosen memos, Public or Just us behind a question. Each is
-    /// drawn disabled while none of the chosen pictures is on a memo of mine.
     private var selectRows: [SelectAction] {
-        let memos = MemoActionPicture.memos(of: chosenPictures)
-        let free =
-            actions != nil
-            && LibrarySelectionPresentation.actionsEnabled(
-                count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
-        let tagged = (trips?.trips ?? []).filter { $0.tag != nil }
+        Self.selectRows(
+            memos: MemoActionPicture.memos(of: chosenPictures),
+            free: actions != nil
+                && LibrarySelectionPresentation.actionsEnabled(
+                    count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning),
+            tagged: (trips?.trips ?? []).filter { $0.tag != nil }
+        ) { addToTrip($0) }
+    }
+
+    /// Select mode's actions menu (MEMNG-788): Add to trip, a submenu of the `tagged` trips, drawn
+    /// disabled while none of the chosen pictures is on a memo of mine (`memos` empty) or the
+    /// menu is not `free`. No visibility row: visibility belongs to a memo, and what select mode
+    /// chooses is pictures. A function of its inputs because a SwiftUI `Menu` in the screen's
+    /// content hands UIKit no rows until a real touch opens it, so no hosted test can read them.
+    static func selectRows(
+        memos: [String], free: Bool, tagged: [Trip], add: @escaping (Trip) -> Void
+    ) -> [SelectAction] {
         let tripRows = tagged.map { trip in
             SelectAction(id: "add-to-\(trip.uid)", title: trip.title, systemImage: "suitcase") {
-                addToTrip(trip)
+                add(trip)
             }
-        }
-        let visibilityRows = MemoActionFlow.choices.map { value in
-            SelectAction(
-                id: "visibility-\(value.rawValue)", title: value.label,
-                systemImage: value == .public ? "globe" : "person.2"
-            ) { askVisibility(value) }
         }
         return [
             SelectAction(
                 id: "add-to-trip", title: MemoActionFlow.addRowTitle, systemImage: "suitcase",
-                disabled: !free || memos.isEmpty || tagged.isEmpty, children: tripRows),
-            SelectAction(
-                id: "visibility", title: MemoActionFlow.visibilityRowTitle(memos.count),
-                systemImage: "eye", disabled: !free || memos.isEmpty, children: visibilityRows),
+                disabled: !free || memos.isEmpty || tagged.isEmpty, children: tripRows)
         ]
-    }
-
-    /// Public or Just us: the question is asked about the memos chosen NOW, under this session
-    /// and this query (`MemoActionFlow.ask`).
-    private func askVisibility(_ visibility: MemoVisibility) {
-        guard let handle = session.activeHandle else { return }
-        acting.ask(
-            memos: MemoActionPicture.memos(of: chosenPictures), visibility: visibility,
-            generation: handle.generation, filter: filterKey)
-        askingVisibility = acting.asking != nil
-    }
-
-    /// The question's Change, claimed synchronously; the grid and its day counts are read again
-    /// after the run.
-    private func confirmVisibility() {
-        guard let actions, let handle = session.activeHandle,
-            let baseURL = session.serverBaseURL,
-            let asked = acting.claim(generation: handle.generation, filter: filterKey)
-        else {
-            acting.cancel()
-            return
-        }
-        Task {
-            await acting.perform(
-                issuedUnder: handle.generation,
-                current: { [session] in session.activeHandle?.generation },
-                rereads: [{ await refreshAll(issuedUnder: handle.generation) }]
-            ) {
-                await actions.setVisibility(
-                    asked.visibility, forMemos: asked.memos, using: handle, baseURL: baseURL)
-            }
-        }
     }
 
     /// A trip of the submenu: the chosen pictures go to it in one inclusion; no question, it

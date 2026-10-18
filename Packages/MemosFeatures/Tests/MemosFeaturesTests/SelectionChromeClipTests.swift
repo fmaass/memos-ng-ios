@@ -23,6 +23,25 @@ import UIKit
 /// gate sets nothing, so there the tests are reported skipped — never passed — and no gate run
 /// waits on a recorder that is not there.
 extension MediaImageLoaderTests {
+    /// The handshake's verdict field, without a driver: a scene the driver failed reads `failed`,
+    /// and a two-field answer — what the driver wrote before it carried a verdict — reads none,
+    /// so `ClipStage.scene` takes neither for `ok`.
+    @Test("a clip scene's verdict is the middle of three fields; two fields carry none")
+    func clipVerdictField() throws {
+        let name = "clip-verdict-probe"
+        defer { try? FileManager.default.removeItem(at: ClipStage.file(name)) }
+        try "780c-trip-select-remove ok N1".write(
+            to: ClipStage.file(name), atomically: true, encoding: .utf8)
+        #expect(ClipStage.verdict(of: name) == "ok")
+        try "780c-trip-select-remove failed N2\n".write(
+            to: ClipStage.file(name), atomically: true, encoding: .utf8)
+        #expect(ClipStage.verdict(of: name) == "failed")
+        #expect(ClipStage.carries(name, "N2"), "control: the nonce is still the last field")
+        try "780c-trip-select-remove N3".write(
+            to: ClipStage.file(name), atomically: true, encoding: .utf8)
+        #expect(ClipStage.verdict(of: name) == nil)
+    }
+
     @Test(
         "clip 779: the Library's filter menu, Sort By and Show Selected, touched for real",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
@@ -97,7 +116,8 @@ extension MediaImageLoaderTests {
             // The ellipsis menu, left with nothing chosen.
             #expect(await ClipStage.scene("780b-trip-ellipsis-menu"))
             await ClipStage.settle(window, seconds: 1)
-            // Two tiles chosen, Remove asked, Cancel, select mode closed.
+            // Two tiles chosen, More holding no visibility row, Remove asked, Cancel, select mode
+            // closed.
             #expect(await ClipStage.scene("780c-trip-select-remove"))
             // Nothing was removed and select mode is over: the trip's own Filter stands again,
             // and the server never heard an exclusion.
@@ -173,7 +193,9 @@ extension MediaImageLoaderTests {
 /// `clip-ready` = `<scene> <nonce>` — rewritten on every poll, so its modification time stays
 /// newer than the driver's start — and waits for `clip-recording`, then `clip-finished`, each
 /// counting only when its last field is this scene's nonce: a file any earlier run or scene left
-/// behind never stands for this one.
+/// behind never stands for this one. `clip-finished` also carries the driver's verdict
+/// (`<scene> ok|failed <nonce>`): a scene whose touches failed fails here, even the last one,
+/// which no later scene's silence would otherwise catch.
 enum ClipStage {
     /// The require marker: set, a recorder is expected and a silence fails the test.
     nonisolated static var required: String? {
@@ -186,7 +208,8 @@ enum ClipStage {
     }
 
     /// Hands `name` to the driver and holds the screen until it says the scene is recorded:
-    /// up to 120 s for the recording to start, up to 300 s for the driver's touches to end.
+    /// up to 120 s for the recording to start, up to 300 s for the driver's touches to end, and
+    /// the driver must say `ok`.
     static func scene(_ name: String) async -> Bool {
         let nonce = UUID().uuidString
         var waited = 0
@@ -212,7 +235,19 @@ enum ClipStage {
             Issue.record("the driver never finished \(name) within 300 s")
             return false
         }
+        let verdict = verdict(of: "clip-finished")
+        guard verdict == "ok" else {
+            Issue.record("the driver finished \(name) with \(verdict ?? "no verdict"), not ok")
+            return false
+        }
         return true
+    }
+
+    /// The driver's verdict in the handshake file `name`: the middle of its three fields, or nil.
+    static func verdict(of name: String) -> String? {
+        guard let text = try? String(contentsOf: file(name), encoding: .utf8) else { return nil }
+        let fields = text.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
+        return fields.count == 3 ? String(fields[1]) : nil
     }
 
     /// Whether the handshake file `name` answers `nonce`: its last space-separated field is it.
@@ -432,8 +467,7 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
         if !(value("cursor") ?? "").isEmpty { return json("[]") }
         var items: [String]
         if let tag = value("tag") {
-            // Each of a trip's pictures on a memo of its own, so select mode's "Set visibility
-            // for N memos" counts the pictures chosen (MEMNG-780's clip).
+            // Each of a trip's pictures on a memo of its own (MEMNG-780's clip).
             items = (0..<6).map { index in
                 item(
                     "\(tag)-\(index)",
