@@ -181,6 +181,28 @@ struct MediaContextStoreTests {
         #expect(store.facts(for: first) == nil)
     }
 
+    @Test("a record that failed is not asked for again inside its opening; a new opening asks")
+    func failedRecordIsAskedOncePerOpening() async {
+        let sent = Box<Int>(0)
+        let client = Stub.client { _, _, _ in
+            sent.value += 1
+            return Stub.empty(.serviceUnavailable)
+        }
+        let store = MediaContextStore()
+        let handle = SessionHandle(client: client, generation: 1)
+
+        let first = store.open("p1")
+        await store.loadFacts(for: first, using: handle)
+        #expect(store.facts(for: first) == nil)
+        await store.loadFacts(for: first, using: handle)
+        #expect(sent.value == 1, "one opening asked again after its read failed")
+
+        store.close(first)
+        let second = store.open("p1")
+        await store.loadFacts(for: second, using: handle)
+        #expect(sent.value == 2, "a new opening did not ask again")
+    }
+
     @Test("nothing is read for an opening that has already closed")
     func closedOpeningStartsNothing() async {
         let sent = Box<Int>(0)

@@ -365,6 +365,35 @@ struct MediaInfoSheetReadTests {
         #expect(store.facts(for: live)?.width == 4000)
     }
 
+    @Test("a dismissed sheet's late cleanup ends its own opening, never the next sheet's")
+    func lateCleanupEndsOnlyItsOwnSheet() async throws {
+        let transport = GatedMemoTransport()
+        transport.release()
+        let base = URL(string: "https://memos.example.invalid")!
+        let client = APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: base), token: { "memos_pat_info" },
+            transport: transport)
+        let handle = SessionHandle(client: client, generation: 1)
+        let store = MediaContextStore()
+        let page = try #require(MediaViewerPresentation.pages(for: [picture("a")]).first)
+        let context = MediaViewerContext.resolve(page, carried: nil)
+        func sheet(_ subject: MediaInfoSubject) -> MediaInfoSheet {
+            MediaInfoSheet(
+                page: subject.page, context: context, store: subject.store,
+                opening: subject.opening, handle: handle, baseURL: base)
+        }
+
+        let first = sheet(MediaInfoSubject(page: page, store: store, opening: store.open("a")))
+        // The second sheet is presented before the first one's onDisappear has run.
+        let second = sheet(MediaInfoSubject(page: page, store: store, opening: store.open("a")))
+        first.disappeared()
+        await second.appeared()
+
+        #expect(transport.count("attachment_meta_api_attachments__uid__get") == 1)
+        #expect(store.facts(for: second.opening)?.width == 4000, "the first closed the second")
+        #expect(store.facts(for: first.opening) == nil)
+    }
+
     @Test("the File row's dimensions and duration are the file record's when it has them")
     func fileRowPrefersTheRecord() {
         let file = picture("a")

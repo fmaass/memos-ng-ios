@@ -91,14 +91,11 @@ struct MediaViewerView: View {
     /// Whether the chrome — the top row, the date capsule and the bar — is drawn. One tap on the
     /// picture hides all three, the next brings them back (`MediaViewerChrome`).
     @State private var chrome = MediaViewerChrome()
-    /// The page the Info sheet is open about, or nil.
-    @State private var inspecting: MediaPage?
+    /// What the Info sheet is open about — the page, and the opening it took — or nil.
+    @State private var inspecting: MediaInfoSubject?
     /// The Info sheet's two reads, made only when it opens; one store for this viewer's lifetime,
     /// so a memo looked up once is not looked up again.
     @State private var context: MediaContextStore?
-    /// The Info sheet's current opening (`MediaContextStore.Opening`), taken when it opens and
-    /// given back when its content goes — its file record is read for it and shown only under it.
-    @State private var opening: MediaContextStore.Opening?
 
     init(
         selection: MediaViewerSelection,
@@ -131,8 +128,8 @@ struct MediaViewerView: View {
                 bar
             }
         }
-        .sheet(item: $inspecting) { page in
-            infoSheet(for: page)
+        .sheet(item: $inspecting) { subject in
+            infoSheet(for: subject)
         }
         // Another account — or none — while the viewer is up: the Info sheet's memo and record
         // were read as the one before. The store also refuses a handle of another generation on
@@ -282,39 +279,37 @@ struct MediaViewerView: View {
     }
 
     private func openInfo(_ page: MediaPage) {
-        if context == nil, let session {
-            let store = MediaContextStore(
+        let store: MediaContextStore
+        if let context {
+            store = context
+        } else if let session {
+            store = MediaContextStore(
                 onUnauthorized: { [session] refusal in await session.handle(refusal) })
             store.reports(to: session)
-            context = store
-        } else if context == nil {
-            context = MediaContextStore()
+        } else {
+            store = MediaContextStore()
         }
-        opening = context?.open(page.attachment.uid)
-        inspecting = page
+        context = store
+        inspecting = MediaInfoSubject(page: page, store: store, opening: store.open(page.id))
     }
 
-    private func infoSheet(for page: MediaPage) -> some View {
-        let resolved = MediaViewerContext.resolve(page, carried: source.carriedMemo)
-        return MediaInfoSheet(
-            page: page, context: resolved, store: context, opening: opening,
+    /// The sheet for ONE subject: its opening travels inside the value the sheet was presented
+    /// over, so the reads, the rows and the cleanup all name that opening — never whichever one
+    /// the viewer holds by the time a dismissed sheet's `onDisappear` runs.
+    private func infoSheet(for subject: MediaInfoSubject) -> some View {
+        MediaInfoSheet(
+            page: subject.page,
+            context: MediaViewerContext.resolve(subject.page, carried: source.carriedMemo),
+            store: subject.store,
+            opening: subject.opening,
+            handle: session?.activeHandle,
+            baseURL: session?.serverBaseURL,
             showMemo: { uid in
                 inspecting = nil
                 dismiss()
                 jump?.request(uid)
             }
         )
-        .task {
-            guard let context, let opening else { return }
-            await MediaInfoSheet.opened(
-                opening, context: resolved, store: context, handle: session?.activeHandle,
-                baseURL: session?.serverBaseURL)
-        }
-        // Every way the sheet goes — a swipe, Show memo, the cover itself — ends its opening, so
-        // a record still in the air for it lands nowhere.
-        .onDisappear {
-            if let opening { context?.close(opening) }
-        }
     }
 
     /// What can be done with the file on screen — the same actions its tile offers under a long

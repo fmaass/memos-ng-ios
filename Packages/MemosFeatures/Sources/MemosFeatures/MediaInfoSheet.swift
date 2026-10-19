@@ -81,18 +81,33 @@ enum MediaInfoRows {
     }
 }
 
+/// What the viewer presents the Info sheet over: the page, the store, and the opening taken for
+/// this presentation. Identified by the opening, so each presentation is its own sheet.
+struct MediaInfoSubject: Identifiable {
+    let page: MediaPage
+    let store: MediaContextStore
+    let opening: MediaContextStore.Opening
+    var id: MediaContextStore.Opening { opening }
+}
+
 /// The Info sheet: Taken, Memo and File, from what the page carries and the two reads the sheet
 /// makes when it opens (`MediaContextStore`) — never before.
+///
+/// It holds its OWN opening, immutably, from the moment it is built: what it reads, what it shows
+/// and what it gives back when it goes are all that one, so a sheet dismissed after another has
+/// opened ends only itself (`disappeared()`).
 struct MediaInfoSheet: View {
     let page: MediaPage
     let context: MediaViewerContext
-    let store: MediaContextStore?
+    let store: MediaContextStore
     /// This time the sheet is open; its file record is read for it and shown only under it.
-    let opening: MediaContextStore.Opening?
+    let opening: MediaContextStore.Opening
+    var handle: SessionHandle? = nil
+    var baseURL: URL? = nil
     var showMemo: (String) -> Void = { _ in }
 
     var body: some View {
-        let facts = opening.flatMap { store?.facts(for: $0) }
+        let facts = store.facts(for: opening)
         NavigationStack {
             List {
                 Section("Taken") { takenRow(MediaInfoRows.taken(page.attachment, facts: facts)) }
@@ -105,11 +120,23 @@ struct MediaInfoSheet: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.medium, .large])
+        .task { await appeared() }
+        // Every way the sheet goes — a swipe, Show memo, the cover itself — ends ITS opening, so
+        // a record still in the air for it lands nowhere.
+        .onDisappear { disappeared() }
     }
+
+    /// The sheet is on screen: this opening's reads.
+    func appeared() async {
+        await Self.opened(opening, context: context, store: store, handle: handle, baseURL: baseURL)
+    }
+
+    /// The sheet has gone: this opening, and no other, ends.
+    func disappeared() { store.close(opening) }
 
     private var lookedUp: Memo? {
         guard case .lookup(let uid) = context.memo else { return nil }
-        return store?.memo(uid)
+        return store.memo(uid)
     }
 
     @ViewBuilder

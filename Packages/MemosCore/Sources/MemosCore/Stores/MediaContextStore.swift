@@ -88,6 +88,9 @@ public final class MediaContextStore {
     private var heldUnder: Int?
     private var memoFlights: [String: Flight] = [:]
     private var factFlight: (opening: Opening, flight: Flight)?
+    /// The opening whose record has been ASKED for, whatever came back — a failure included, so
+    /// one opening never asks twice. A new opening is another value and asks again.
+    private var attempted: Opening?
     private var nextToken = 0
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
@@ -160,13 +163,14 @@ public final class MediaContextStore {
     /// Starts nothing for an opening that is not the live one.
     public func loadFacts(for opening: Opening, using handle: SessionHandle) async {
         guard live == opening, adopt(handle) else { return }
-        if let answered, answered.opening == opening, case .found = answered.lookup { return }
         if let running = factFlight, running.opening == opening,
             running.flight.generation == generation
         {
             await running.flight.task.value
             return
         }
+        guard attempted != opening else { return }
+        attempted = opening
         nextToken += 1
         let token = nextToken
         let issued = generation
@@ -182,6 +186,7 @@ public final class MediaContextStore {
         heldUnder = nil
         memos = [:]
         answered = nil
+        attempted = nil
         memoFlights = [:]
         factFlight = nil
     }
