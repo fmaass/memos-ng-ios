@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (53)
+
+- A trip now has its own controls in the top bar: Filter, a menu with Rename, Trip Dates and Delete Trip, and Select.
+- A trip's Filter offers All Items, Photos or Videos, Sort By and Removed from trip.
+- The Library's and a trip's filters now also offer Captured by me and Visibility, which narrows the pictures to those of one visibility.
+- In a trip's select mode, More offers Remove from trip, which asks first and keeps the pictures in the library.
+- In the Library's select mode, the chosen pictures can be added to a trip in one step.
+- Please open a trip, try each Filter choice, select two pictures and open More, then select pictures in the Library and add them to a trip.
+
 ## 2.4.0 (52)
 
 - When a trip, tag, month or year is open, the bottom capsule now behaves as it does in the Library: it opens with the four tabs, and the Photos, Journal and Map tabs take their place once the grid scrolls.
