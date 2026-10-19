@@ -40,13 +40,20 @@ struct MediaViewerBar: View {
     var body: some View {
         GlassEffectContainer(spacing: Self.gap) {
             HStack(spacing: Self.gap) {
-                shareButton
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                // Each side is a row that always exists, so the two take equal shares of the width
+                // whether or not the bin is drawn: an empty `if` is no view, and a frame around no
+                // view takes no room.
+                HStack(spacing: 0) {
+                    shareButton
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity)
                 capsule
-                Group {
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
                     if binShown { binButton }
                 }
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(.horizontal, Self.sideInset)

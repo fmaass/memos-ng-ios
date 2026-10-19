@@ -83,14 +83,15 @@ struct MediaViewerBarTests {
         #expect(with.contains("Delete Photo"), "control: the bin is drawn when the rule allows it")
 
         for binShown in [false, true] {
-            let middle = PressProbe.withElement(
-                labelled: "Favorite", in: MediaViewerBar(attachment: file, binShown: binShown)
-            ) { heart -> CGFloat? in
-                guard let heart else { return nil }
-                return heart.accessibilityFrame.maxX
+            let bar = MediaViewerBar(attachment: file, binShown: binShown)
+            let heart = PressProbe.withElement(labelled: "Favorite", in: bar) {
+                $0?.accessibilityFrame.midX
             }
-            // The heart's right edge is the capsule's middle: two equal halves, heart and Info.
-            let edge = try #require(middle, "no heart drawn")
+            let info = PressProbe.withElement(labelled: "Info", in: bar) {
+                $0?.accessibilityFrame.midX
+            }
+            // The capsule's two halves are the same width, so its middle is between their middles.
+            let edge = try #require(heart.flatMap { h in info.map { (h + $0) / 2 } }, "no capsule")
             #expect(abs(edge - 393 / 2) <= 1, "capsule off centre (\(edge)), bin \(binShown)")
         }
     }
@@ -100,8 +101,8 @@ struct MediaViewerBarTests {
         let file = picture("a", memoUID: "m7")
         #expect(MediaTileMenu.viewerActions(for: file) == [.showMemo(uid: "m7")])
         #expect(MediaTileMenu.viewerControl(for: file) == .direct(.showMemo(uid: "m7")))
-        // The tile's own long-press list keeps it: only the viewer moved it.
-        #expect(MediaTileMenu.actions(for: file) == [.showMemo(uid: "m7"), .share(file)])
+        // A file WITH something to share, whose tile list keeps Share while the viewer's rows
+        // drop it, is `MediaTileMenuTests.overlayOffersTheWholeActionSet`.
         let labels = ScreenProbe.labels(of: MediaViewerBar(attachment: file, binShown: false))
         #expect(labels.contains("Share"), "the bar has no Share: \(labels)")
         #expect(labels.contains("Info"))
@@ -148,8 +149,9 @@ struct MediaViewerContextTests {
         #expect(line(now - 3 * day) == "Friday")
         #expect(line(now - 6 * day) == "Tuesday")
         #expect(line(now - 7 * day) == "Oct 12, 2026")
-        #expect(
-            MediaViewerDateCapsule.timeLine(for: now, calendar: utc, locale: posix) == "12:00 PM")
+        // The formatter puts a narrow no-break space before the period; compared as a space.
+        let time = MediaViewerDateCapsule.timeLine(for: now, calendar: utc, locale: posix)
+        #expect(time.replacingOccurrences(of: "\u{202F}", with: " ") == "12:00 PM")
     }
 
     @Test("a memo page is dated by the camera's civil clock")
