@@ -1,15 +1,10 @@
 import MemosCore
 import SwiftUI
 
-/// Select mode's memo actions on a screen (MEMNG-788): the visibility question and its answer,
-/// and the banner of the last run — "N of M changed", "N of M added", or "Another change is still
-/// running" when the store refused.
-///
-/// **The question is about the memos, and says so** (plan decision 5): N counts the DISTINCT memos
-/// of the caller's chosen pictures, and the message discloses that a memo changes as a whole —
-/// its text and every other picture on it. The memos, the value, the session generation and the
-/// screen's filter are captured WHEN IT ASKS; the answer is claimed synchronously (`claim`), so a
-/// second answer finds none, and one given under another session or filter sends nothing.
+/// Select mode's memo actions on a screen (MEMNG-788): the banner of the last run — "N of M
+/// added", or "Another change is still running" when the store refused. Set visibility left select
+/// mode on 2026-10-18 (visibility belongs to a memo, not to a picture), and its question with it;
+/// `MemoActionStore` keeps the action.
 ///
 /// **What a run does after it returns is fenced by the session that issued it** (`perform`): the
 /// banner and every re-read are asked for only while that session's generation is still the
@@ -20,17 +15,6 @@ import SwiftUI
 @MainActor
 @Observable
 final class MemoActionFlow {
-    /// What a visibility question asked about.
-    struct Question: Equatable {
-        let memos: [String]
-        let visibility: MemoVisibility
-        let generation: Int
-        /// The screen's filter when it asked, as the screen spells it.
-        let filter: String
-    }
-
-    /// The open visibility question, or nil. What the alert binds to.
-    private(set) var asking: Question?
     /// What the last run has to say, or nil. Also published into `banner`, which the screen shows.
     private(set) var message: String?
     /// Which run is the live one: moved by `abandon`, so a run that set out before has no select
@@ -43,25 +27,7 @@ final class MemoActionFlow {
         self.banner = banner
     }
 
-    /// The visibility choices a member can give a whole memo from select mode.
-    static let choices: [MemoVisibility] = [.public, .protected]
     static let addRowTitle = "Add to trip"
-    static let confirmTitle = "Change"
-    static let explanation =
-        "The memos these pictures belong to change as a whole — "
-        + "their text and every other picture on them."
-
-    static func visibilityRowTitle(_ count: Int) -> String {
-        "Set visibility for \(memos(count))"
-    }
-
-    static func question(_ count: Int, to visibility: MemoVisibility) -> String {
-        "Change \(memos(count)) to \(visibility.label)?"
-    }
-
-    private static func memos(_ count: Int) -> String {
-        count == 1 ? "1 memo" : "\(count) memos"
-    }
 
     /// The banner of a finished run: of M asked, N changed (or added), the pictures the outbox
     /// held back, and what stopped the rest.
@@ -83,30 +49,6 @@ final class MemoActionFlow {
         if let failure = outcome.failure { text += ". \(failure)" }
         return text
     }
-
-    /// The row's Public or Just us: a question about `memos`, or nothing when there are none.
-    func ask(memos: [String], visibility: MemoVisibility, generation: Int, filter: String) {
-        guard !memos.isEmpty else { return }
-        say(nil)
-        asking = Question(
-            memos: memos, visibility: visibility, generation: generation, filter: filter)
-    }
-
-    /// The alert's Change, claimed NOW: the question is taken in this turn, so a second answer
-    /// finds none, and it is handed back only while the session and the filter it was asked under
-    /// are still the screen's.
-    func claim(generation: Int, filter: String) -> Question? {
-        guard let asked = asking else { return nil }
-        asking = nil
-        guard asked.generation == generation, asked.filter == filter else { return nil }
-        return asked
-    }
-
-    /// Cancel, or the alert going away.
-    func cancel() { asking = nil }
-
-    /// The session or the filter changed: the open question is no question any more.
-    func void() { asking = nil }
 
     /// Runs an action issued under the session of `generation` and applies what it says: a
     /// finished run's banner, then each of the screen's re-reads (`rereads`, in order); a refusal's
@@ -151,10 +93,9 @@ final class MemoActionFlow {
         }
     }
 
-    /// Select mode ended: the question closes and a run still out stops being this screen's.
+    /// Select mode ended: a run still out stops being this screen's.
     func abandon() {
         run += 1
-        asking = nil
         say(nil)
     }
 

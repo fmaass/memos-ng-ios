@@ -669,15 +669,6 @@ struct MediaLibraryView: View {
         )
     }
 
-    /// The Library's query as one value: what a visibility question is fenced by (MEMNG-788).
-    private var filterKey: String {
-        guard let library else { return "" }
-        return [
-            "\(library.filter)", "\(library.order)", library.tag ?? "", "\(library.mine)",
-            "\(library.visibility)",
-        ].joined(separator: "|")
-    }
-
     /// The chosen pictures as the memo actions see them, in the order chosen.
     private var chosenPictures: [MemoActionPicture] {
         selection.rows(in: library?.items ?? []).map(MemoActionPicture.init)
