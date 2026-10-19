@@ -23,6 +23,9 @@ extension MemoAttachment {
             width: marker.width,
             height: marker.height,
             duration: nil,
+            // The marker's own owner flag. Its `takenAt` is a display date and stays off this
+            // model: it rides to the viewer as `MediaPage.takenAt`, never as capture metadata.
+            mine: marker.mine,
             thumbnailURL: marker.thumbnailURL,
             previewURL: marker.previewURL,
             webURL: marker.webURL,

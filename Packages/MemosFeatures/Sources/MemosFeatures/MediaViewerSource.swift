@@ -31,7 +31,7 @@ enum MediaViewerSource {
         switch self {
         case .fixed(let pages): pages
         case .library(let pager, _):
-            MediaViewerPresentation.pages(for: pager.items.map(\.attachment))
+            MediaViewerPresentation.pages(for: pager.items)
         case .memo(let resolve, let fallback):
             resolve().map { MediaViewerPresentation.pages(for: $0.attachments) } ?? fallback
         }
@@ -46,6 +46,13 @@ enum MediaViewerSource {
     /// have been running for a while already. Half a page is the distance at which a fast swiper
     /// never catches the end — and it is measured in the store's OWN page size, so a store built
     /// with a different one moves this with it rather than around it.
+    /// The memo the pages hang on, when this source carries it: a memo's own viewer does, the
+    /// library and the map do not, and their pages name the memo by uid instead.
+    var carriedMemo: Memo? {
+        guard case .memo(let resolve, _) = self else { return nil }
+        return resolve()
+    }
+
     static func lookahead(pageSize: Int) -> Int {
         max(1, pageSize / 2)
     }

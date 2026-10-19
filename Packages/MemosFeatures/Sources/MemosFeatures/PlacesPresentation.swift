@@ -269,9 +269,12 @@ nonisolated enum PlacesPresentation {
     /// against this function in the tests rather than called from it.
     @MainActor
     static func open(_ uid: String, in list: [PlaceMarker]) -> MediaViewerSelection? {
-        MediaViewerPresentation.viewer(
+        let taken = Dictionary(
+            list.map { ($0.uid, $0.takenAt) }, uniquingKeysWith: { first, _ in first })
+        return MediaViewerPresentation.viewer(
             for: PlaceOrder.newestFirst(list).map(MemoAttachment.init),
-            startingAt: uid
+            startingAt: uid,
+            takenAt: { taken[$0.uid] }
         )
     }
 

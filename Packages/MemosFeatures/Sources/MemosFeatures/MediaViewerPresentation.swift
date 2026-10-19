@@ -31,6 +31,13 @@ public struct MediaPage: Identifiable, Equatable, Sendable {
     public let stillURL: URL?
     /// The streamable rendition, for a video page only — never the original (ADR-0008).
     public let playbackURL: URL?
+    /// The DISPLAY date the list this page came from answered for it — the library's and the
+    /// map's `takenAt`: when the picture was taken if the file says so, else its memo's date, else
+    /// its upload. Nil for a memo's own page, whose list answers no such thing.
+    ///
+    /// Never capture metadata, and never read as such: the Info sheet's Taken row reads the
+    /// attachment's capture fields alone. It is the first answer the date capsule takes.
+    public var takenAt: Date? = nil
 
     public var id: String { attachment.uid }
     /// The memo this page's file belongs to, when there is one — what puts "Show Memo" in the
@@ -100,7 +107,10 @@ public enum MediaViewerPresentation {
     /// PDF in the swipe order is a black rectangle nobody can leave. An attachment with neither a
     /// still nor a stream is dropped for the same reason — a page that can render nothing at all
     /// is a gap in the count, not a picture.
-    public static func pages(for attachments: [MemoAttachment]) -> [MediaPage] {
+    public static func pages(
+        for attachments: [MemoAttachment],
+        takenAt: (MemoAttachment) -> Date? = { _ in nil }
+    ) -> [MediaPage] {
         attachments.filter { isViewable($0) }.map { attachment in
             let tier = MemoPresentation.fullScreenTier(for: attachment)
             return MediaPage(
@@ -108,7 +118,8 @@ public enum MediaViewerPresentation {
                 kind: attachment.isVideo ? .video : .image,
                 stillTier: tier,
                 stillURL: MemoPresentation.url(for: attachment, tier: tier),
-                playbackURL: MemoPresentation.playbackURL(for: attachment)
+                playbackURL: MemoPresentation.playbackURL(for: attachment),
+                takenAt: takenAt(attachment)
             )
         }
     }
@@ -130,9 +141,10 @@ public enum MediaViewerPresentation {
     public static func viewer(
         for attachments: [MemoAttachment],
         startingAt uid: String,
-        deletable: Bool = false
+        deletable: Bool = false,
+        takenAt: (MemoAttachment) -> Date? = { _ in nil }
     ) -> MediaViewerSelection? {
-        let pages = pages(for: attachments)
+        let pages = pages(for: attachments, takenAt: takenAt)
         guard let index = pages.firstIndex(where: { $0.id == uid }) else { return nil }
         return MediaViewerSelection(pages: pages, startIndex: index, deletable: deletable)
     }
@@ -147,5 +159,15 @@ public enum MediaViewerPresentation {
     static func fullScreenStillURL(for attachment: MemoAttachment) -> URL? {
         let tier = MemoPresentation.fullScreenTier(for: attachment)
         return MemoPresentation.url(for: attachment, tier: tier)
+    }
+}
+
+extension MediaViewerPresentation {
+    /// The library's rows as pages: each row's own `takenAt` rides on its page, and its
+    /// attachment keeps its capture fields exactly as the list sent them.
+    static func pages(for rows: [LibraryRow]) -> [MediaPage] {
+        let taken = Dictionary(
+            rows.map { ($0.attachment.uid, $0.takenAt) }, uniquingKeysWith: { first, _ in first })
+        return pages(for: rows.map(\.attachment), takenAt: { taken[$0.uid] ?? nil })
     }
 }

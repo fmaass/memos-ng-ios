@@ -88,6 +88,14 @@ struct MediaViewerView: View {
     /// alone is put straight back by the next one. `MediaViewerPager.visible` is where the two
     /// meet.
     @State private var removed: Set<MediaPage.ID> = []
+    /// Whether the chrome — the top row, the date capsule and the bar — is drawn. One tap on the
+    /// picture hides all three, the next brings them back (`MediaViewerChrome`).
+    @State private var chrome = MediaViewerChrome()
+    /// The page the Info sheet is open about, or nil.
+    @State private var inspecting: MediaPage?
+    /// The Info sheet's two reads, made only when it opens; one store for this viewer's lifetime,
+    /// so a memo looked up once is not looked up again.
+    @State private var context: MediaContextStore?
 
     init(
         selection: MediaViewerSelection,
@@ -112,10 +120,17 @@ struct MediaViewerView: View {
         ZStack(alignment: .topLeading) {
             Color.black.ignoresSafeArea()
             pager
-            closeButton
         }
-        .overlay(alignment: .topTrailing) { actions }
-        .overlay(alignment: .bottom) { failureNotice }
+        .overlay(alignment: .top) { topRow }
+        .overlay(alignment: .bottom) {
+            VStack(spacing: 0) {
+                failureNotice
+                bar
+            }
+        }
+        .sheet(item: $inspecting) { page in
+            infoSheet(for: page)
+        }
         // The question lives HERE, on the cover, and not on the screen that presented it: an alert
         // attached under a full-screen presentation never appears at all. An alert rather than a
         // confirmation dialog for the reason `ComposeView.deleteRow` records — the dialog put its
@@ -196,6 +211,7 @@ struct MediaViewerView: View {
                         // other page gets `nil` and draws its poster.
                         player: playback.player(for: page.id),
                         play: { playback.advance(.played(page: page.id)) },
+                        onTap: { withAnimation(.easeInOut(duration: 0.2)) { chrome.tapped() } },
                         transport: transport
                     )
                     .containerRelativeFrame(.horizontal)
@@ -211,8 +227,81 @@ struct MediaViewerView: View {
         .ignoresSafeArea()
     }
 
-    private var closeButton: some View {
-        MediaViewerCloseButton { dismiss() }
+    private var currentContext: MediaViewerContext? {
+        pages.first { $0.id == currentPage }.map {
+            MediaViewerContext.resolve($0, carried: source.carriedMemo)
+        }
+    }
+
+    /// Close on the left, the page's date in the middle, ⋯ on the right. The side slots take the
+    /// same width, so the capsule keeps the middle whichever of them is drawn.
+    private var topRow: some View {
+        let shown = chrome.shown
+        return HStack(spacing: DesignTokens.Space.snug) {
+            MediaViewerCloseButton { dismiss() }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                if let date = currentContext?.date {
+                    MediaViewerDateCapsule(date: date)
+                }
+            }
+            .opacity(shown.contains(.dateCapsule) ? 1 : 0)
+            actions
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, DesignTokens.Space.roomy)
+        .opacity(shown.contains(.topRow) ? 1 : 0)
+        .allowsHitTesting(shown.contains(.topRow))
+        .accessibilityHidden(!shown.contains(.topRow))
+    }
+
+    @ViewBuilder
+    private var bar: some View {
+        let shown = chrome.shown.contains(.bar)
+        if let page = pages.first(where: { $0.id == currentPage }) {
+            MediaViewerBar(
+                attachment: page.attachment,
+                binShown: MediaViewerBar.binShown(
+                    deletable: selection.deletable, canDelete: delete != nil),
+                // The share flow the ⋯ menu's Share row ran, moved here unchanged.
+                share: { Task { await fetch(page.attachment, .shared) } },
+                info: { openInfo(page) },
+                delete: { send(.tapped(page.attachment.uid)) }
+            )
+            .opacity(shown ? 1 : 0)
+            .allowsHitTesting(shown)
+            .accessibilityHidden(!shown)
+        }
+    }
+
+    private func openInfo(_ page: MediaPage) {
+        if context == nil, let session {
+            let store = MediaContextStore(
+                onUnauthorized: { [session] refusal in await session.handle(refusal) })
+            store.reports(to: session)
+            context = store
+        } else if context == nil {
+            context = MediaContextStore()
+        }
+        inspecting = page
+    }
+
+    private func infoSheet(for page: MediaPage) -> some View {
+        let resolved = MediaViewerContext.resolve(page, carried: source.carriedMemo)
+        return MediaInfoSheet(
+            page: page, context: resolved, store: context,
+            showMemo: { uid in
+                inspecting = nil
+                dismiss()
+                jump?.request(uid)
+            }
+        )
+        .task {
+            guard let context else { return }
+            await MediaInfoSheet.opened(
+                page, context: resolved, store: context, handle: session?.activeHandle,
+                baseURL: session?.serverBaseURL)
+        }
     }
 
     /// What can be done with the file on screen — the same actions its tile offers under a long
@@ -220,22 +309,16 @@ struct MediaViewerView: View {
     /// only way to reach an action, and full screen is where the tile is no longer on screen at
     /// all.
     ///
-    /// It is `MediaTileMenu`'s list, unchanged, which is what stops the two surfaces from offering
-    /// different things about one file. A memo's own page therefore offers Share and not "Show
-    /// Memo": its attachments carry no owner on purpose, because the only memo it could take
-    /// anybody to is the one directly behind this cover.
+    /// It is `MediaTileMenu`'s list less Share (`viewerActions`), which moved to the bar below, so
+    /// the two surfaces still cannot offer different things about one file. A memo's own page
+    /// offers no "Show Memo": its attachments carry no owner on purpose, because the only memo it
+    /// could take anybody to is the one directly behind this cover.
     @ViewBuilder
     private var actions: some View {
         let page = pages.first { $0.id == currentPage }
         HStack(spacing: 0) {
-            // Beside the file's own actions rather than inside them: `MediaTileMenu`'s list is what
-            // the library tile and this overlay share, and a destructive row that exists on only
-            // one of the two surfaces does not belong in the shared list.
-            if selection.deletable, delete != nil, let page {
-                deleteButton(for: page)
-            }
             MediaViewerActions(
-                control: page.map { MediaTileMenu.control(for: $0.attachment) } ?? .hidden,
+                control: page.map { MediaTileMenu.viewerControl(for: $0.attachment) } ?? .hidden,
                 showMemo: { uid in
                     // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
                     // presented by the tab being left would be a black screen over the memo.
@@ -256,20 +339,6 @@ struct MediaViewerView: View {
                 }
             )
         }
-    }
-
-    /// The same glyph, in the same size, in the same corner as the actions beside it — the picture
-    /// underneath is the only thing on this screen, so every control on it is drawn one way.
-    private func deleteButton(for page: MediaPage) -> some View {
-        Button {
-            send(.tapped(page.attachment.uid))
-        } label: {
-            Image(systemName: "trash")
-                .font(.system(size: 30))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding()
-        }
-        .accessibilityLabel(AttachmentDeleteFlow.title(for: page.attachment))
     }
 
     /// What a refused delete says, on the one screen with nowhere else to say it.
@@ -426,7 +495,7 @@ struct MediaViewerActions: View {
                 }
                 if let host { host }
             } label: {
-                glyph("ellipsis.circle.fill")
+                glyph("ellipsis")
             }
             .accessibilityLabel("More")
         }
@@ -454,9 +523,11 @@ struct MediaViewerActions: View {
     /// corner of the same picture.
     private func glyph(_ symbol: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 30))
-            .foregroundStyle(.white.opacity(0.85))
-            .padding()
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: MediaViewerBar.circleSide, height: MediaViewerBar.circleSide)
+            .contentShape(Circle())
+            .glassEffect(.regular.interactive(), in: .circle)
     }
 }
 
@@ -551,11 +622,14 @@ struct MediaViewerCloseButton: View {
 
     var body: some View {
         Button(action: close) {
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 30))
-                .foregroundStyle(.white.opacity(0.85))
-                .padding()
+            Image(systemName: "xmark")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: MediaViewerBar.circleSide, height: MediaViewerBar.circleSide)
+                .contentShape(Circle())
         }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
         .accessibilityLabel("Close")
     }
 }
@@ -582,6 +656,9 @@ struct MediaViewerPage: View {
     let player: AVPlayer?
     /// Ask the viewer for this page's video.
     let play: () -> Void
+    /// One tap on the page: what shows and hides the viewer's chrome. Declared after the double
+    /// tap on a picture, so a double tap zooms and never toggles; a drag is neither.
+    var onTap: () -> Void = {}
     /// The cache the lapsed-signature eviction below names.
     ///
     /// Injectable for one reason, and it is a testing one: the default is a process-wide
@@ -681,6 +758,7 @@ struct MediaViewerPage: View {
             .onTapGesture(count: 2) {
                 withAnimation(.snappy) { transform = MediaZoom.doubleTapped(transform) }
             }
+            .onTapGesture(count: 1) { onTap() }
     }
 
     /// A video page: the player when this page holds it, its poster and a play button before that.
@@ -698,6 +776,8 @@ struct MediaViewerPage: View {
                 .frame(width: viewport.width, height: viewport.height)
                 .accessibilityElement(children: .contain)
                 .accessibilityLabel(page.accessibilityLabel)
+                .contentShape(.rect)
+                .onTapGesture { onTap() }
         } else {
             let fitted = MediaZoom.fittedSize(aspectRatio: page.aspectRatio, in: viewport)
             ZStack {
@@ -706,6 +786,8 @@ struct MediaViewerPage: View {
                     .frame(width: viewport.width, height: viewport.height)
                 playControl
             }
+            .contentShape(.rect)
+            .onTapGesture { onTap() }
         }
     }
 
