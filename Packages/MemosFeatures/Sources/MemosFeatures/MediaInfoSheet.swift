@@ -46,11 +46,11 @@ enum MediaInfoRows {
         return .noCaptureData
     }
 
-    static func memoCard(_ link: MediaViewerContext.MemoLink, looked up: Memo?) -> MemoCard? {
+    static func memoCard(_ link: MediaViewerContext.MemoLink, looked found: Memo?) -> MemoCard? {
         switch link {
         case .orphan: return nil
         case .carried(let memo): return card(memo, showable: false)
-        case .lookup: return looked.map { card($0, showable: true) }
+        case .lookup: return found.map { card($0, showable: true) }
         }
     }
 

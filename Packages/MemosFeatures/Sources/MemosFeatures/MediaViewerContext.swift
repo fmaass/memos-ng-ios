@@ -118,9 +118,9 @@ struct MediaViewerDateCapsule: View {
     }
 
     static func dayLine(for date: Date, now: Date, calendar: Calendar, locale: Locale) -> String {
-        let days = calendar.dateComponents(
-            [.day], from: calendar.startOfDay(for: date), to: calendar.startOfDay(for: now)
-        ).day ?? Int.max
+        let from = calendar.startOfDay(for: date)
+        let to = calendar.startOfDay(for: now)
+        let days = calendar.dateComponents([.day], from: from, to: to).day ?? Int.max
         switch days {
         case 0: return "Today"
         case 1: return "Yesterday"
