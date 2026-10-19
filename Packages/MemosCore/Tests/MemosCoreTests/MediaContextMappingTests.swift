@@ -125,31 +125,171 @@ struct MediaContextStoreTests {
         #expect(store.memo("m1") == nil, "a memo read for the old account repopulated the store")
     }
 
-    @Test("a file record is read on every ask, and holds the size and the capture fields")
-    func factsAreReadPerAsk() async {
+    @Test("a file record is read once per opening, holds the size and the capture fields")
+    func factsAreReadOncePerOpening() async {
         let sent = Box<Int>(0)
         let client = Stub.client { _, _, operation in
             #expect(operation == "attachment_meta_api_attachments__uid__get")
             sent.value += 1
-            return Stub.json(
-                """
-                {"uid":"p1","mime":"image/png","size":2048,"sha256":null,"status":"ready",\
-                "width":10,"height":20,"duration":null,"blurhash":null,"captured_at":null,\
-                "capture_instant":null,"capture_civil":"2026-01-01T13:00:00",\
-                "capture_source":"exif","mine":true,"hasPrint":false,"hasLegacyPrint":false,\
-                "hasPoster":false,"renditions":[],"downloadUrl":"/a/p1/file",\
-                "printUrl":"/a/p1/print","thumbnailUrl":"/a/p1/thumb","previewUrl":"/a/p1/m",\
-                "webUrl":"/a/p1/web","webReady":true,"posterUrl":"/a/p1/poster"}
-                """)
+            return Stub.json(fileRecord(size: 2048))
         }
         let store = MediaContextStore()
         let handle = SessionHandle(client: client, generation: 1)
 
-        await store.loadFacts(uid: "p1", using: handle, baseURL: Stub.baseURL)
-        await store.loadFacts(uid: "p1", using: handle, baseURL: Stub.baseURL)
+        let first = store.open("p1")
+        await store.loadFacts(for: first, using: handle)
+        await store.loadFacts(for: first, using: handle)
+        #expect(sent.value == 1, "one opening asked twice")
+        #expect(store.facts(for: first)?.size == 2048)
+        #expect(store.facts(for: first)?.captureCivil == "2026-01-01T13:00:00")
 
-        #expect(sent.value == 2)
-        #expect(store.facts(of: "p1")?.size == 2048)
-        #expect(store.facts(of: "p1")?.captureCivil == "2026-01-01T13:00:00")
+        store.close(first)
+        #expect(store.facts(for: first) == nil, "a closed opening still shows its record")
+        let second = store.open("p1")
+        await store.loadFacts(for: second, using: handle)
+        #expect(sent.value == 2, "a new opening did not read the record again")
     }
+
+    @Test("a record still in the air when its sheet closes lands nowhere, even after a reopen")
+    func closedOpeningsLateAnswerIsDropped() async {
+        let started = AsyncStream<Void>.makeStream()
+        let gate = AsyncStream<Void>.makeStream()
+        let sent = Box<Int>(0)
+        let client = Stub.client { _, _, _ in
+            sent.value += 1
+            guard sent.value == 1 else { return Stub.json(fileRecord(size: 2)) }
+            started.continuation.yield()
+            for await _ in gate.stream { break }
+            return Stub.json(fileRecord(size: 1))
+        }
+        let store = MediaContextStore()
+        let handle = SessionHandle(client: client, generation: 1)
+
+        let first = store.open("p1")
+        let late = Task { await store.loadFacts(for: first, using: handle) }
+        for await _ in started.stream { break }
+        store.close(first)
+        let second = store.open("p1")
+        await store.loadFacts(for: second, using: handle)
+        #expect(sent.value == 2, "the reopened sheet joined the closed one's read")
+        #expect(store.facts(for: second)?.size == 2)
+
+        gate.continuation.yield()
+        gate.continuation.finish()
+        await late.value
+        #expect(store.facts(for: second)?.size == 2, "the closed opening's answer replaced it")
+        #expect(store.facts(for: first) == nil)
+    }
+
+    @Test("nothing is read for an opening that has already closed")
+    func closedOpeningStartsNothing() async {
+        let sent = Box<Int>(0)
+        let client = Stub.client { _, _, _ in
+            sent.value += 1
+            return Stub.json(fileRecord(size: 1))
+        }
+        let store = MediaContextStore()
+        let handle = SessionHandle(client: client, generation: 1)
+
+        let opening = store.open("p1")
+        store.close(opening)
+        await store.loadFacts(for: opening, using: handle)
+        #expect(sent.value == 0, "a dismissed sheet's record was asked for")
+    }
+
+    @Test("two overlapping asks for one memo are one request")
+    func overlappingAsksJoin() async {
+        let started = AsyncStream<Void>.makeStream()
+        let gate = AsyncStream<Void>.makeStream()
+        let sent = Box<Int>(0)
+        let client = Stub.client { _, _, _ in
+            sent.value += 1
+            started.continuation.yield()
+            for await _ in gate.stream { break }
+            return Stub.json(Stub.memo(uid: "m1"))
+        }
+        let store = MediaContextStore()
+        let handle = SessionHandle(client: client, generation: 1)
+
+        let one = Task { await store.loadMemo(uid: "m1", using: handle, baseURL: Stub.baseURL) }
+        for await _ in started.stream { break }
+        let two = Task { await store.loadMemo(uid: "m1", using: handle, baseURL: Stub.baseURL) }
+        for _ in 0..<20 { await Task.yield() }
+        gate.continuation.yield()
+        gate.continuation.finish()
+        await one.value
+        await two.value
+        #expect(sent.value == 1, "two overlapping asks sent \(sent.value) requests")
+        #expect(store.memo("m1")?.uid == "m1")
+    }
+
+    @Test("a memo held for one account is never another's: the session moving is enough")
+    func heldMemoFollowsTheSession() async {
+        let sent = Box<[String]>([])
+        let client = Stub.client { _, _, operation in
+            sent.value.append(operation)
+            return Stub.json(Stub.memo(uid: "m1", content: sent.value.count == 1 ? "A" : "B"))
+        }
+        let first = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: first)
+        let store = MediaContextStore()
+        store.reports(to: session)
+
+        await store.loadMemo(uid: "m1", using: first, baseURL: Stub.baseURL)
+        #expect(store.memo("m1")?.content == "A")
+
+        // Another account signs in. Nobody tells the store.
+        let second = SessionHandle(client: client, generation: 2)
+        session.activeHandle = second
+        #expect(store.memo("m1") == nil, "the first account's memo is still handed out")
+
+        await store.loadMemo(uid: "m1", using: first, baseURL: Stub.baseURL)
+        #expect(sent.value.count == 1, "the departed session's handle still reads")
+
+        await store.loadMemo(uid: "m1", using: second, baseURL: Stub.baseURL)
+        #expect(sent.value.count == 2, "the new account was handed the old one's memo")
+        #expect(store.memo("m1")?.content == "B")
+    }
+
+    @Test("a memo read in the air for one account is not joined by the next")
+    func flightIsNotJoinedAcrossSessions() async {
+        let started = AsyncStream<Void>.makeStream()
+        let gate = AsyncStream<Void>.makeStream()
+        let sent = Box<Int>(0)
+        let client = Stub.client { _, _, _ in
+            sent.value += 1
+            guard sent.value == 1 else { return Stub.json(Stub.memo(uid: "m1", content: "B")) }
+            started.continuation.yield()
+            for await _ in gate.stream { break }
+            return Stub.json(Stub.memo(uid: "m1", content: "A"))
+        }
+        let first = SessionHandle(client: client, generation: 1)
+        let session = TripTestSession(for: first)
+        let store = MediaContextStore()
+        store.reports(to: session)
+
+        let late = Task { await store.loadMemo(uid: "m1", using: first, baseURL: Stub.baseURL) }
+        for await _ in started.stream { break }
+        let second = SessionHandle(client: client, generation: 2)
+        session.activeHandle = second
+        await store.loadMemo(uid: "m1", using: second, baseURL: Stub.baseURL)
+        #expect(sent.value == 2, "the new account joined the old account's read")
+
+        gate.continuation.yield()
+        gate.continuation.finish()
+        await late.value
+        #expect(store.memo("m1")?.content == "B", "the old account's late memo landed")
+    }
+}
+
+private func fileRecord(size: Int) -> String {
+    """
+    {"uid":"p1","mime":"image/png","size":\(size),"sha256":null,"status":"ready",\
+    "width":10,"height":20,"duration":null,"blurhash":null,"captured_at":null,\
+    "capture_instant":null,"capture_civil":"2026-01-01T13:00:00",\
+    "capture_source":"exif","mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+    "hasPoster":false,"renditions":[],"downloadUrl":"/a/p1/file",\
+    "printUrl":"/a/p1/print","thumbnailUrl":"/a/p1/thumb","previewUrl":"/a/p1/m",\
+    "webUrl":"/a/p1/web","webReady":true,"posterUrl":"/a/p1/poster"}
+    """
 }

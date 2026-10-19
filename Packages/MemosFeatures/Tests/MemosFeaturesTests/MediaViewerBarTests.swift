@@ -43,16 +43,6 @@ private func memo(_ uid: String, mine: Bool, createdAt: Date, _ attachments: [Me
         tags: ["portugal"], attachments: attachments)
 }
 
-/// A library that holds exactly the rows it was given.
-@MainActor
-private final class Rows: MediaLibraryPaging {
-    let items: [LibraryRow]
-    let pageSize = 50
-    let hasMore = false
-    init(_ items: [LibraryRow]) { self.items = items }
-    func shouldLoadMore(after index: Int, lookahead: Int) -> Bool { false }
-}
-
 private let utc: Calendar = {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(identifier: "UTC")!
@@ -100,7 +90,14 @@ struct MediaViewerBarTests {
     func shareMovedToTheBar() {
         let file = picture("a", memoUID: "m7")
         #expect(MediaTileMenu.viewerActions(for: file) == [.showMemo(uid: "m7")])
-        #expect(MediaTileMenu.viewerControl(for: file) == .direct(.showMemo(uid: "m7")))
+        // The viewer's top-right is the ⋯ menu even for one row; the tile keeps its own rule.
+        #expect(MediaTileMenu.viewerControl(for: file) == .menu([.showMemo(uid: "m7")]))
+        #expect(MediaTileMenu.control(for: file) == .direct(.showMemo(uid: "m7")))
+        let top = ScreenProbe.labels(
+            of: MediaViewerActions(
+                control: MediaTileMenu.viewerControl(for: file), showMemo: { _ in }))
+        #expect(top.contains("More"), "the viewer's top row has no ⋯: \(top)")
+        #expect(!top.contains("Show Memo"), "the lone row was drawn as a button: \(top)")
         // A file WITH something to share, whose tile list keeps Share while the viewer's rows
         // drop it, is `MediaTileMenuTests.overlayOffersTheWholeActionSet`.
         let labels = ScreenProbe.labels(of: MediaViewerBar(attachment: file, binShown: false))
@@ -189,6 +186,33 @@ struct MediaViewerContextTests {
         #expect(context.memo == .orphan)
     }
 
+    @Test("the date is takenAt, else the civil clock, else the capture instant, else the memo's")
+    func datePrecedence() throws {
+        let civilDate = Date(timeIntervalSince1970: 1_767_272_400)
+        let listed = Date(timeIntervalSince1970: 1_700_000_000)
+        func resolved(_ file: MemoAttachment, takenAt: Date? = nil) throws -> MediaViewerContext {
+            let owner = memo("m1", mine: true, createdAt: memoDate, [file])
+            var page = try #require(MediaViewerPresentation.pages(for: owner.attachments).first)
+            page.takenAt = takenAt
+            return MediaViewerContext.resolve(page, carried: owner, timeZone: utc.timeZone)
+        }
+        var file = picture("a", captureCivil: "2026-01-01T13:00:00", captureInstant: uploadDate)
+
+        let all = try resolved(file, takenAt: listed)
+        #expect(all.date == listed && all.dateOrigin == .listed)
+        let civil = try resolved(file)
+        #expect(civil.date == civilDate && civil.dateOrigin == .civil)
+        file.captureCivil = "not a clock"
+        let unreadable = try resolved(file)
+        #expect(unreadable.date == uploadDate && unreadable.dateOrigin == .captured)
+        file.captureCivil = nil
+        let instant = try resolved(file)
+        #expect(instant.date == uploadDate && instant.dateOrigin == .captured)
+        file.captureInstant = nil
+        let fromMemo = try resolved(file)
+        #expect(fromMemo.date == memoDate && fromMemo.dateOrigin == .memo)
+    }
+
     @Test("an undated picture shows its memo's date and says it has no capture data, either way")
     func provenanceKeptApart() throws {
         // The server's takenAt for a file the camera did not date is its memo's date — not the
@@ -218,12 +242,19 @@ struct MediaViewerContextTests {
     }
 
     @Test("takenAt rides on library and Places pages and is nil on a memo's")
-    func takenAtOnBothConstructions() throws {
-        let row = LibraryRow(
-            attachment: picture("l1", memoUID: "m1"), takenAt: memoDate, mine: false,
-            filename: "l1.jpg")
-        let library = MediaViewerSource.library(Rows([row]), more: {})
-        #expect(library.pages.first?.takenAt == memoDate)
+    func takenAtOnBothConstructions() async throws {
+        // The library's own store, read over the wire: the row's takenAt is 2026-09-26T10:00:00Z.
+        let base = URL(string: "https://memos.example.invalid")!
+        let handle = SessionHandle(
+            client: APIClientFactory.make(
+                configuration: ServerConfiguration(baseURL: base), token: { "memos_pat_library" },
+                transport: ResigningLibraryServer()),
+            generation: 1)
+        let store = MediaLibraryStore(pageSize: 2, reissueCooldown: {})
+        await store.refresh(using: handle, baseURL: base)
+        let library = MediaViewerSource.library(store, more: {})
+        #expect(library.pages.map(\.id) == ["la"], "the library store never loaded its row")
+        #expect(library.pages.first?.takenAt == Date(timeIntervalSince1970: 1_790_416_800))
 
         let marker = PlaceMarker(
             uid: "g1", memoUID: "m3", mime: "image/jpeg", mine: true, latitude: 38.7,
@@ -290,13 +321,120 @@ struct MediaInfoSheetReadTests {
 
         #expect(transport.count("get_memo_api_memos__uid__get") == 0, "read before any open")
 
-        await MediaInfoSheet.opened(
-            page, context: context, store: store, handle: handle, baseURL: base)
-        await MediaInfoSheet.opened(
-            page, context: context, store: store, handle: handle, baseURL: base)
+        for _ in 0..<2 {
+            let opening = store.open(page.attachment.uid)
+            await MediaInfoSheet.opened(
+                opening, context: context, store: store, handle: handle, baseURL: base)
+            store.close(opening)
+        }
 
         #expect(transport.count("get_memo_api_memos__uid__get") == 1)
         #expect(store.memo("m1")?.uid == "m1")
         #expect(MediaInfoRows.memoCard(context.memo, looked: store.memo("m1"))?.showable == true)
+    }
+
+    @Test("a sheet dismissed while its memo is read asks for no file record afterwards")
+    func dismissedSheetStartsNoRecordRead() async throws {
+        let transport = GatedMemoTransport()
+        let base = URL(string: "https://memos.example.invalid")!
+        let client = APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: base), token: { "memos_pat_info" },
+            transport: transport)
+        let handle = SessionHandle(client: client, generation: 1)
+        let store = MediaContextStore()
+        let page = try #require(
+            MediaViewerPresentation.pages(for: [picture("a", memoUID: "m1")]).first)
+        let context = MediaViewerContext.resolve(page, carried: nil)
+
+        let opening = store.open(page.attachment.uid)
+        let read = Task {
+            await MediaInfoSheet.opened(
+                opening, context: context, store: store, handle: handle, baseURL: base)
+        }
+        await transport.memoAsked()
+        store.close(opening)
+        transport.release()
+        await read.value
+
+        #expect(transport.count("attachment_meta_api_attachments__uid__get") == 0)
+        // The control: an opening still live does read it.
+        let live = store.open(page.attachment.uid)
+        await MediaInfoSheet.opened(
+            live, context: context, store: store, handle: handle, baseURL: base)
+        #expect(transport.count("attachment_meta_api_attachments__uid__get") == 1)
+        #expect(store.facts(for: live)?.width == 4000)
+    }
+
+    @Test("the File row's dimensions and duration are the file record's when it has them")
+    func fileRowPrefersTheRecord() {
+        let file = picture("a")
+        let record = AttachmentFacts(
+            uid: "a", mime: "image/heic", size: 1_000_000, width: 4000, height: 3000,
+            duration: 75)
+        let fromRecord = MediaInfoRows.file(file, facts: record)
+        #expect(fromRecord.dimensions == "4000 × 3000")
+        #expect(fromRecord.duration == "1:15")
+        #expect(fromRecord.type == "image/heic")
+        let withoutRecord = MediaInfoRows.file(file, facts: nil)
+        #expect(withoutRecord.dimensions == "1000 × 800", "control: the page's own when no record")
+        #expect(withoutRecord.size == nil)
+    }
+}
+
+/// The Info sheet's server with the memo read held until the test lets it go; the file record
+/// answers at once. Every request counted by operation.
+final class GatedMemoTransport: ClientTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var operations: [String] = []
+    private let asked = AsyncStream<Void>.makeStream()
+    private let gate = AsyncStream<Void>.makeStream()
+
+    func count(_ operation: String) -> Int {
+        lock.withLock { operations.filter { $0 == operation }.count }
+    }
+
+    func memoAsked() async { for await _ in asked.stream { break } }
+
+    func release() {
+        gate.continuation.yield()
+        gate.continuation.finish()
+    }
+
+    func send(
+        _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
+    ) async throws -> (HTTPResponse, HTTPBody?) {
+        lock.withLock { operations.append(operationID) }
+        var response = HTTPResponse(status: .ok)
+        response.headerFields[.contentType] = "application/json"
+        switch operationID {
+        case "get_memo_api_memos__uid__get":
+            asked.continuation.yield()
+            for await _ in gate.stream { break }
+            return (
+                response,
+                HTTPBody(
+                    #"{"uid":"m1","owner":"fabian","mine":true,"content":"hello","#
+                        + #""visibility":"PRIVATE","pinned":false,"#
+                        + #""created_at":"2026-08-23T09:00:00Z","#
+                        + #""updated_at":"2026-08-23T09:00:00Z","archived_at":null,"#
+                        + #""tags":[],"attachments":[]}"#)
+            )
+        case "attachment_meta_api_attachments__uid__get":
+            return (
+                response,
+                HTTPBody(
+                    """
+                    {"uid":"a","mime":"image/jpeg","size":2048,"sha256":null,"status":"ready",\
+                    "width":4000,"height":3000,"duration":null,"blurhash":null,\
+                    "captured_at":null,"capture_instant":null,"capture_civil":null,\
+                    "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+                    "hasPoster":false,"renditions":[],"downloadUrl":"/a/a/file",\
+                    "printUrl":"/a/a/print","thumbnailUrl":"/a/a/thumb","previewUrl":"/a/a/m",\
+                    "webUrl":"/a/a/web","webReady":true,"posterUrl":"/a/a/poster"}
+                    """)
+            )
+        default:
+            return (HTTPResponse(status: .notFound), nil)
+        }
     }
 }

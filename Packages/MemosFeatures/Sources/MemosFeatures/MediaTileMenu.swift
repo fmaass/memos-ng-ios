@@ -185,8 +185,13 @@ extension MediaTileMenu {
         }
     }
 
+    /// The viewer's top-right control: ALWAYS the ⋯ menu when there is anything in it, even one
+    /// row — the viewer's top row is close, date, ⋯, and a lone action drawn as its own glyph would
+    /// break that row's shape. The tile's direct-versus-menu rule (`control(of:)`, MEMNG-213) is
+    /// the tile's and stays as it is.
     static func viewerControl(for attachment: MemoAttachment) -> MediaActionControl {
-        control(of: viewerActions(for: attachment))
+        let actions = viewerActions(for: attachment)
+        return actions.isEmpty ? .hidden : .menu(actions)
     }
 
     /// Whether the bar's Share has a file to hand over — the same rule the tile's Share row is

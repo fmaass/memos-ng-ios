@@ -96,6 +96,9 @@ struct MediaViewerView: View {
     /// The Info sheet's two reads, made only when it opens; one store for this viewer's lifetime,
     /// so a memo looked up once is not looked up again.
     @State private var context: MediaContextStore?
+    /// The Info sheet's current opening (`MediaContextStore.Opening`), taken when it opens and
+    /// given back when its content goes — its file record is read for it and shown only under it.
+    @State private var opening: MediaContextStore.Opening?
 
     init(
         selection: MediaViewerSelection,
@@ -131,6 +134,10 @@ struct MediaViewerView: View {
         .sheet(item: $inspecting) { page in
             infoSheet(for: page)
         }
+        // Another account — or none — while the viewer is up: the Info sheet's memo and record
+        // were read as the one before. The store also refuses a handle of another generation on
+        // its own (`MediaContextStore.adopt`); this is the viewer's notice of the same change.
+        .onChange(of: session?.snapshotIdentity) { _, _ in context?.sessionIdentityChanged() }
         // The question lives HERE, on the cover, and not on the screen that presented it: an alert
         // attached under a full-screen presentation never appears at all. An alert rather than a
         // confirmation dialog for the reason `ComposeView.deleteRow` records — the dialog put its
@@ -283,13 +290,14 @@ struct MediaViewerView: View {
         } else if context == nil {
             context = MediaContextStore()
         }
+        opening = context?.open(page.attachment.uid)
         inspecting = page
     }
 
     private func infoSheet(for page: MediaPage) -> some View {
         let resolved = MediaViewerContext.resolve(page, carried: source.carriedMemo)
         return MediaInfoSheet(
-            page: page, context: resolved, store: context,
+            page: page, context: resolved, store: context, opening: opening,
             showMemo: { uid in
                 inspecting = nil
                 dismiss()
@@ -297,10 +305,15 @@ struct MediaViewerView: View {
             }
         )
         .task {
-            guard let context else { return }
+            guard let context, let opening else { return }
             await MediaInfoSheet.opened(
-                page, context: resolved, store: context, handle: session?.activeHandle,
+                opening, context: resolved, store: context, handle: session?.activeHandle,
                 baseURL: session?.serverBaseURL)
+        }
+        // Every way the sheet goes — a swipe, Show memo, the cover itself — ends its opening, so
+        // a record still in the air for it lands nowhere.
+        .onDisappear {
+            if let opening { context?.close(opening) }
         }
     }
 
@@ -459,7 +472,9 @@ struct MediaViewerView: View {
 /// full-screen cover, a pager and a player standing behind them.
 ///
 /// A single action is drawn as itself — its own icon, one tap — because a three-dots menu fronting
-/// one row is an indirection that buys nothing (MEMNG-213). Two or more keep the menu.
+/// one row is an indirection that buys nothing (MEMNG-213). Two or more keep the menu. The
+/// full-screen viewer's own top row hands it a `.menu` for any rows at all
+/// (`MediaTileMenu.viewerControl`), so there it is always ⋯.
 ///
 /// Both shapes press the SAME row. That is what keeps the one-download-at-a-time guard and the
 /// session's own fence behind Share on one path: the direct button is different chrome around the

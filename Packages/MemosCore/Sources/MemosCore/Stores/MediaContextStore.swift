@@ -52,13 +52,18 @@ public struct AttachmentFacts: Sendable, Equatable {
 /// second ask while the first is in the air JOINS it: one request on the wire. A read that failed
 /// keeps nothing, so the next open asks again.
 ///
-/// **The file's record, once per open.** Its size does not change, but its readiness can, so each
-/// open asks once; an ask while one for the same file is in the air joins it.
+/// **The file's record, once per OPENING.** Each time the sheet opens it takes an `Opening`
+/// (`open(_:)`) and gives it back when it goes (`close(_:)`). The record is read once for that
+/// opening — a second ask inside it joins the first — and the answer belongs to it alone: an
+/// answer for an opening that has closed lands nowhere, a new opening never joins an old one's
+/// read, and nothing starts for an opening that is no longer the live one.
 ///
-/// **Fenced by generation.** Every answer is judged against the generation and the session handle
-/// that ISSUED it: an identity change bumps the generation and clears what is held, and an answer
-/// that outlived it lands nowhere. A refusal goes to the session's one decision rule
-/// (`onUnauthorized`), as every other store's does.
+/// **Fenced by the session that issued it.** Everything held belongs to the session generation it
+/// was read under. Every ask presents its handle FIRST — before a held memo is handed back or a
+/// read in the air is joined — and a handle of another generation than the one held clears it
+/// all, so another account's memo is never the answer. `sessionIdentityChanged()` does the same
+/// on the viewer's own notice. An answer that outlived either lands nowhere. A refusal goes to the
+/// session's one decision rule (`onUnauthorized`), as every other store's does.
 @MainActor
 @Observable
 public final class MediaContextStore {
@@ -67,12 +72,22 @@ public final class MediaContextStore {
         case unavailable
     }
 
+    /// One time the Info sheet is open, about one file.
+    public struct Opening: Hashable, Sendable {
+        public let uid: String
+        fileprivate let serial: Int
+    }
+
     public private(set) var memos: [String: Lookup<Memo>] = [:]
-    public private(set) var facts: [String: Lookup<AttachmentFacts>] = [:]
+    /// The live opening's answer, and nothing older.
+    private var answered: (opening: Opening, lookup: Lookup<AttachmentFacts>)?
+    private var live: Opening?
 
     private var generation = 0
+    /// The session generation what is held was read under; nil while nothing is.
+    private var heldUnder: Int?
     private var memoFlights: [String: Flight] = [:]
-    private var factFlights: [String: Flight] = [:]
+    private var factFlight: (opening: Opening, flight: Flight)?
     private var nextToken = 0
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
@@ -92,26 +107,47 @@ public final class MediaContextStore {
 
     public func reports(to session: any SessionReporting) { self.session = session }
 
-    /// The memo held for `uid`, or nil when none was found (yet).
+    /// The memo held for `uid`, or nil when none was found (yet) for the session now current.
     public func memo(_ uid: String) -> Memo? {
-        if case .found(let memo) = memos[uid] { return memo }
-        return nil
+        guard heldIsCurrent, case .found(let memo) = memos[uid] else { return nil }
+        return memo
     }
 
-    /// The file record held for `uid`, or nil.
-    public func facts(of uid: String) -> AttachmentFacts? {
-        if case .found(let facts) = facts[uid] { return facts }
-        return nil
+    /// The file record `opening` read, or nil — nil too once the opening has closed.
+    public func facts(for opening: Opening) -> AttachmentFacts? {
+        guard heldIsCurrent, live == opening, let answered, answered.opening == opening,
+            case .found(let facts) = answered.lookup
+        else { return nil }
+        return facts
+    }
+
+    /// The sheet opened about `uid`: a new opening, which any earlier one's answer cannot reach.
+    public func open(_ uid: String) -> Opening {
+        nextToken += 1
+        let opening = Opening(uid: uid, serial: nextToken)
+        live = opening
+        answered = nil
+        factFlight = nil
+        return opening
+    }
+
+    /// The sheet that took `opening` has gone. A close for an opening already replaced does
+    /// nothing: the live one is not its to end.
+    public func close(_ opening: Opening) {
+        guard live == opening else { return }
+        live = nil
+        answered = nil
+        factFlight = nil
     }
 
     /// Reads the memo `uid` unless it is already held; joins a read already in the air.
     public func loadMemo(uid: String, using handle: SessionHandle, baseURL: URL) async {
+        guard adopt(handle) else { return }
         if case .found = memos[uid] { return }
         if let running = memoFlights[uid], running.generation == generation {
             await running.task.value
             return
         }
-        guard sessionStillCurrent(handle) else { return }
         nextToken += 1
         let token = nextToken
         let issued = generation
@@ -120,18 +156,22 @@ public final class MediaContextStore {
         await task.value
     }
 
-    /// Reads the record of file `uid` once; joins a read already in the air for it.
-    public func loadFacts(uid: String, using handle: SessionHandle, baseURL: URL) async {
-        if let running = factFlights[uid], running.generation == generation {
-            await running.task.value
+    /// Reads the record of `opening`'s file once for that opening; joins its read in the air.
+    /// Starts nothing for an opening that is not the live one.
+    public func loadFacts(for opening: Opening, using handle: SessionHandle) async {
+        guard live == opening, adopt(handle) else { return }
+        if let answered, answered.opening == opening, case .found = answered.lookup { return }
+        if let running = factFlight, running.opening == opening,
+            running.flight.generation == generation
+        {
+            await running.flight.task.value
             return
         }
-        guard sessionStillCurrent(handle) else { return }
         nextToken += 1
         let token = nextToken
         let issued = generation
-        let task = Task { await self.runFacts(uid, issued, token, handle) }
-        factFlights[uid] = Flight(token: token, generation: issued, task: task)
+        let task = Task { await self.runFacts(opening, issued, token, handle) }
+        factFlight = (opening, Flight(token: token, generation: issued, task: task))
         await task.value
     }
 
@@ -139,10 +179,29 @@ public final class MediaContextStore {
     /// land.
     public func sessionIdentityChanged() {
         generation += 1
+        heldUnder = nil
         memos = [:]
-        facts = [:]
+        answered = nil
         memoFlights = [:]
-        factFlights = [:]
+        factFlight = nil
+    }
+
+    /// Whether `handle` may ask, settled BEFORE anything held is reused or joined: it must be the
+    /// session's current one, and a generation other than the one held drops everything held.
+    private func adopt(_ handle: SessionHandle) -> Bool {
+        guard sessionStillCurrent(handle) else { return false }
+        if heldUnder != handle.generation {
+            if heldUnder != nil { sessionIdentityChanged() }
+            heldUnder = handle.generation
+        }
+        return true
+    }
+
+    /// Whether what is held was read under the session current now.
+    private var heldIsCurrent: Bool {
+        guard let session else { return true }
+        guard let held = heldUnder else { return true }
+        return session.activeHandle?.generation == held
     }
 
     private func runMemo(
@@ -159,26 +218,28 @@ public final class MediaContextStore {
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else { return }
-            if await settled(error, issuedUnder: handle) { memos[uid] = .unavailable }
+            if await settled(error, issuedUnder: handle), issued == generation {
+                memos[uid] = .unavailable
+            }
         }
     }
 
     private func runFacts(
-        _ uid: String, _ issued: Int, _ token: Int, _ handle: SessionHandle
+        _ opening: Opening, _ issued: Int, _ token: Int, _ handle: SessionHandle
     ) async {
-        defer { if factFlights[uid]?.token == token { factFlights[uid] = nil } }
+        defer { if factFlight?.flight.token == token { factFlight = nil } }
         do {
-            let read = try await Self.facts(handle.client, uid: uid)
-            guard issued == generation, sessionStillCurrent(handle) else {
-                MemosLog.api.info("a file record answered for a session that has gone; dropped")
+            let read = try await Self.facts(handle.client, uid: opening.uid)
+            guard issued == generation, live == opening, sessionStillCurrent(handle) else {
+                MemosLog.api.info("a file record answered for an opening that has gone; dropped")
                 return
             }
-            facts[uid] = .found(read)
+            answered = (opening, .found(read))
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else { return }
-            if await settled(error, issuedUnder: handle), facts[uid] == nil {
-                facts[uid] = .unavailable
+            if await settled(error, issuedUnder: handle), issued == generation, live == opening {
+                answered = (opening, .unavailable)
             }
         }
     }
