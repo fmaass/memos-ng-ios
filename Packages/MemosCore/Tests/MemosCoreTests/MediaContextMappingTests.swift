@@ -83,7 +83,7 @@ struct MediaContextMappingTests {
 }
 
 @MainActor
-@Suite("Viewer context store")
+@Suite("Viewer context store", .timeLimit(.minutes(1)))
 struct MediaContextStoreTests {
     @Test("a memo is read once per uid, however often it is asked for")
     func memoIsReadOncePerUID() async {

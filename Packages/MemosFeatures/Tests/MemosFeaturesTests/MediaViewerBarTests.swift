@@ -303,7 +303,7 @@ final class InfoSheetTransport: ClientTransport, @unchecked Sendable {
 }
 
 @MainActor
-@Suite("Info sheet reads")
+@Suite("Info sheet reads", .timeLimit(.minutes(1)))
 struct MediaInfoSheetReadTests {
     @Test("the memo is fetched only when the sheet opens, and once for two opens")
     func memoFetchedOnceOnOpen() async throws {
