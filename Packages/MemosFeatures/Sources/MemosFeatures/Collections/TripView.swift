@@ -1300,16 +1300,14 @@ struct TripView: View {
         )
     }
 
-    /// The members' read, under `given` — a memo action's issuing session — or the session now.
-    private func drain(using given: CollectionsAccess? = nil) async {
-        guard let readScope, let access = given ?? access() else { return }
+    private func drain() async {
+        guard let readScope, let access = access() else { return }
         await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
-    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query,
-    /// under `given` — a memo action's issuing session — or the session now.
-    private func drainFiltered(using given: CollectionsAccess? = nil) async {
-        guard let trip = live ?? openedTrip, let access = given ?? access() else { return }
+    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query.
+    private func drainFiltered() async {
+        guard let trip = live ?? openedTrip, let access = access() else { return }
         await memberStore.drainFiltered(
             trip, query: manage.query, using: access.handle, baseURL: access.baseURL)
     }
