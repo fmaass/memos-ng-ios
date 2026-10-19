@@ -101,6 +101,7 @@ new_repo() {
     > "$work/scripts/testcount-candidate-owner.sh"
   chmod +x "$work/scripts/testcount-candidate-owner.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/release-version-rule.sh" "$work/scripts/release-version-rule.sh" || return 1
   cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1

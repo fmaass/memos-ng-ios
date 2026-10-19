@@ -90,6 +90,7 @@ STUB_EOF
   done
   printf 'gate_lane_is_unlocked() { return 0; }\n' > "$work/scripts/reap-gate-lanes.sh"
   cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/release-version-rule.sh" "$work/scripts/release-version-rule.sh" || return 1
   cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
   git -C "$work" add -A >/dev/null || return 1
   git -C "$work" commit --quiet -m "baseline" || return 1

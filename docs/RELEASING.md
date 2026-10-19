@@ -19,7 +19,8 @@ number), the generated project inherits them, and the gate enforces agreement.
 ## The ritual
 
 1. Bump the numbers in `project.yml` on the release branch (build +1 always; marketing per the
-   scheme). The gate refuses numbers that do not advance past the latest `v*` tag.
+   scheme). The gate refuses a changed `project.yml` whose numbers do not advance past the latest
+   `v*` tag.
 2. Merge; on merkur: `git pull && ./bin/generate.sh`, then Any iOS Device → Product → Archive →
    Distribute → Upload. Auto-distribution is off: attach the build to the `household` group in
    App Store Connect (or let the observed auto-attach do it, but verify).
@@ -33,6 +34,11 @@ number), the generated project inherits them, and the gate enforces agreement.
 4. Tag: `git tag -a v<version> -m "<version> (build <n>): <one line on what shipped>"` on the
    merged commit, `git push origin v<version>`.
 
-The gate's version step reads the latest `v*` tag and fails when `MARKETING_VERSION` is below
-the tagged version or `CURRENT_PROJECT_VERSION` is not strictly greater than the tagged build —
-so a forgotten bump is caught before a wasted archive, and a spent number cannot ship twice.
+The gate's version step (`scripts/release-version-rule.sh`) reads the latest `v*` tag and fails
+when `MARKETING_VERSION` is below the tagged version or `CURRENT_PROJECT_VERSION` is not strictly
+greater than the tagged build — so a forgotten bump is caught before a wasted archive. A tree whose
+`project.yml` is byte-identical to the tag's is not a release candidate (the work between a tag and
+the next cut, which assigns the build number) and passes with its own `release :` line. What stops a
+spent number from shipping twice is the cut itself, not the gate: `fastlane prove_unused` asks App
+Store Connect and the spent markers before anything is archived, and `fastlane beta` claims the
+number before it uploads ([`TESTFLIGHT.md`](TESTFLIGHT.md)).
