@@ -512,9 +512,11 @@ extension MediaImageLoaderTests {
         let selection = MediaViewerSelection(pages: [page], startIndex: 0)
         await withTransport(scripted) {
             let viewer = MediaViewerView(selection: selection, source: .fixed([page]))
-            #expect(
-                (viewer.transport as AnyObject) === scripted,
-                "the viewer's still bypasses MediaImageLoader.transport")
+            // Identities compared outside the macro: `===` inside `#expect` crashes SILGen
+            // (Swift 6.3.3, a reabstraction thunk for the existential).
+            let handed = ObjectIdentifier(viewer.transport as AnyObject)
+            let substituted = ObjectIdentifier(scripted)
+            #expect(handed == substituted, "the viewer's still bypasses MediaImageLoader.transport")
         }
     }
 }
