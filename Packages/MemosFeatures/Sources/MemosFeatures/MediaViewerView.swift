@@ -103,7 +103,10 @@ struct MediaViewerView: View {
         delete: (@MainActor (String) async -> Bool)? = nil,
         hostAction: MediaViewerHostAction? = nil,
         gone: Set<MediaPage.ID> = [],
-        transport: any MediaTransport = MediaSession.shared
+        // The app's one image seam (`MediaImageLoader.transport`), as every tile's fetch reads it —
+        // `MediaSession.shared` in the app, a scripted transport where a test substitutes one. A
+        // literal `MediaSession.shared` here sent the viewer's stills past every substitution.
+        transport: any MediaTransport = MediaImageLoader.transport
     ) {
         self.selection = selection
         self.source = source
@@ -237,23 +240,21 @@ struct MediaViewerView: View {
         }
     }
 
-    /// Close on the left, the page's date in the middle, ⋯ on the right. The side slots take the
-    /// same width, so the capsule keeps the middle whichever of them is drawn.
+    /// Close on the left, the page's date in the middle, ⋯ on the right (`MediaViewerTopRow`).
     private var topRow: some View {
         let shown = chrome.shown
-        return HStack(spacing: DesignTokens.Space.snug) {
+        return MediaViewerTopRow {
             MediaViewerCloseButton { dismiss() }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        } capsule: {
             Group {
                 if let date = currentContext?.date {
                     MediaViewerDateCapsule(date: date)
                 }
             }
             .opacity(shown.contains(.dateCapsule) ? 1 : 0)
+        } actions: {
             actions
-                .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, DesignTokens.Space.roomy)
         .opacity(shown.contains(.topRow) ? 1 : 0)
         .allowsHitTesting(shown.contains(.topRow))
         .accessibilityHidden(!shown.contains(.topRow))

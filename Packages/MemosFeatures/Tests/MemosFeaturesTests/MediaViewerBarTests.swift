@@ -86,6 +86,40 @@ struct MediaViewerBarTests {
         }
     }
 
+    @Test("the date capsule keeps its own width in the middle of the top row, at larger type too")
+    func capsuleKeepsItsWidth() throws {
+        // 12 Sep 2025, long enough ago to draw the full abbreviated date.
+        let date = Date(timeIntervalSince1970: 1_757_687_520)
+        let calendar = Calendar.current
+        let day = MediaViewerDateCapsule.dayLine(
+            for: date, now: Date(), calendar: calendar, locale: .current)
+        let time = MediaViewerDateCapsule.timeLine(for: date, calendar: calendar, locale: .current)
+        let label = MediaViewerDateCapsule.spoken(day: day, time: time)
+        let side = MediaViewerBar.circleSide
+        for size in [DynamicTypeSize.large, .xxxLarge] {
+            let alone = MediaViewerDateCapsule(date: date).fixedSize()
+                .environment(\.dynamicTypeSize, size)
+            let wanted = try #require(
+                PressProbe.withElement(labelled: label, in: alone) { $0?.accessibilityFrame },
+                "no capsule alone at \(size)")
+            let row = MediaViewerTopRow {
+                Circle().frame(width: side, height: side)
+            } capsule: {
+                MediaViewerDateCapsule(date: date)
+            } actions: {
+                Circle().frame(width: side, height: side)
+            }
+            .environment(\.dynamicTypeSize, size)
+            let drawn = try #require(
+                PressProbe.withElement(labelled: label, in: row) { $0?.accessibilityFrame },
+                "no capsule in the row at \(size)")
+            #expect(
+                drawn.width >= wanted.width - 1,
+                "the row squeezed the capsule to \(drawn.width) of \(wanted.width) at \(size)")
+            #expect(abs(drawn.midX - 393 / 2) <= 1, "capsule off centre (\(drawn.midX)) at \(size)")
+        }
+    }
+
     @Test("Share is off the viewer's menu rows and on the bar")
     func shareMovedToTheBar() {
         let file = picture("a", memoUID: "m7")
@@ -464,6 +498,23 @@ final class GatedMemoTransport: ClientTransport, @unchecked Sendable {
             )
         default:
             return (HTTPResponse(status: .notFound), nil)
+        }
+    }
+}
+
+extension MediaImageLoaderTests {
+    /// The clip run's warning glyph (MEMNG-860 round 3): the viewer's still went past the image
+    /// seam every tile reads, so a substituted transport never saw it.
+    @Test("the viewer fetches its stills through the app's image seam unless handed a transport")
+    func viewerDefaultsToTheImageSeam() async throws {
+        let scripted = ScriptedTransport(payload: MediaFixture.png(.red))
+        let page = try #require(MediaViewerPresentation.pages(for: [picture("seam")]).first)
+        let selection = MediaViewerSelection(pages: [page], startIndex: 0)
+        await withTransport(scripted) {
+            let viewer = MediaViewerView(selection: selection, source: .fixed([page]))
+            #expect(
+                (viewer.transport as AnyObject) === scripted,
+                "the viewer's still bypasses MediaImageLoader.transport")
         }
     }
 }
