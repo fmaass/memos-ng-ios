@@ -122,6 +122,28 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// Names the session this store's transport failures belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
+    /// Follows the favorites ledger (MEMNG-867): a commit reaches every row held for its picture,
+    /// and every page is stamped with the ledger's revision when it is ISSUED, so one that left
+    /// before a commit lands with the ledger's tags for that picture rather than its own.
+    public func follow(_ favorites: FavoriteStore) {
+        self.favorites = favorites
+        favorites.observe { [weak self] commit in self?.applyFavorite(commit) }
+    }
+
+    @ObservationIgnored private weak var favorites: FavoriteStore?
+
+    private var favoriteStamp: FavoriteStamp { favorites?.stamp ?? FavoriteStamp(revision: 0) }
+
+    private func fenced(_ rows: [LibraryRow], _ issued: FavoriteStamp) -> [LibraryRow] {
+        favorites?.overlay(rows, issuedAt: issued) ?? rows
+    }
+
+    private func applyFavorite(_ commit: FavoriteCommit) {
+        for position in items.indices where items[position].id == commit.uid {
+            items[position].attachment.tags = commit.tags
+        }
+    }
+
     /// Switches tab.
     ///
     /// The loaded rows go at once, which is the OPPOSITE of what `TimelineStore.setQuery` does and
@@ -316,6 +338,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         var rowPages: [String: Int] = [:]
         var pagesRead = 0
         var cursor: String?
+        // Taken once, at the jump's start: its pages pile up here before any of them is shown, so
+        // a commit landing between two of them is newer than every row piled so far.
+        let issued = favoriteStamp
         while true {
             do {
                 let page = try await Self.page(
@@ -340,14 +365,14 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 rows = Self.merged(
                     rows,
-                    with: page.items,
+                    with: fenced(page.items, issued),
                     filter: lineage.filter,
                     dropping: removed
                 )
                 for row in rows where rowPages[row.id] == nil { rowPages[row.id] = pagesRead }
                 pagesRead += 1
                 if let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) {
-                    items = rows
+                    items = fenced(rows, issued)
                     forgetPages()
                     pageOf = rowPages
                     pagesHeld = pagesRead
@@ -575,6 +600,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             }
         }
         do {
+            let issued = favoriteStamp
             let page = try await Self.page(
                 client,
                 filter: lineage.filter,
@@ -594,7 +620,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 MemosLog.api.info("a page answered for a session that has ended is not applied")
                 return
             }
-            items = Self.merged([], with: page.items, filter: lineage.filter, dropping: removed)
+            items = Self.merged(
+                [], with: fenced(page.items, issued), filter: lineage.filter, dropping: removed)
             forgetPages()
             recordPage(items)
             nextCursor = page.nextCursor
@@ -641,6 +668,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             let lineage = self.lineage
             let limit = nextCursorLimit
             do {
+                let issued = favoriteStamp
                 let page = try await Self.page(
                     client,
                     filter: lineage.filter,
@@ -665,7 +693,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 }
                 items = Self.merged(
                     items,
-                    with: page.items,
+                    with: fenced(page.items, issued),
                     filter: lineage.filter,
                     dropping: removed
                 )
@@ -782,6 +810,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
             guard sessionStillCurrent(handle) else { return }
             looked.formUnion(outstanding.filter { pageOf[$0] == index })
             do {
+                let issued = favoriteStamp
                 let page = try await Self.page(
                     client,
                     filter: lineage.filter,
@@ -807,7 +836,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     return
                 }
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
-                reissued(page.items)
+                reissued(fenced(page.items, issued))
                 cursor = page.nextCursor
                 index += 1
             } catch {

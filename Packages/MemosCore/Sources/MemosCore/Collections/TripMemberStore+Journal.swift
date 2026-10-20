@@ -222,6 +222,7 @@ extension TripMemberStore {
         defer {
             if ownsJournal(uid, token) { journalFlights[uid] = nil }
         }
+        let issued = favoriteStamp
         var memos: [Memo] = []
         var tagged: Set<String> = []
         var truncated = false
@@ -305,7 +306,7 @@ extension TripMemberStore {
             return
         }
         journals[uid] = TripJournal(
-            rule: lineage.rule, memos: Self.byJournalInstant(memos), tagged: tagged,
+            rule: lineage.rule, memos: Self.byJournalInstant(fenced(memos, issued)), tagged: tagged,
             truncated: truncated)
         journalErrors[uid] = nil
         session?.noteTransportSuccess(issuedUnder: handle.generation)

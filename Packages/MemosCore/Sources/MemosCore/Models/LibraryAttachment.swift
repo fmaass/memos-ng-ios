@@ -154,7 +154,10 @@ extension MemoAttachment {
             // The one thing this payload knows that a memo's own attachment list cannot: which
             // memo a file in the WHOLE library belongs to. Null for an orphan, and an orphan is a
             // row this list deliberately includes (MEMNG-171).
-            memoUID: generated.memoUid
+            memoUID: generated.memoUid,
+            // `pictureTags`, never `tags`: on this payload `tags` is the MEMO's, and a heart
+            // read from it would light up for every picture of a memo that says #favorites.
+            tags: generated.pictureTags ?? []
         )
     }
 }

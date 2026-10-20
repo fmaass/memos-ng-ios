@@ -192,6 +192,43 @@ public final class TimelineStore {
     /// Names the session this store's transport failures belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
+    /// Follows the favorites ledger (MEMNG-867): a commit reaches every attachment of that picture
+    /// on the loaded list — and the snapshot with it — and every read is stamped with the ledger's
+    /// revision when it is ISSUED, so one that left before a commit lands with the ledger's tags
+    /// for that picture rather than its own.
+    public func follow(_ favorites: FavoriteStore) {
+        self.favorites = favorites
+        favorites.observe { [weak self] favorite in await self?.applyFavorite(favorite) }
+    }
+
+    @ObservationIgnored private weak var favorites: FavoriteStore?
+
+    private var favoriteStamp: FavoriteStamp { favorites?.stamp ?? FavoriteStamp(revision: 0) }
+
+    private func fencedFavorites(_ memos: [Memo], _ issued: FavoriteStamp) -> [Memo] {
+        favorites?.overlay(memos, issuedAt: issued) ?? memos
+    }
+
+    private func fencedFavorites(_ memo: Memo, _ issued: FavoriteStamp) -> Memo {
+        favorites?.overlay(memo, issuedAt: issued) ?? memo
+    }
+
+    private func applyFavorite(_ favorite: FavoriteCommit) async {
+        let next = memos.map { memo in
+            guard memo.attachments.contains(where: { $0.uid == favorite.uid }) else { return memo }
+            var memo = memo
+            for position in memo.attachments.indices
+            where memo.attachments[position].uid == favorite.uid {
+                memo.attachments[position].tags = favorite.tags
+            }
+            return memo
+        }
+        guard next != memos else { return }
+        // Entry is the issue point, as for a live media event: nothing was asked of the server
+        // here, the ledger said something and this is the moment it is acted on.
+        await commit(next, under: issuedAuthority())
+    }
+
     /// Puts the memos this identity last saw on screen, before anything has been asked of the
     /// server. Called once, where the store is made.
     ///
@@ -494,6 +531,7 @@ public final class TimelineStore {
             // The instant this read leaves, taken immediately before it does. Every row it comes
             // back with is judged against it, so a change made while it was in the air outranks it.
             let issued = mutationSequence
+            let favoritesIssued = favoriteStamp
             let page = try await Self.page(
                 client,
                 query: lineage.query,
@@ -535,7 +573,8 @@ public final class TimelineStore {
             // picture of it is taken.
             await commit(
                 effective(
-                    admitted(page.memos), issuedAt: issued, using: handle, baseURL: baseURL
+                    admitted(fencedFavorites(page.memos, favoritesIssued)), issuedAt: issued,
+                    using: handle, baseURL: baseURL
                 ),
                 under: authority
             )
@@ -608,6 +647,7 @@ public final class TimelineStore {
                 // a mutation the dropped pass was held off by may be finished by the time it does.
                 // Named apart from the lineage this operation set out with, which is also `issued`.
                 let issuedAt = mutationSequence
+                let favoritesIssued = favoriteStamp
                 let page = try await Self.page(
                     client,
                     query: lineage.query,
@@ -639,7 +679,9 @@ public final class TimelineStore {
                 // Everything reaching the fence here is a uid the list does NOT hold, so a held one
                 // has no row to keep and is dropped: a memo changed while this page was in the air
                 // is not appended at the version the page describes. The next read brings it.
-                let fresh = page.memos.filter { !known.contains($0.uid) }
+                let fresh = fencedFavorites(page.memos, favoritesIssued).filter {
+                    !known.contains($0.uid)
+                }
                 let merged =
                     memos
                     + effective(
@@ -729,6 +771,7 @@ public final class TimelineStore {
                 // Inside the loop, for the reason the downward one takes it there: each pass is a
                 // read of its own and is judged against the instant that read left.
                 let issued = mutationSequence
+                let favoritesIssued = favoriteStamp
                 let page = try await Self.page(
                     client,
                     query: lineage.query,
@@ -761,7 +804,10 @@ public final class TimelineStore {
                 // As downwards: only uids the list does not hold reach the fence, so a held one has
                 // no row to keep and is left off the block rather than prepended at a stale state.
                 let fresh = effective(
-                    admitted(page.memos.filter { !known.contains($0.uid) }),
+                    admitted(
+                        fencedFavorites(page.memos, favoritesIssued).filter {
+                            !known.contains($0.uid)
+                        }),
                     issuedAt: issued,
                     using: handle,
                     baseURL: baseURL
@@ -1999,12 +2045,14 @@ public final class TimelineStore {
         // request, so what comes back is judged against when it was asked rather than when it
         // landed.
         let issued = mutationSequence
+        let favoritesIssued = favoriteStamp
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return false }
-                let read = Memo(try ok.body.json, baseURL: baseURL)
+                let read = fencedFavorites(
+                    Memo(try ok.body.json, baseURL: baseURL), favoritesIssued)
                 // A memo changed since this read was asked keeps the row this store holds, with
                 // only the attachment states the read carries — that part of the answer is about
                 // nothing a mutation of the memo touched. The read HAPPENED either way, so the
@@ -2143,12 +2191,14 @@ public final class TimelineStore {
         let authority = issuedAuthority()
         // Read before the request, as every other read of this store reads it.
         let issued = mutationSequence
+        let favoritesIssued = favoriteStamp
         do {
             let response = try await client.getMemoApiMemosUidGet(.init(path: .init(uid: uid)))
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return .absent }
-                let memo = admitted(Memo(try ok.body.json, baseURL: baseURL))
+                let memo = admitted(
+                    fencedFavorites(Memo(try ok.body.json, baseURL: baseURL), favoritesIssued))
                 // Changed since this read was asked: the loaded row is the newer word, so it is
                 // what the caller opens the memo with, and nothing is applied over it. No
                 // per-attachment rule here — this lane merges nothing, it hands a memo over.

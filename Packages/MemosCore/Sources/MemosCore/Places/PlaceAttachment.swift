@@ -28,7 +28,8 @@ extension MemoAttachment {
             webURL: marker.webURL,
             posterURL: marker.posterURL,
             downloadURL: marker.downloadURL,
-            memoUID: marker.memoUID
+            memoUID: marker.memoUID,
+            tags: marker.tags
         )
     }
 }

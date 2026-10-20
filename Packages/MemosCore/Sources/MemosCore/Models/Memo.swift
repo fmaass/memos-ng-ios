@@ -71,6 +71,12 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     /// no owner at all. Either way there is no memo to open, which is the only question anything
     /// asks this field.
     public var memoUID: String?
+    /// The picture's OWN tags (MEMNG-867), sorted by name as the server sends them — never its
+    /// memo's tags, which are `Memo.tags` and live on the text. A favorite is one of these
+    /// (`FavoriteTag.name`), so this is what the viewer's heart reads.
+    ///
+    /// Part of the timeline snapshot's shape: adding it bumped `currentFormatVersion` to 3.
+    public var tags: [String]
 
     // A public memberwise initialiser, so previews and tests in other modules can build one
     // without a server. Structs only synthesise an internal one.
@@ -88,7 +94,8 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         webURL: URL? = nil,
         posterURL: URL? = nil,
         downloadURL: URL? = nil,
-        memoUID: String? = nil
+        memoUID: String? = nil,
+        tags: [String] = []
     ) {
         self.uid = uid
         self.mime = mime
@@ -104,6 +111,7 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         self.posterURL = posterURL
         self.downloadURL = downloadURL
         self.memoUID = memoUID
+        self.tags = tags
     }
 
     public var id: String { uid }
@@ -246,7 +254,8 @@ extension MemoAttachment {
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
             posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
-            downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL
+            downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL,
+            tags: generated.tags ?? []
         )
     }
 }

@@ -173,6 +173,66 @@ public final class TripMemberStore {
     /// Names the session this store's transport outcomes belong to. Idempotent.
     public func reports(to session: any SessionReporting) { self.session = session }
 
+    /// Follows the favorites ledger (MEMNG-867): a commit reaches every copy of its picture this
+    /// store holds — members, filtered members, removed lists, renewed covers and journals — and
+    /// every read is stamped with the ledger's revision when it starts, so one that started before
+    /// a commit lands with the ledger's tags for that picture rather than its own. Pages pile up
+    /// before they land, so the stamp is the run's START: a commit between two pages is newer
+    /// than every row piled so far.
+    public func follow(_ favorites: FavoriteStore) {
+        self.favorites = favorites
+        favorites.observe { [weak self] commit in self?.applyFavorite(commit) }
+    }
+
+    @ObservationIgnored private weak var favorites: FavoriteStore?
+
+    var favoriteStamp: FavoriteStamp { favorites?.stamp ?? FavoriteStamp(revision: 0) }
+
+    private func fenced(_ rows: [LibraryRow], _ issued: FavoriteStamp) -> [LibraryRow] {
+        favorites?.overlay(rows, issuedAt: issued) ?? rows
+    }
+
+    func fenced(_ memos: [Memo], _ issued: FavoriteStamp) -> [Memo] {
+        favorites?.overlay(memos, issuedAt: issued) ?? memos
+    }
+
+    private func applyFavorite(_ commit: FavoriteCommit) {
+        func patched(_ rows: [LibraryRow]) -> [LibraryRow] {
+            rows.map { row in
+                guard row.id == commit.uid else { return row }
+                var row = row
+                row.attachment.tags = commit.tags
+                return row
+            }
+        }
+        for (uid, held) in drained where held.rows.contains(where: { $0.id == commit.uid }) {
+            drained[uid]?.rows = patched(held.rows)
+        }
+        for (uid, held) in filteredDrains
+        where held.drain.rows.contains(where: { $0.id == commit.uid }) {
+            filteredDrains[uid]?.drain.rows = patched(held.drain.rows)
+        }
+        for (uid, held) in removedResults {
+            guard case .exact(let rows) = held.state, rows.contains(where: { $0.id == commit.uid })
+            else { continue }
+            removedResults[uid]?.state = .exact(patched(rows))
+        }
+        renewedCovers[commit.uid]?.tags = commit.tags
+        for (uid, journal) in journals
+        where journal.memos.contains(where: { memo in
+            memo.attachments.contains { $0.uid == commit.uid }
+        }) {
+            journals[uid]?.memos = journal.memos.map { memo in
+                var memo = memo
+                for position in memo.attachments.indices
+                where memo.attachments[position].uid == commit.uid {
+                    memo.attachments[position].tags = commit.tags
+                }
+                return memo
+            }
+        }
+    }
+
     // MARK: - Members
 
     public func state(for trip: Trip) -> TripMemberState {
@@ -361,6 +421,7 @@ public final class TripMemberStore {
         _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
+        let issued = favoriteStamp
         var tag: String?
         var bucket: String?
         var period: CollectionPeriod?
@@ -413,7 +474,8 @@ public final class TripMemberStore {
         }
         var landed = lineage
         landed.revision = trips.revision
-        drained[lineage.uid] = Drained(lineage: landed, rows: rows, complete: complete)
+        drained[lineage.uid] = Drained(
+            lineage: landed, rows: fenced(rows, issued), complete: complete)
         lastError = nil
     }
 
@@ -439,6 +501,7 @@ public final class TripMemberStore {
         _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
+        let issued = favoriteStamp
         var rows: [LibraryRow] = []
         var cursor: String?
         var complete = true
@@ -467,7 +530,8 @@ public final class TripMemberStore {
             return
         }
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: lineage.uid)
-        drained[lineage.uid] = Drained(lineage: landed, rows: rows, complete: complete)
+        drained[lineage.uid] = Drained(
+            lineage: landed, rows: fenced(rows, issued), complete: complete)
         contradict(uid: lineage.uid, listed: rows, askedAt: token)
         lastError = nil
     }
@@ -547,6 +611,7 @@ public final class TripMemberStore {
     ) async {
         let uid = lineage.uid
         defer { if filteredFlights[uid]?.token == token { filteredFlights[uid] = nil } }
+        let issued = favoriteStamp
         var rows: [LibraryRow] = []
         var cursor: String?
         var complete = true
@@ -578,7 +643,9 @@ public final class TripMemberStore {
             return
         }
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: uid)
-        filteredDrains[uid] = (query, Drained(lineage: landed, rows: rows, complete: complete))
+        filteredDrains[uid] = (
+            query, Drained(lineage: landed, rows: fenced(rows, issued), complete: complete)
+        )
         lastError = nil
     }
 
@@ -682,6 +749,7 @@ public final class TripMemberStore {
     ) async {
         let uid = trip.uid
         defer { if removedFlights[uid]?.token == token { removedFlights[uid] = nil } }
+        let issued = favoriteStamp
         if let onRemovedStart { await onRemovedStart(uid) }
         guard trip.tag != nil || trip.span != nil else {
             // The trip as it was issued has no criteria. That answer belongs to the issuing
@@ -716,7 +784,9 @@ public final class TripMemberStore {
         // A picture this app took out is no member, whatever a drain read before it says.
         let members = Set(stillMembers(held.rows, of: current).map(\.id))
         let gone = candidates.filter { !members.contains($0.id) }
-        removedResults[uid] = (stamp(uid, handle), .exact(Self.oldestFirst(gone)))
+        removedResults[uid] = (
+            stamp(uid, handle), .exact(Self.oldestFirst(fenced(gone, issued)))
+        )
     }
 
     /// The tag's listing and the span's walk, each picture once; nil when either ran past the cap
@@ -854,13 +924,14 @@ public final class TripMemberStore {
         _ uid: String, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if ownsCover(uid, token) { coverFlights[uid] = nil } }
+        let issued = favoriteStamp
         do {
             let fresh = try await Self.attachment(handle.client, uid: uid, baseURL: baseURL)
             guard ownsCover(uid, token), credentialCurrent(handle) else {
                 MemosLog.api.info("a carried cover answered for a read that was let go; dropped")
                 return
             }
-            renewedCovers[uid] = fresh
+            renewedCovers[uid] = favorites?.overlay(fresh, issuedAt: issued) ?? fresh
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             // A read the scope's forget let go reports nothing: not to the session's decision,
@@ -899,7 +970,8 @@ public final class TripMemberStore {
                 previewURL: URL(string: meta.previewUrl, relativeTo: baseURL)?.absoluteURL,
                 webURL: URL(string: meta.webUrl, relativeTo: baseURL)?.absoluteURL,
                 posterURL: URL(string: meta.posterUrl, relativeTo: baseURL)?.absoluteURL,
-                downloadURL: URL(string: meta.downloadUrl, relativeTo: baseURL)?.absoluteURL
+                downloadURL: URL(string: meta.downloadUrl, relativeTo: baseURL)?.absoluteURL,
+                tags: meta.tags ?? []
             )
         case .unprocessableContent: throw APIError.server(status: 422)
         case .serviceUnavailable: throw APIError.fromStatus(503)

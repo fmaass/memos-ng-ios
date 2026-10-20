@@ -25,6 +25,8 @@ struct CarriedCoverRenewalTests {
             "width":1000,"height":800,"duration":null,"blurhash":null,"captured_at":null,\
             "capture_instant":null,"capture_civil":null,"capture_source":null,"mine":true,\
             "hasPrint":false,"hasLegacyPrint":false,"hasPoster":false,"renditions":[],\
+            "filename":null,"latitude":null,"longitude":null,"locationSource":null,\
+            "addedBy":null,"camera":null,\
             "webReady":true,"downloadUrl":"/api/attachments/\(uid)/original",\
             "printUrl":"/api/attachments/\(uid)/print",\
             "thumbnailUrl":"/api/attachments/\(uid)/thumb\(query)",\

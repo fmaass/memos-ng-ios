@@ -9,6 +9,10 @@ import Testing
 /// follow every future bump and stop naming the file this suite is about.
 private let versionBeforeCaptureInstants = 1
 
+/// The version a snapshot written before pictures carried their own tags (MEMNG-867) was stamped
+/// with — the literal, for the same reason.
+private let versionBeforePictureTags = 2
+
 private func temporaryRoot() -> URL {
     FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
 }
@@ -39,7 +43,7 @@ struct TimelineSnapshotFormatVersionTests {
         #expect(store.read(identity: identity) == nil)
         // The control, and the point: the same file under the current number is read, so what the
         // assertion above caught is the version and not a snapshot this store cannot read at all.
-        #expect(TimelineSnapshot.currentFormatVersion == 2)
+        #expect(TimelineSnapshot.currentFormatVersion == 3)
         var current = snapshot
         current.formatVersion = TimelineSnapshot.currentFormatVersion
         try JSONEncoder().encode(current).write(to: root.appending(path: identity.fileName))
@@ -75,5 +79,43 @@ struct TimelineSnapshotFormatVersionTests {
         // Undated is the ordinary case — a screenshot, a drawing, a file stripped of its metadata —
         // and it has to survive the round trip as the absence it is rather than as some epoch.
         #expect(read.memos[0].attachments[1].captureInstant == nil)
+    }
+
+    @Test("a snapshot written before pictures carried their own tags reads as absent")
+    func theShapeBeforePictureTagsIsNotRead() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineSnapshotStore(root: root)
+        let snapshot = TimelineSnapshot(
+            formatVersion: versionBeforePictureTags,
+            identity: identity,
+            query: MemoQuery(),
+            revision: 1,
+            writtenAt: Date(),
+            memos: []
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: root.appending(path: identity.fileName))
+        #expect(store.read(identity: identity) == nil)
+    }
+
+    @Test("a snapshot written now keeps each picture's own tags")
+    func thePictureTagsSurviveARoundTrip() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineSnapshotStore(root: root)
+        let memo = Memo(
+            uid: "a", owner: "fabian", mine: true, content: "hello", visibility: .private,
+            pinned: false, createdAt: Date(timeIntervalSince1970: 1_800_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            attachments: [
+                MemoAttachment(uid: "p1", mime: "image/jpeg", status: .ready, tags: ["favorites"]),
+                MemoAttachment(uid: "p2", mime: "image/jpeg", status: .ready),
+            ]
+        )
+        store.write([memo], for: identity, revision: 1, query: MemoQuery())
+
+        let read = try #require(store.read(identity: identity))
+        #expect(read.memos[0].attachments.map(\.tags) == [["favorites"], []])
     }
 }

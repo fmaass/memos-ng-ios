@@ -28,10 +28,12 @@ namingStrategy: idiomatic
 filter:
   operations:
     - add_digest_recipient_api_admin_digest_recipients_post
+    - add_picture_tag_api_attachments__uid__tags__name__put
     - append_chunk_api_uploads__upload_uid__patch
     - attach_rendition_api_attachments__uid__renditions_post
     - attachment_buckets_api_attachments_buckets_get
     - attachment_meta_api_attachments__uid__get
+    - attachment_picture_tags_api_attachments_picture_tags_get
     - attachment_tags_api_attachments_tags_get
     - create_collection_api_collections_post
     - create_memo_api_memos_post
@@ -82,6 +84,7 @@ filter:
     - put_export_settings_api_admin_export_settings_put
     - react_api_memos__uid__reactions_post
     - remove_digest_recipient_api_admin_digest_recipients__recipient_id__delete
+    - remove_picture_tag_api_attachments__uid__tags__name__delete
     - rename_native_token_api_auth_native_token_patch
     - revoke_pat_api_pats__pat_id__delete
     - run_digest_now_api_admin_digest_run_post

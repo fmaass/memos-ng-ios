@@ -37,7 +37,8 @@ extension PlaceMarker {
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
             posterURL: URL(string: generated.posterUrl, relativeTo: baseURL)?.absoluteURL,
             downloadURL: URL(string: generated.downloadUrl, relativeTo: baseURL)?.absoluteURL,
-            blurhash: generated.blurhash
+            blurhash: generated.blurhash,
+            tags: generated.tags ?? []
         )
     }
 }

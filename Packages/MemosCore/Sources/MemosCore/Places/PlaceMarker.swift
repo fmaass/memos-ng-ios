@@ -33,6 +33,8 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
     /// (`MediaTileMenu.swift`).
     public var downloadURL: URL?
     public var blurhash: String?
+    /// The picture's own tags, which the viewer a pin opens reads its heart from.
+    public var tags: [String]
 
     public var id: String { uid }
 
@@ -51,7 +53,8 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
         webURL: URL? = nil,
         posterURL: URL? = nil,
         downloadURL: URL? = nil,
-        blurhash: String? = nil
+        blurhash: String? = nil,
+        tags: [String] = []
     ) {
         self.uid = uid
         self.memoUID = memoUID
@@ -68,5 +71,6 @@ nonisolated public struct PlaceMarker: Sendable, Equatable, Identifiable {
         self.posterURL = posterURL
         self.downloadURL = downloadURL
         self.blurhash = blurhash
+        self.tags = tags
     }
 }
