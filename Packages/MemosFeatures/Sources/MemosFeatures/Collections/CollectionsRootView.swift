@@ -14,6 +14,9 @@ struct CollectionsRootView: View {
     @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(TripStore.self) private var trips: TripStore?
     @Environment(TripMemberStore.self) private var members: TripMemberStore?
+    /// The favorites ledger, when the session's composition provides one: the Favorites card's
+    /// counts follow its commits (MEMNG-868).
+    @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
     /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720).
@@ -23,6 +26,8 @@ struct CollectionsRootView: View {
     @State private var months: LibraryBucketStore?
     /// The tag cards' covers, one lookup per tag (MEMNG-783).
     @State private var covers: TagCoverStore?
+    /// The pictures' own tags and counts, the Favorites card's (MEMNG-868).
+    @State private var pictureTags: PictureTagStore?
     /// The collections pushed onto the tab's stack (MEMNG-714, MEMNG-817).
     @State private var trail: [CollectionRoute] = []
 
@@ -48,7 +53,9 @@ struct CollectionsRootView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let session, let trips, let members, let tags, let years, let months, let covers {
+        if let session, let trips, let members, let tags, let years, let months, let covers,
+            let pictureTags
+        {
             CollectionsScreen(
                 trips: trips,
                 members: members,
@@ -56,6 +63,8 @@ struct CollectionsRootView: View {
                 years: years,
                 months: months,
                 tagCovers: covers,
+                pictureTags: pictureTags,
+                favorites: favorites,
                 identity: session.snapshotIdentity,
                 access: {
                     guard let handle = session.activeHandle, let baseURL = session.serverBaseURL
@@ -71,6 +80,7 @@ struct CollectionsRootView: View {
                 years.sessionIdentityChanged()
                 months.sessionIdentityChanged()
                 covers.sessionIdentityChanged()
+                pictureTags.sessionIdentityChanged()
             }
         } else {
             CollectionsScreen.placeholder
@@ -104,6 +114,14 @@ struct CollectionsRootView: View {
                         )
                         store.reports(to: session)
                         covers = store
+                    }
+                    if pictureTags == nil {
+                        let store = PictureTagStore(
+                            onUnauthorized: { [session] refusal in await session.handle(refusal) }
+                        )
+                        store.reports(to: session)
+                        if let favorites { store.follow(favorites) }
+                        pictureTags = store
                     }
                 }
         }
@@ -145,6 +163,10 @@ struct CollectionsScreen: View {
     var months: LibraryBucketStore? = nil
     /// The tag cards' covers; with none, every tag card is the plain tile.
     var tagCovers: TagCoverStore? = nil
+    /// The pictures' own tags (MEMNG-868): the Favorites card's count; with none, no such card.
+    var pictureTags: PictureTagStore? = nil
+    /// The favorites ledger, when there is one: each of its commits reads the counts again.
+    var favorites: FavoriteStore? = nil
     /// Whose root this is — the server and the subject, since the same subject on another server
     /// is another account; a change of either reads it all again.
     let identity: TimelineSnapshotIdentity?
@@ -160,6 +182,8 @@ struct CollectionsScreen: View {
     var tripManage: () -> TripManage = { TripManage() }
 
     @State private var newTrip: NewTripFlow?
+    /// The picture-tag reads, one at a time (`JoinedReads`).
+    @State private var pictureTagReads = JoinedReads()
     /// Each card's last summary, kept while its trip is read again (`HeldTripSummary`).
     @State private var heldSummaries: [String: HeldTripSummary] = [:]
     @Environment(\.locale) private var locale
@@ -190,7 +214,7 @@ struct CollectionsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DesignTokens.Space.section) {
                 tripsSection
-                if !tagsShown.isEmpty {
+                if !tagRow.isEmpty {
                     tagsRow
                 }
                 if let shown = monthsShown, !shown.isEmpty {
@@ -236,6 +260,13 @@ struct CollectionsScreen: View {
         }
         .onChange(of: identity) { heldSummaries = [:] }
         .task(id: identity) { await loadTags() }
+        .task(id: identity) { await pictureTagReads.run { await loadPictureTags() } }
+        // Every favorites commit reads the counts again, keyed on the ledger's revision, which
+        // moves on each commit. Never on `isStale`: a read can end still stale, after commits
+        // that landed while it was out, and a Bool that stays true schedules nothing more.
+        .onChange(of: favorites?.revision ?? 0) {
+            Task { await pictureTagReads.run { await loadPictureTags() } }
+        }
         .task(id: identity) { await loadMonths() }
         .task(id: identity) { await loadYears() }
         .task(
@@ -260,6 +291,19 @@ struct CollectionsScreen: View {
     ) -> CollectionRoute {
         let collection = AutomaticCollection(
             kind: .tag(tag.name), count: tag.count,
+            cover: cover.map { CollectionCover(uid: $0.uid, thumbnailURL: $0.thumbnailURL) },
+            zone: zone)
+        return CollectionRoute(scope: .automatic(collection), openedUnder: identity)
+    }
+
+    /// The Favorites card's collection (MEMNG-868): the pictures carrying the `favorites` picture
+    /// tag, never a memo tag's listing; its count and the cover the card shows.
+    static func favoritesRoute(
+        count: Int, cover: MemoAttachment?, zone: TimeZone,
+        under identity: TimelineSnapshotIdentity?
+    ) -> CollectionRoute {
+        let collection = AutomaticCollection(
+            kind: .pictureTag(FavoriteTag.name), count: count,
             cover: cover.map { CollectionCover(uid: $0.uid, thumbnailURL: $0.thumbnailURL) },
             zone: zone)
         return CollectionRoute(scope: .automatic(collection), openedUnder: identity)
@@ -375,23 +419,41 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// The tags the row draws: the store's, less every listed trip's tag.
-    private var tagsShown: [LibraryTag] {
-        CollectionsPresentation.tags(
-            tags.tags,
+    /// The cards the row draws: Favorites first while a picture carries it, then the store's
+    /// memo tags less every listed trip's tag.
+    private var tagRow: [CollectionsPresentation.TagRowCard] {
+        CollectionsPresentation.tagRow(
+            memoTags: tags.tags,
+            pictureTags: pictureTags?.tags ?? [],
             excluding: CollectionsPresentation.tripTags(
                 trips.trips, listFailed: trips.lastError != nil))
     }
 
     private var tagsRow: some View {
-        row(Self.tagsHeader, tagsShown) { tag in
-            TagCard(tag: tag, covers: tagCovers, access: access) {
-                push(
-                    Self.tagRoute(
-                        tag, cover: tagCovers?.cover(for: tag.name), zone: timeZone,
-                        under: identity))
+        row(Self.tagsHeader, tagRow) { card in
+            switch card {
+            case .favorites(let count):
+                FavoritesCard(count: count, covers: tagCovers, access: access) {
+                    push(
+                        Self.favoritesRoute(
+                            count: count, cover: tagCovers?.cover(of: FavoritesCard.subject),
+                            zone: timeZone, under: identity))
+                }
+            case .tag(let tag):
+                TagCard(tag: tag, covers: tagCovers, access: access) {
+                    push(
+                        Self.tagRoute(
+                            tag, cover: tagCovers?.cover(for: tag.name), zone: timeZone,
+                            under: identity))
+                }
             }
         }
+    }
+
+    /// Reads the pictures' own tags, every kind counted as the memo tags are.
+    private func loadPictureTags() async {
+        guard let pictureTags, let access = access() else { return }
+        await pictureTags.load(for: .all, using: access.handle)
     }
 
     /// Reads the list of trips; a list already on the wire is joined.
@@ -514,5 +576,27 @@ private struct CollectionTrailReport: ViewModifier {
         content.onChange(of: trail, initial: true) { _, now in
             dock?.collectionTrail(now.map { AnyHashable($0) })
         }
+    }
+}
+
+/// Reads run one at a time, with at most one more queued (MEMNG-868): a `run` while one is out
+/// asks for exactly one read after it, however many such calls arrive, and returns at once. That
+/// read is issued after the one out answers, so whatever moved while it was out is read.
+@MainActor
+final class JoinedReads {
+    private var running = false
+    private var queued = false
+
+    func run(_ read: @MainActor () async -> Void) async {
+        guard !running else {
+            queued = true
+            return
+        }
+        running = true
+        defer { running = false }
+        repeat {
+            queued = false
+            await read()
+        } while queued
     }
 }

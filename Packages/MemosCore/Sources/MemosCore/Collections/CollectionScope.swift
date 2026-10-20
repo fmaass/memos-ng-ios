@@ -1,7 +1,7 @@
 import Foundation
 
 /// What a collection screen is opened on: a trip the server holds, or a collection the Collections
-/// root computes — a tag, a month or a year (MEMNG-817). Every lane of `TripMemberStore` is keyed
+/// root computes — a tag, a month, a year (MEMNG-817) or a picture tag (MEMNG-868). Every lane of `TripMemberStore` is keyed
 /// by `id`, so a trip and a tag holding the same pictures never share a row.
 ///
 /// Hashed by `id` alone because `Trip` is only `Equatable`; equal scopes always share an id, so
@@ -10,7 +10,7 @@ public enum CollectionScope: Hashable, Sendable {
     case trip(Trip)
     case automatic(AutomaticCollection)
 
-    /// The trip's uid, or `tag:<name>`, `month:<YYYY-MM>`, `year:<YYYY>`.
+    /// The trip's uid, or `tag:<name>`, `month:<YYYY-MM>`, `year:<YYYY>`, `picture-tag:<name>`.
     public var id: String {
         switch self {
         case .trip(let trip): trip.uid
@@ -30,7 +30,9 @@ public enum CollectionScope: Hashable, Sendable {
         return false
     }
 
-    /// The tag whose pictures are members: a trip's own, or the tag a tag collection names.
+    /// The memo tag whose pictures are members: a trip's own, or the tag a tag collection names.
+    /// Nil for a picture tag, which is no memo tag (plan decision 3): nothing that files, journals
+    /// or excludes by memo tag may take `favorites` the picture tag for `#favorites` the memo tag.
     public var tag: String? {
         switch self {
         case .trip(let trip): trip.tag
@@ -76,7 +78,8 @@ public struct CollectionCover: Hashable, Sendable {
     }
 }
 
-/// A collection with no server record: its membership IS the tag or the calendar bucket.
+/// A collection with no server record: its membership IS the tag, the picture tag or the calendar
+/// bucket.
 public struct AutomaticCollection: Hashable, Sendable {
     public enum Kind: Hashable, Sendable {
         case tag(String)
@@ -84,6 +87,9 @@ public struct AutomaticCollection: Hashable, Sendable {
         case month(String)
         /// A year bucket's key, `YYYY`.
         case year(String)
+        /// The pictures carrying a picture tag of their own (MEMNG-868) — `favorites` — read with
+        /// `pictureTag=`, never `tag=`: a memo tag of the same name is another collection.
+        case pictureTag(String)
     }
 
     public var kind: Kind
@@ -107,30 +113,42 @@ public struct AutomaticCollection: Hashable, Sendable {
         case .tag(let name): "tag:\(name)"
         case .month(let key): "month:\(key)"
         case .year(let key): "year:\(key)"
+        case .pictureTag(let name): "picture-tag:\(name)"
         }
     }
 
-    /// The card's own title: `#name`, "Sep 2026" (the Months view's label), "2026".
+    /// The title of the favorites collection, whose card and screen name it so.
+    public static let favoritesTitle = "Favorites"
+
+    /// The card's own title: `#name`, "Sep 2026" (the Months view's label), "2026", "Favorites" —
+    /// a picture tag without the `#` a memo tag is written with.
     public var title: String {
         switch kind {
         case .tag(let name): "#\(name)"
         case .month(let key): monthBucketLabel(key) ?? key
         case .year(let key): key
+        case .pictureTag(let name): name == FavoriteTag.name ? Self.favoritesTitle : name
         }
     }
 
-    /// The tag a tag collection names; nil for a month or a year.
+    /// The memo tag a tag collection names; nil for a month, a year or a picture tag.
     var tagName: String? {
         switch kind {
         case .tag(let name): name
-        case .month, .year: nil
+        case .month, .year, .pictureTag: nil
         }
+    }
+
+    /// The picture tag a picture-tag collection names; nil for every other kind.
+    public var pictureTagName: String? {
+        if case .pictureTag(let name) = kind { return name }
+        return nil
     }
 
     /// The bucket key a month or a year walk starts at; nil for a tag.
     var bucket: String? {
         switch kind {
-        case .tag: nil
+        case .tag, .pictureTag: nil
         case .month(let key), .year(let key): key
         }
     }
@@ -138,7 +156,7 @@ public struct AutomaticCollection: Hashable, Sendable {
     /// A month's or a year's interval in `zone`; nil for a tag, or for a key naming no period.
     public var period: CollectionPeriod? {
         switch kind {
-        case .tag: nil
+        case .tag, .pictureTag: nil
         case .month(let key): CollectionPeriod(month: key, in: zone)
         case .year(let key): CollectionPeriod(year: key, in: zone)
         }

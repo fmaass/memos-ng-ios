@@ -62,6 +62,9 @@ public final class TripMemberStore {
         case tag(String)
         /// The Library's listing from a bucket, held to the period's interval.
         case period(bucket: String, CollectionPeriod)
+        /// The Library's listing under a picture's own tag (MEMNG-868), `pictureTag=` and no
+        /// `tag=`: the favorites collection.
+        case pictureTag(String)
     }
 
     let trips: TripStore
@@ -408,6 +411,7 @@ public final class TripMemberStore {
         case .trip: return .trip
         case .automatic(let collection):
             if case .tag(let name) = collection.kind { return .tag(name) }
+            if let name = collection.pictureTagName { return .pictureTag(name) }
             guard let bucket = collection.bucket, let period = collection.period else { return nil }
             return .period(bucket: bucket, period)
         }
@@ -417,17 +421,28 @@ public final class TripMemberStore {
     /// only says where the walk STARTS — the listing runs on past the period, and past an empty
     /// bucket into the next — so a period keeps a row only while it was taken before `nextStart`
     /// and asks for no page after the first row that was not.
+    ///
+    /// A picture tag's walk is fenced WHOLE by the favorites ledger (MEMNG-868): a favorite is
+    /// membership here, not just a field of a row, and the keyset cursor means a later page never
+    /// answers a row ordered before it — so a picture favorited behind the cursor would never be
+    /// read, and one unfavorited among the rows already piled would stay. The walk stamps the
+    /// ledger's revision at its start; when a page answers under a newer revision it lets go of
+    /// every row and the cursor and walks again from the first page, under the new stamp — once
+    /// per answered page however many commits landed while it was out. A walk whose stamp is still
+    /// current when its last page answers lands as any other.
     private func runAutomaticDrain(
         _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
-        let issued = favoriteStamp
+        var issued = favoriteStamp
         var tag: String?
+        var pictureTag: String?
         var bucket: String?
         var period: CollectionPeriod?
         switch lineage.request {
         case .trip: return
         case .tag(let name): tag = name
+        case .pictureTag(let name): pictureTag = name
         case .period(let key, let interval):
             bucket = key
             period = interval
@@ -435,16 +450,24 @@ public final class TripMemberStore {
         var rows: [LibraryRow] = []
         var cursor: String?
         var complete = true
+        var walking = true
         do {
-            repeat {
+            while walking {
                 let page = try await MediaLibraryStore.page(
                     handle.client, filter: .all, order: .oldestFirst, tag: tag, bucket: bucket,
-                    timeZone: period?.zone.identifier, cursor: cursor, limit: pageSize,
-                    baseURL: baseURL)
+                    timeZone: period?.zone.identifier, pictureTag: pictureTag, cursor: cursor,
+                    limit: pageSize, baseURL: baseURL)
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 guard stillCurrent(lineage), flights[lineage.uid]?.token == token else {
                     MemosLog.api.info("a collection's member page answered for a moved revision")
                     return
+                }
+                if pictureTag != nil, favoriteStamp != issued {
+                    MemosLog.api.info("a favorite landed during a picture tag's walk; walk again")
+                    issued = favoriteStamp
+                    rows = []
+                    cursor = nil
+                    continue
                 }
                 var items = page.items
                 var next = page.nextCursor
@@ -465,7 +488,8 @@ public final class TripMemberStore {
                     rows = Array(rows.prefix(memberCap))
                     break
                 }
-            } while cursor != nil
+                walking = cursor != nil
+            }
         } catch {
             await report(error, handle: handle) {
                 self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token

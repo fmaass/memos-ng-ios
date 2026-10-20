@@ -933,6 +933,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var answeredYears: [String] = []
     private nonisolated(unsafe) var heldSpans: Set<String> = []
     private nonisolated(unsafe) var tagsAnswer: String?
+    private nonisolated(unsafe) var pictureTagsAnswer: String?
+    private nonisolated(unsafe) var pictureTagsScript: [String] = []
+    private nonisolated(unsafe) var pictureTagsHeld = false
+    private nonisolated(unsafe) var pictureTagsReleased = 0
+    private nonisolated(unsafe) var pictureTagsRead = 0
     private nonisolated(unsafe) var monthsAnswer: String?
     private nonisolated(unsafe) var yearsAnswer: String?
     private nonisolated(unsafe) var coversFail = false
@@ -988,6 +993,34 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     nonisolated func answerTags(_ json: String) {
         lock.withLock { tagsAnswer = json }
     }
+
+    /// Answers the picture-tag list (MEMNG-868) with `json`; unset, it is not found.
+    nonisolated func answerPictureTags(_ json: String) {
+        lock.withLock { pictureTagsAnswer = json }
+    }
+
+    /// Answers the picture-tag reads in order, one entry each — each the list as it stood when
+    /// that read was issued — the last entry for every read past them; and holds each read until
+    /// `releasePictureTagRead()` lets it answer.
+    nonisolated func scriptPictureTags(_ answers: [String]) {
+        lock.withLock {
+            pictureTagsScript = answers
+            pictureTagsHeld = true
+        }
+    }
+
+    /// Lets the next held picture-tag read answer.
+    nonisolated func releasePictureTagRead() {
+        lock.withLock { pictureTagsReleased += 1 }
+    }
+
+    /// Lets every picture-tag read, held or to come, answer.
+    nonisolated func releasePictureTags() {
+        lock.withLock { pictureTagsHeld = false }
+    }
+
+    /// How many picture-tag reads were sent.
+    nonisolated var pictureTagReads: Int { lock.withLock { pictureTagsRead } }
 
     /// Answers every month read with `json`; unset, a month read is not found.
     nonisolated func answerMonths(_ json: String) {
@@ -1080,6 +1113,24 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
             if let answer = lock.withLock({ tagsAnswer }) { return Self.json(answer) }
             return Self.json(
                 #"[{"name":"portugal2026","count":3},{"name":"family","count":40}]"#)
+        case "add_picture_tag_api_attachments__uid__tags__name__put",
+            "remove_picture_tag_api_attachments__uid__tags__name__delete":
+            return (HTTPResponse(status: .noContent), nil)
+        case "attachment_picture_tags_api_attachments_picture_tags_get":
+            let (call, script) = lock.withLock { () -> (Int, [String]) in
+                pictureTagsRead += 1
+                return (pictureTagsRead, pictureTagsScript)
+            }
+            if !script.isEmpty {
+                while lock.withLock({ pictureTagsHeld && pictureTagsReleased < call }) {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                return Self.json(script[min(call, script.count) - 1])
+            }
+            guard let answer = lock.withLock({ pictureTagsAnswer }) else {
+                return (HTTPResponse(status: .notFound), nil)
+            }
+            return Self.json(answer)
         case "attachment_buckets_api_attachments_buckets_get":
             // Years only (MEMNG-720): 2026 three pictures, 2019 forty. Every other size stays
             // unanswered, as it was before the Years row.

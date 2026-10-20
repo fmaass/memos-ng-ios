@@ -989,6 +989,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         visibility: MediaVisibilityFilter = .any,
         bucket: String? = nil,
         timeZone: String? = nil,
+        pictureTag: String? = nil,
         cursor: String?,
         limit: Int,
         baseURL: URL
@@ -1010,7 +1011,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     tz: timeZone,
                     // "Captured by me" and Visibility (MEMNG-787): absent unless chosen.
                     mine: apiMine(mine),
-                    visibility: visibility.apiVisibility
+                    visibility: visibility.apiVisibility,
+                    // The pictures' OWN tag (MEMNG-868), apart from `tag`, which is the memo's:
+                    // the favorites collection and its cover; nil for every other caller.
+                    pictureTag: pictureTag
                 )
             )
         )
