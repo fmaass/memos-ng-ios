@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (55)
+
+- The heart in the picture viewer now works: a tap marks one of my pictures as a favorite, and another tap takes it back.
+- On a picture that is not mine, the heart says why it cannot be changed.
+- Collections has a Favorites card: a heart, the number of favorites, and one of them as its cover.
+- Please favorite a few pictures from the Library and a memo, open the Favorites card, then unfavorite its cover picture and check the card changes.
+
 ## 2.4.0 (54)
 
 - An opened picture has a glass bar at the bottom: Share, an Info button and the bin for a picture I may delete.
