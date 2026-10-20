@@ -59,6 +59,11 @@ struct MediaViewerView: View {
     /// Whose credential the original download presents. Optional for the same reason the router
     /// is: this bundle's tests host the viewer with neither.
     @Environment(SessionStore.self) private var session: SessionStore?
+    /// The session's favorites, which the bar's heart reads and writes. Optional for the same
+    /// reason: a host without one draws the heart inert.
+    @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
+    /// Why the last heart tap wrote nothing (somebody else's picture), until the page changes.
+    @State private var heartNotice: String?
     /// The download the menu's slow action starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
     /// The page the pager has settled on — the identity of the page, not an index, because a
@@ -165,6 +170,8 @@ struct MediaViewerView: View {
         .onAppear { playback.advance(.opened) }
         .onChange(of: currentPage) { _, settled in
             guard let settled else { return }
+            heartNotice = nil
+            favorites?.dismissNotice()
             playback.advance(.paged(to: settled))
             Task { await advance(to: settled) }
         }
@@ -270,7 +277,11 @@ struct MediaViewerView: View {
                 // The share flow the ⋯ menu's Share row ran, moved here unchanged.
                 share: { Task { await fetch(page.attachment, .shared) } },
                 info: { openInfo(page) },
-                delete: { send(.tapped(page.attachment.uid)) }
+                delete: { send(.tapped(page.attachment.uid)) },
+                favorites: favorites,
+                handle: session?.activeHandle,
+                baseURL: session?.serverBaseURL,
+                notice: { heartNotice = $0 }
             )
             .opacity(shown ? 1 : 0)
             .allowsHitTesting(shown)
@@ -360,6 +371,12 @@ struct MediaViewerView: View {
     private var failureNotice: some View {
         if let failure = deletion.lastError {
             NoticeCard(text: failure, tone: .error)
+                .padding(DesignTokens.Space.roomy)
+        } else if let favorite = favorites?.notice {
+            NoticeCard(text: favorite, tone: .error)
+                .padding(DesignTokens.Space.roomy)
+        } else if let heartNotice {
+            NoticeCard(text: heartNotice, tone: .warning)
                 .padding(DesignTokens.Space.roomy)
         }
     }

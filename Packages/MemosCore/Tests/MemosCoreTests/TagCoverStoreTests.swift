@@ -339,6 +339,61 @@ struct TagCoverStoreTests {
         #expect(calls.get() == ["garden", "empty", "empty"])
     }
 
+    @Test("forgetting a subject asks it again and publishes the new cover")
+    func forgetAsksTheSubjectAgain() async {
+        let covers = LockedValue<[String]>(["p1", "p2"])
+        let calls = LockedValue<Int>(0)
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            let next = covers.get()
+            covers.set(Array(next.dropFirst()))
+            return Self.one(next.first ?? "none")
+        }
+        let favorites = TagCoverStore.Subject.pictureTag("favorites")
+        let store = TagCoverStore()
+        await store.load(favorites, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.cover(of: favorites)?.uid == "p1")
+        await store.load(.tag("garden"), using: client.handle, baseURL: Stub.baseURL)
+        store.forget(favorites)
+        #expect(store.answer(for: favorites) == nil, "the forgotten cover is still drawn")
+        #expect(store.answer(for: .tag("garden")) != nil, "control: another subject was forgotten")
+        await store.load(favorites, using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.cover(of: favorites)?.uid == "none")
+        #expect(calls.get() == 3)
+    }
+
+    @Test("a lookup on the wire when its subject is forgotten lands nowhere and is not joined")
+    func aForgottenLookupLandsNowhere() async {
+        let calls = LockedValue<Int>(0)
+        let holding = LockedValue<Bool>(true)
+        let entered = CoverSignal()
+        let release = CoverSignal()
+        // The first lookup is held and answers the picture the commit took away.
+        let client = Stub.client { _, _, _ in
+            calls.set(calls.get() + 1)
+            if holding.get() {
+                holding.set(false)
+                entered.signal()
+                await release.wait()
+                return Self.one("removed")
+            }
+            return Self.one("kept")
+        }
+        let favorites = TagCoverStore.Subject.pictureTag("favorites")
+        let store = TagCoverStore()
+        let inFlight = Task {
+            await store.load(favorites, using: client.handle, baseURL: Stub.baseURL)
+        }
+        await entered.wait()
+        store.forget(favorites)
+        await store.load(favorites, using: client.handle, baseURL: Stub.baseURL)
+        #expect(calls.get() == 2, "the load after the forget joined the lookup asked before it")
+        #expect(store.cover(of: favorites)?.uid == "kept")
+        release.signal()
+        await inFlight.value
+        #expect(store.cover(of: favorites)?.uid == "kept", "the lookup before the forget landed")
+    }
+
     /// One row for the lookup, at `status`, its URLs signed to `expires` when one is given.
     private nonisolated static func row(
         _ uid: String, status: String = "ready", expires: Date? = nil

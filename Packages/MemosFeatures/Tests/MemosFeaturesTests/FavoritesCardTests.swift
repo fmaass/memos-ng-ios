@@ -155,6 +155,36 @@ struct FavoritesCardTests {
         }
     }
 
+    /// Codex (Part A review): the card's cover is the favorites' newest picture, so a commit that
+    /// takes that picture away must take the cover with it — the count alone moving is not enough.
+    @Test("rendered: unfavoriting the cover picture reads the card's cover again and it changes")
+    func unfavoritingTheCoverChangesIt() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags("[]")
+        wire.transport.answerPictureTags(#"[{"name":"favorites","count":2}]"#)
+        wire.transport.scriptFavoriteCovers(["pNewest", "pOlder"])
+        let favorites = FavoriteStore()
+        let pictureTags = PictureTagStore()
+        pictureTags.follow(favorites)
+        let covers = TagCoverStore()
+        await CollectionsHost.with(
+            screen(wire, pictureTags: pictureTags, covers: covers, favorites: favorites)
+        ) { screen in
+            #expect(await screen.until { screen.element(labelled: "Favorites") != nil })
+            #expect(await screen.until { covers.cover(of: FavoritesCard.subject) != nil })
+            #expect(covers.cover(of: FavoritesCard.subject)?.uid == "pNewest")
+            await favorites.setFavorite(
+                uid: "pNewest", to: false, shownTags: ["favorites"],
+                using: wire.access.handle, baseURL: CollectionsWire.baseURL
+            ).value
+            #expect(
+                await screen.until { covers.cover(of: FavoritesCard.subject)?.uid == "pOlder" },
+                "the card still shows the picture that is no longer a favorite")
+        }
+        let lookups = wire.transport.sent.filter { $0.contains("pictureTag=favorites") }
+        #expect(lookups.count == 2, "\(lookups)")
+    }
+
     /// Codex r1: a read that ends still stale — B landed during it, forcing the store's one
     /// retry, and C during that retry — must still be followed by one more read. A reload keyed
     /// on the stale flag's false-to-true edge sees it stay true and never reads again.

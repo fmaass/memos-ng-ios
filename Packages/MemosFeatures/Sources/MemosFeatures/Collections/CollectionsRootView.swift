@@ -17,6 +17,9 @@ struct CollectionsRootView: View {
     /// The favorites ledger, when the session's composition provides one: the Favorites card's
     /// counts follow its commits (MEMNG-868).
     @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
+    /// The session's picture-tag store, built beside the favorites in `MainTabView`, which
+    /// follows them and moves it to a new identity. A host without one gets a store of its own.
+    @Environment(PictureTagStore.self) private var sessionPictureTags: PictureTagStore?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
     /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720).
@@ -114,6 +117,9 @@ struct CollectionsRootView: View {
                         )
                         store.reports(to: session)
                         covers = store
+                    }
+                    if pictureTags == nil, let sessionPictureTags {
+                        pictureTags = sessionPictureTags
                     }
                     if pictureTags == nil {
                         let store = PictureTagStore(
@@ -264,8 +270,11 @@ struct CollectionsScreen: View {
         // Every favorites commit reads the counts again, keyed on the ledger's revision, which
         // moves on each commit. Never on `isStale`: a read can end still stale, after commits
         // that landed while it was out, and a Bool that stays true schedules nothing more.
+        // The card's cover is read again too: the commit may have taken its picture away.
         .onChange(of: favorites?.revision ?? 0) {
             Task { await pictureTagReads.run { await loadPictureTags() } }
+            tagCovers?.forget(FavoritesCard.subject)
+            Task { await loadFavoritesCover() }
         }
         .task(id: identity) { await loadMonths() }
         .task(id: identity) { await loadYears() }
@@ -454,6 +463,12 @@ struct CollectionsScreen: View {
     private func loadPictureTags() async {
         guard let pictureTags, let access = access() else { return }
         await pictureTags.load(for: .all, using: access.handle)
+    }
+
+    /// Reads the Favorites card's cover; a lookup of it already on the wire is joined.
+    private func loadFavoritesCover() async {
+        guard let tagCovers, let access = access() else { return }
+        await tagCovers.load(FavoritesCard.subject, using: access.handle, baseURL: access.baseURL)
     }
 
     /// Reads the list of trips; a list already on the wire is joined.

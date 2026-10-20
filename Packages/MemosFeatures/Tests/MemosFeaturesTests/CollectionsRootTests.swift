@@ -942,6 +942,7 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var yearsAnswer: String?
     private nonisolated(unsafe) var coversFail = false
     private nonisolated(unsafe) var coversHeld = false
+    private nonisolated(unsafe) var favoriteCovers: [String] = []
     /// The trips the server holds; a trip's members are its tag's listing below, and so is its
     /// count: `portugal2026` three, `family` two, less what was removed.
     nonisolated let trips = TripRows(counter: { row in
@@ -1035,6 +1036,12 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     /// Answers every tag cover lookup 500.
     nonisolated func failCovers() {
         lock.withLock { coversFail = true }
+    }
+
+    /// Answers the Favorites card's cover lookups with these pictures in turn, the last one for
+    /// every lookup after it; unset, they answer as any cover lookup does.
+    nonisolated func scriptFavoriteCovers(_ uids: [String]) {
+        lock.withLock { favoriteCovers = uids }
     }
 
     /// Holds every tag cover lookup until `releaseCovers()`.
@@ -1171,6 +1178,14 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
                 if lock.withLock({ coversFail }) {
                     return (HTTPResponse(status: .internalServerError), nil)
                 }
+            }
+            if path.contains("pictureTag=favorites"),
+                let uid = lock.withLock({ () -> String? in
+                    defer { if favoriteCovers.count > 1 { favoriteCovers.removeFirst() } }
+                    return favoriteCovers.first
+                })
+            {
+                return Self.json("[\(Self.item(uid, taken: "2026-03-28T12:00:00Z"))]")
             }
             if let tag = Self.spanTag(path) {
                 while lock.withLock({ heldSpans.contains(tag) }) {

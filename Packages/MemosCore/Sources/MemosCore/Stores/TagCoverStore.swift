@@ -58,6 +58,8 @@ public final class TagCoverStore {
     }
 
     private var generation = 0
+    /// Moved for one subject by `forget`: a lookup of it issued before lands nowhere.
+    private var subjectEpochs: [Subject: Int] = [:]
     private var nextToken = 0
     private var slots: [Subject: Slot] = [:]
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
@@ -120,16 +122,18 @@ public final class TagCoverStore {
         nextToken += 1
         let token = nextToken
         let issued = generation
+        let epoch = subjectEpochs[subject, default: 0]
         let task = Task {
-            await self.run(subject, generation: issued, token: token, handle, baseURL)
+            await self.run(
+                subject, generation: issued, epoch: epoch, token: token, handle, baseURL)
         }
         slots[subject] = Slot(token: token, generation: issued, task: task)
         await task.value
     }
 
     private func run(
-        _ subject: Subject, generation issued: Int, token: Int, _ handle: SessionHandle,
-        _ baseURL: URL
+        _ subject: Subject, generation issued: Int, epoch: Int, token: Int,
+        _ handle: SessionHandle, _ baseURL: URL
     ) async {
         defer { if slots[subject]?.token == token { slots[subject] = nil } }
         var tag: String?
@@ -146,11 +150,22 @@ public final class TagCoverStore {
                 MemosLog.api.info("a tag cover answered for a credential that has gone; dropped")
                 return
             }
+            guard epoch == subjectEpochs[subject, default: 0] else {
+                MemosLog.api.info("a tag cover answered before its subject changed; dropped")
+                return
+            }
             answers[subject] = Self.cover(of: page.items.first?.attachment)
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else {
                 MemosLog.api.info("a tag cover failed for an account that has gone; dropped")
+                return
+            }
+            // A refusal still goes to the session's rule; any other failure of a forgotten
+            // lookup is not its subject's answer.
+            guard epoch == subjectEpochs[subject, default: 0] || StoreFailure.refusal(error) != nil
+            else {
+                MemosLog.api.info("a tag cover failed before its subject changed; dropped")
                 return
             }
             await report(error, subject: subject, issuedUnder: handle)
@@ -183,6 +198,15 @@ public final class TagCoverStore {
         answers = [:]
         slots = [:]
         generation += 1
+    }
+
+    /// Forgets the answer of `subject`, whose pictures have changed, and any lookup of it on the
+    /// wire: that lookup was asked before the change, so it lands nowhere, and the next `load`
+    /// asks afresh rather than joining it.
+    public func forget(_ subject: Subject) {
+        answers[subject] = nil
+        slots[subject] = nil
+        subjectEpochs[subject, default: 0] += 1
     }
 
     /// Forgets every tag answered with no cover — no picture, a failure, or a picture not yet

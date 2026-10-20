@@ -239,6 +239,8 @@ public struct TimelineView: View {
                 to: identity, trips: trips, members: tripMembers)
         }
         .onChange(of: tripMembers.map(ObjectIdentifier.init)) { reportPictureDeletes() }
+        // A favorite committed in the viewer reaches every copy of the picture on this list.
+        .followsFavorites(timeline) { store, favorites in store.follow(favorites) }
         // The live media channel, and its single owner.
         //
         // One channel for the whole signed-in app: this view is the app's first tab, so it exists
