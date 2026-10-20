@@ -71,11 +71,28 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     /// no owner at all. Either way there is no memo to open, which is the only question anything
     /// asks this field.
     public var memoUID: String?
+    /// The wall-clock time the picture was taken, as the camera wrote it — `2026-01-01T13:00:00`,
+    /// no offset — when the file carried one.
+    ///
+    /// Capture metadata in the same sense as `captureInstant`, and kept apart from every DISPLAY
+    /// date for the same reason: nothing derived from the memo or the upload may be written here.
+    /// A clock with no offset is what a camera records, so it is read as written, in whatever zone
+    /// the reader is in, rather than converted from anywhere.
+    public var captureCivil: String?
+    /// Where the server read the capture fields from (`exif`, `quicktime`, …), or `nil` when it
+    /// read none.
+    public var captureSource: String?
+    /// Whether this FILE is the reader's own — the attachment owner's flag the payload carries.
+    ///
+    /// Not the memo's `mine`: a picture of somebody else's can hang on a memo of mine, and the
+    /// other way round. `nil` where the payload this was built from says nothing about it.
+    public var mine: Bool?
     /// The picture's OWN tags (MEMNG-867), sorted by name as the server sends them — never its
     /// memo's tags, which are `Memo.tags` and live on the text. A favorite is one of these
     /// (`FavoriteTag.name`), so this is what the viewer's heart reads.
     ///
-    /// Part of the timeline snapshot's shape: adding it bumped `currentFormatVersion` to 3.
+    /// Part of the timeline snapshot's shape: adding it took `currentFormatVersion` past 2
+    /// (`TimelineSnapshot.currentFormatVersion` names the version that carries it).
     public var tags: [String]
 
     // A public memberwise initialiser, so previews and tests in other modules can build one
@@ -89,6 +106,9 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         height: Int? = nil,
         duration: Double? = nil,
         captureInstant: Date? = nil,
+        captureCivil: String? = nil,
+        captureSource: String? = nil,
+        mine: Bool? = nil,
         thumbnailURL: URL? = nil,
         previewURL: URL? = nil,
         webURL: URL? = nil,
@@ -111,6 +131,9 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         self.posterURL = posterURL
         self.downloadURL = downloadURL
         self.memoUID = memoUID
+        self.captureCivil = captureCivil
+        self.captureSource = captureSource
+        self.mine = mine
         self.tags = tags
     }
 
@@ -250,6 +273,9 @@ extension MemoAttachment {
             height: generated.height,
             duration: generated.duration,
             captureInstant: generated.captureInstant,
+            captureCivil: generated.captureCivil,
+            captureSource: generated.captureSource,
+            mine: generated.mine,
             thumbnailURL: URL(string: generated.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,

@@ -158,7 +158,7 @@ struct MediaTileMenuTests {
     /// what stops the two surfaces from offering different things about one file.
     /// The expectation is written out by hand rather than taken from the function being tested —
     /// comparing `actions(for:)` to `actions(for:)` asserts only that it is deterministic.
-    @Test("the viewer's overlay offers a library page exactly Show Memo then Share")
+    @Test("the viewer's overlay offers a library page Show Memo, its bar holding the Share")
     func overlayOffersTheWholeActionSet() throws {
         let attachment = photo("a", memoUID: "m7")
         let page = try #require(MediaViewerPresentation.pages(for: [attachment]).first)
@@ -168,6 +168,9 @@ struct MediaTileMenuTests {
             MediaTileMenu.actions(for: page.attachment)
                 == [.showMemo(uid: "m7"), .share(attachment)]
         )
+        // MEMNG-860: the viewer's ⋯ is the same list less Share, which its bar offers instead.
+        #expect(MediaTileMenu.viewerActions(for: page.attachment) == [.showMemo(uid: "m7")])
+        #expect(MediaTileMenu.canShare(page.attachment))
     }
 
     /// A memo's OWN media carries no owner, so the viewer opened from a memo offers no way back to

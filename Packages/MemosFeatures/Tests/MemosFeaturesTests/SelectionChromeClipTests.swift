@@ -143,6 +143,28 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
+        "clip 860: the viewer's bar, its date capsule, and the chrome hidden and shown by a tap",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipViewerChrome() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver opens the first picture: the bar, the top row and the capsule.
+            #expect(await ClipStage.scene("860a-viewer-bar"))
+            await ClipStage.settle(window, seconds: 1)
+            // A swipe to the next picture and back: the capsule follows the page.
+            #expect(await ClipStage.scene("860b-viewer-date-capsule"))
+            await ClipStage.settle(window, seconds: 1)
+            // One tap hides the chrome, the next shows it; then Close.
+            #expect(await ClipStage.scene("860c-viewer-hide-on-tap"))
+        }
+    }
+
+    @Test(
         "clip 783: the Collections root's cards, each row scrolled, one opened",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )

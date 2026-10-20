@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -41,6 +41,9 @@ SCENES = [
     "783-collection-cards",
     "822-collection-modes-bar",
     "845a-library-scope-row",
+    "860a-viewer-bar",
+    "860b-viewer-date-capsule",
+    "860c-viewer-hide-on-tap",
 ]
 ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
 
@@ -328,6 +331,46 @@ class Driver:
         time.sleep(2)
         self.swipe(200, 300, 200, 750, 0.6)
         time.sleep(3)
+
+    def scene_860a(self):
+        # MEMNG-860: the viewer's bottom bar. One test holds the three viewer scenes: this one
+        # opens the first picture of the Library, 860b and 860c go on in the same viewer.
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if not tiles:
+            raise RuntimeError("no tile on screen to open")
+        x, y = self.centre(tiles[0])
+        self.tap_at(x, y, "tile %r" % tiles[0].get("AXLabel"))
+        time.sleep(3.5)
+        for label in ("Share", "Favorite", "Info", "Close"):
+            self.find(label)   # the bar's three controls and the top row, or the scene stops
+        time.sleep(3)
+
+    def scene_860b(self):
+        # The date capsule: it follows the page, so a swipe to the next picture moves it.
+        time.sleep(2)
+        self.swipe(330, 440, 70, 440, 0.4)
+        time.sleep(3)
+        self.swipe(70, 440, 330, 440, 0.4)
+        time.sleep(3)
+
+    def scene_860c(self):
+        # Hide-on-tap: one tap on the picture takes the top row, the capsule and the bar away,
+        # the next brings all three back. The pause between them keeps the two taps apart, so
+        # neither reads as the double tap that zooms.
+        time.sleep(2)
+        self.tap_at(201, 440, "the picture, to hide the chrome")
+        time.sleep(3)
+        self.tap_at(201, 440, "the picture, to show the chrome")
+        time.sleep(3)
+        self.find("Info")   # the bar is back, or the scene stops here
+        self.tap("Close")
+        time.sleep(2.5)
 
     def fold(self):
         """A short drag down that stays inside the trip's few points of travel: a longer one

@@ -146,6 +146,9 @@ extension MemoAttachment {
             width: generated.width,
             height: generated.height,
             duration: nil,
+            // The FILE's owner, as on a memo's own attachments. The list carries no capture
+            // fields, and `takenAt` — a display date — is never one of them (`LibraryRow`).
+            mine: generated.mine,
             thumbnailURL: URL(string: generated.thumbnailUrl, relativeTo: baseURL)?.absoluteURL,
             previewURL: URL(string: generated.previewUrl, relativeTo: baseURL)?.absoluteURL,
             webURL: URL(string: generated.webUrl, relativeTo: baseURL)?.absoluteURL,
