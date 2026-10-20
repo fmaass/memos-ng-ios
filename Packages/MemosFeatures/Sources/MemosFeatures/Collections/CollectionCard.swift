@@ -13,6 +13,8 @@ struct CollectionCard: View {
     let cover: MemoAttachment?
     let title: String
     let count: Int
+    /// A glyph at the top left, for a card that is no tag, trip or period: the Favorites heart.
+    var symbol: String? = nil
 
     /// The cover's side, and the card's whole width.
     static let width: CGFloat = 160
@@ -51,6 +53,15 @@ struct CollectionCard: View {
             }
             .overlay(alignment: .topTrailing) {
                 badge.padding(Self.inset)
+            }
+            .overlay(alignment: .topLeading) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                        .padding(Self.inset)
+                }
             }
             .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
             .frame(width: Self.width, height: Self.width)
@@ -109,6 +120,34 @@ struct TagCard: View {
         .task(id: tag.name) {
             guard let covers, let access = access() else { return }
             await covers.load(tag: tag.name, using: access.handle, baseURL: access.baseURL)
+        }
+    }
+}
+
+/// The Favorites card (MEMNG-868): a heart, "Favorites", the count of pictures carrying the
+/// `favorites` picture tag, and the newest of them as the cover — the tag card's `limit: 1` read
+/// under `pictureTag=` (`TagCoverStore`), its thumbnail tier like every card. A tap opens the
+/// pictures carrying it.
+struct FavoritesCard: View {
+    let count: Int
+    let covers: TagCoverStore?
+    let access: () -> CollectionsAccess?
+    let open: () -> Void
+
+    /// The heart's symbol, the one the viewer's favorite button fills.
+    static let symbol = "heart.fill"
+    static var subject: TagCoverStore.Subject { .pictureTag(FavoriteTag.name) }
+
+    var body: some View {
+        Button(action: open) {
+            CollectionCard(
+                cover: covers?.cover(of: Self.subject),
+                title: AutomaticCollection.favoritesTitle, count: count, symbol: Self.symbol)
+        }
+        .buttonStyle(.plain)
+        .task {
+            guard let covers, let access = access() else { return }
+            await covers.load(Self.subject, using: access.handle, baseURL: access.baseURL)
         }
     }
 }

@@ -490,6 +490,7 @@ struct TripView: View {
         case .tag: return "No photos with this tag"
         case .month: return "No photos in this month"
         case .year: return "No photos in this year"
+        case .pictureTag: return "No favorites yet"
         }
     }
 
@@ -501,6 +502,8 @@ struct TripView: View {
         case .tag: return "No memos with this tag"
         case .month: return "No memos in this month"
         case .year: return "No memos in this year"
+        // No memo is read for a picture tag: it names pictures, and no memo route filters by it.
+        case .pictureTag: return "Favorites have no journal"
         }
     }
 

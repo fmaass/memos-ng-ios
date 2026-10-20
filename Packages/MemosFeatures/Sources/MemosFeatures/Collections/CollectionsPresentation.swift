@@ -121,7 +121,7 @@ enum CollectionsPresentation {
         formatter.locale = locale
         formatter.timeZone = period.zone
         switch collection.kind {
-        case .tag: return nil
+        case .tag, .pictureTag: return nil
         case .month: formatter.setLocalizedDateFormatFromTemplate("MMMMy")
         case .year: formatter.setLocalizedDateFormatFromTemplate("y")
         }
@@ -212,6 +212,40 @@ enum CollectionsPresentation {
     /// tag's, and no second trip is made of it.
     static func tags(_ tags: [LibraryTag], excluding tripTags: Set<String>) -> [LibraryTag] {
         tags.filter { !tripTags.contains($0.name) }
+    }
+
+    /// One card of the Tags row: the Favorites card, or a memo tag's.
+    enum TagRowCard: Equatable, Identifiable {
+        /// The pictures carrying the `favorites` picture tag, and how many they are.
+        case favorites(count: Int)
+        case tag(LibraryTag)
+
+        var id: String {
+            switch self {
+            case .favorites: "picture-tag:\(FavoriteTag.name)"
+            case .tag(let tag): "tag:\(tag.name)"
+            }
+        }
+    }
+
+    /// The Favorites card's count (MEMNG-868): the `favorites` entry of the PICTURE-tag counts,
+    /// or nil when it is absent or zero — no card. Nothing else is asked: a memo tag or a trip
+    /// named `favorites` neither feeds nor hides it (plan decision 3).
+    static func favoritesCount(_ pictureTags: [LibraryTag]) -> Int? {
+        guard let count = pictureTags.first(where: { $0.name == FavoriteTag.name })?.count,
+            count > 0
+        else { return nil }
+        return count
+    }
+
+    /// The Tags row: the Favorites card FIRST when it has a picture, then the memo tags
+    /// `tags(_:excluding:)` keeps, in their order.
+    static func tagRow(
+        memoTags: [LibraryTag], pictureTags: [LibraryTag], excluding tripTags: Set<String>
+    ) -> [TagRowCard] {
+        var row = tags(memoTags, excluding: tripTags).map(TagRowCard.tag)
+        if let count = favoritesCount(pictureTags) { row.insert(.favorites(count: count), at: 0) }
+        return row
     }
 
     /// The pushed collections that still exist: the stack up to the first trip `ids` no longer
