@@ -171,6 +171,8 @@ struct MediaLibraryView: View {
         // Keyed on the account, as the tag and bucket lists below are: when the session becomes
         // somebody else's, this reads the incoming account's first page (MEMNG-591). Everything
         // before the read is idempotent on a second pass.
+        // A favorite committed in the viewer reaches every copy of the picture in this grid.
+        .followsFavorites(library) { store, favorites in store.follow(favorites) }
         .task(id: session.state.user?.subject) {
             if library == nil {
                 library = MediaLibraryStore(

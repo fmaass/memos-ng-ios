@@ -16,7 +16,8 @@ private func picture(
     memoUID: String? = nil,
     mine: Bool? = nil,
     captureCivil: String? = nil,
-    captureInstant: Date? = nil
+    captureInstant: Date? = nil,
+    tags: [String] = []
 ) -> MemoAttachment {
     MemoAttachment(
         uid: uid,
@@ -30,7 +31,8 @@ private func picture(
         thumbnailURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/thumb"),
         previewURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/mobile"),
         webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
-        memoUID: memoUID
+        memoUID: memoUID,
+        tags: tags
     )
 }
 
@@ -497,7 +499,9 @@ final class GatedMemoTransport: ClientTransport, @unchecked Sendable {
                     "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
                     "hasPoster":false,"renditions":[],"downloadUrl":"/a/a/file",\
                     "printUrl":"/a/a/print","thumbnailUrl":"/a/a/thumb","previewUrl":"/a/a/m",\
-                    "webUrl":"/a/a/web","webReady":true,"posterUrl":"/a/a/poster"}
+                    "webUrl":"/a/a/web","webReady":true,"posterUrl":"/a/a/poster",\
+                    "filename":null,"latitude":null,"longitude":null,"locationSource":null,\
+                    "addedBy":null,"camera":null,"tags":[]}
                     """)
             )
         default:
@@ -522,5 +526,196 @@ extension MediaImageLoaderTests {
             let substituted = ObjectIdentifier(scripted)
             #expect(handed == substituted, "the viewer's still bypasses MediaImageLoader.transport")
         }
+    }
+}
+
+// MARK: - The heart (MEMNG-867)
+
+private let heartBase = URL(string: "https://memos.example.invalid")!
+private let putFavorite = "add_picture_tag_api_attachments__uid__tags__name__put"
+private let deleteFavorite = "remove_picture_tag_api_attachments__uid__tags__name__delete"
+private let readRecord = "attachment_meta_api_attachments__uid__get"
+
+/// The favorites server behind the heart: PUT and DELETE answer an empty 204, or the PUT's answer
+/// is lost; the record read that reconciles a lost answer is held until the test lets it go.
+/// Every request counted by operation.
+final class HeartTransport: ClientTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var operations: [String] = []
+    private let losesPut: Bool
+    private let recordAsked = AsyncStream<Void>.makeStream()
+    private let recordGate = AsyncStream<Void>.makeStream()
+
+    init(losesPut: Bool = false) { self.losesPut = losesPut }
+
+    func count(_ operation: String) -> Int {
+        lock.withLock { operations.filter { $0 == operation }.count }
+    }
+
+    func releaseRecord() {
+        recordGate.continuation.yield()
+        recordGate.continuation.finish()
+    }
+
+    func send(
+        _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
+    ) async throws -> (HTTPResponse, HTTPBody?) {
+        lock.withLock { operations.append(operationID) }
+        switch operationID {
+        case putFavorite where losesPut:
+            throw URLError(.networkConnectionLost)
+        case putFavorite, deleteFavorite:
+            return (HTTPResponse(status: .noContent), nil)
+        case readRecord:
+            recordAsked.continuation.yield()
+            for await _ in recordGate.stream { break }
+            var response = HTTPResponse(status: .ok)
+            response.headerFields[.contentType] = "application/json"
+            return (
+                response,
+                HTTPBody(
+                    """
+                    {"uid":"h","mime":"image/jpeg","size":2048,"sha256":null,"status":"ready",\
+                    "width":1000,"height":800,"duration":null,"blurhash":null,\
+                    "captured_at":null,"capture_instant":null,"capture_civil":null,\
+                    "capture_source":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,\
+                    "hasPoster":false,"renditions":[],"downloadUrl":"/a/h/file",\
+                    "printUrl":"/a/h/print","thumbnailUrl":"/a/h/thumb","previewUrl":"/a/h/m",\
+                    "webUrl":"/a/h/web","webReady":true,"posterUrl":"/a/h/poster",\
+                    "filename":null,"latitude":null,"longitude":null,"locationSource":null,\
+                    "addedBy":null,"camera":null,"tags":["favorites"]}
+                    """)
+            )
+        default:
+            return (HTTPResponse(status: .notFound), nil)
+        }
+    }
+}
+
+/// Whether the heart on `screen` comes to read `value` within the `eventually` deadline.
+@MainActor
+private func shows(_ screen: PressProbe.Screen, _ value: String) async -> Bool {
+    await eventually { screen.element(labelled: "Favorite")?.accessibilityValue == value }
+}
+
+/// Lets the main actor run until `condition` holds, or two seconds pass.
+@MainActor
+private func eventually(_ condition: () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(2)
+    while !condition() {
+        if Date() > deadline { return false }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return true
+}
+
+@MainActor
+@Suite("Viewer bar heart", .timeLimit(.minutes(1)))
+struct MediaViewerBarHeartTests {
+    private func session(_ transport: HeartTransport) -> SessionHandle {
+        let client = APIClientFactory.make(
+            configuration: ServerConfiguration(baseURL: heartBase), token: { "memos_pat_heart" },
+            transport: transport)
+        return SessionHandle(client: client, generation: 1)
+    }
+
+    private func bar(
+        _ file: MemoAttachment, _ favorites: FavoriteStore, _ handle: SessionHandle? = nil,
+        notice: @escaping (String) -> Void = { _ in }
+    ) -> MediaViewerBar {
+        MediaViewerBar(
+            attachment: file, binShown: false, favorites: favorites, handle: handle,
+            baseURL: heartBase, notice: notice)
+    }
+
+    /// The heart as VoiceOver reads it: its value, its hint, and whether it takes a press.
+    private struct Read: Equatable {
+        let value: String?
+        let hint: String?
+        let enabled: Bool
+    }
+
+    private func read(_ view: MediaViewerBar) -> Read? {
+        PressProbe.withElement(labelled: "Favorite", in: view) { heart in
+            heart.map {
+                Read(
+                    value: $0.accessibilityValue, hint: $0.accessibilityHint,
+                    enabled: !$0.accessibilityTraits.contains(.notEnabled))
+            }
+        }
+    }
+
+    @Test(
+        "the bar shows the heart's state and whether it writes, mine × tagged",
+        arguments: [(true, true), (true, false), (false, true), (false, false)])
+    func heartMatrixInTheBar(mine: Bool, tagged: Bool) throws {
+        let file = picture("h", mine: mine, tags: tagged ? [FavoriteTag.name] : [])
+        let shown = try #require(read(bar(file, FavoriteStore())), "no heart drawn")
+
+        #expect(shown.value == (tagged ? "On" : "Off"))
+        // Somebody else's picture is drawn dimmed and still takes a tap — the tap says why it
+        // writes nothing — so the hint is the difference, never a disabled button.
+        #expect((shown.hint ?? "") == (mine ? "" : FavoriteHeartPresentation.notMineNotice))
+        #expect(shown.enabled)
+        let heart = MediaViewerBar.heart(for: file, in: FavoriteStore())
+        #expect(heart.isDimmed == !mine)
+    }
+
+    @Test("a tap on my picture's heart writes the favorite, and the next tap takes it back")
+    func aTapTogglesTheFavorite() async throws {
+        let transport = HeartTransport()
+        let handle = session(transport)
+        let favorites = FavoriteStore()
+        let file = picture("h", mine: true)
+
+        await PressProbe.withScreen(bar(file, favorites, handle)) { screen in
+            #expect(screen.element(labelled: "Favorite")?.accessibilityValue == "Off")
+
+            #expect(screen.press("Favorite"))
+            #expect(await eventually { transport.count(putFavorite) == 1 })
+            #expect(await shows(screen, "On"))
+
+            #expect(screen.press("Favorite"))
+            #expect(await eventually { transport.count(deleteFavorite) == 1 })
+            #expect(await shows(screen, "Off"))
+        }
+        #expect(transport.count(putFavorite) == 1, "one tap, one request on the wire")
+        #expect(favorites.tags(for: "h", shown: []).contains(FavoriteTag.name) == false)
+    }
+
+    @Test("a tap on somebody else's picture writes nothing and says why")
+    func aTapOnTheirsSaysWhy() async throws {
+        let transport = HeartTransport()
+        let handle = session(transport)
+        let said = Box<[String]>([])
+        let view = bar(picture("h", mine: false), FavoriteStore(), handle) {
+            said.value.append($0)
+        }
+
+        await PressProbe.withScreen(view) { screen in
+            #expect(screen.press("Favorite"))
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(said.value == [FavoriteHeartPresentation.notMineNotice])
+        #expect(transport.count(putFavorite) == 0)
+    }
+
+    @Test("a write whose answer was lost shows pending until the record read settles it")
+    func pendingShowsInTheBar() async throws {
+        let transport = HeartTransport(losesPut: true)
+        let handle = session(transport)
+        let favorites = FavoriteStore()
+        let file = picture("h", mine: true)
+
+        await PressProbe.withScreen(bar(file, favorites, handle)) { screen in
+            #expect(screen.press("Favorite"))
+            #expect(await eventually { transport.count(readRecord) == 1 })
+            #expect(favorites.isPending("h"))
+            #expect(await shows(screen, "Confirming"))
+
+            transport.releaseRecord()
+            #expect(await shows(screen, "On"))
+        }
+        #expect(favorites.notice == nil, "a confirmed outcome says nothing")
     }
 }

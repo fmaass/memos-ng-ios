@@ -31,6 +31,11 @@ struct MainTabView: View {
     @State private var members: TripMemberStore?
     /// Select mode's memo actions (MEMNG-788), built beside the trip stores it re-reads.
     @State private var actions: MemoActionStore?
+    /// The session's favorites (MEMNG-867) and the picture-tag counts they mark stale: one of
+    /// each, built beside the trip stores, read by the viewer's heart and by the Favorites card
+    /// through the environment. Every store holding copies of pictures follows `favorites`.
+    @State private var favorites: FavoriteStore?
+    @State private var pictureTags: PictureTagStore?
     /// What Add to trip asks whether an edit of a picture's memo is still owed from this phone.
     @Environment(Outbox.self) private var outbox: Outbox?
 
@@ -51,6 +56,11 @@ struct MainTabView: View {
             tabs
         }
         .task { makeTripStores() }
+        // The ledger and the counts belong to the account that wrote them.
+        .onSessionIdentityChange(session.snapshotIdentity) { _ in
+            favorites?.sessionIdentityChanged()
+            pictureTags?.sessionIdentityChanged()
+        }
         // The trip list at once, not when the Collections root first appears: the composer's
         // offer of today's trip reads it (MEMNG-781).
         .readsTrips(trips, under: session.snapshotIdentity) { [session] in
@@ -83,6 +93,24 @@ struct MainTabView: View {
         trips = store
         members = memberStore
         actions = actionStore
+        makeFavoriteStores(following: memberStore)
+    }
+
+    /// Builds the favorites and picture-tag stores, once. The member store built beside them
+    /// follows the favorites here; the timeline and the library follow from their own screens,
+    /// which build their stores (`followFavorites`).
+    private func makeFavoriteStores(following memberStore: TripMemberStore) {
+        guard favorites == nil else { return }
+        let favoriteStore = FavoriteStore(
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
+        favoriteStore.reports(to: session)
+        let tagStore = PictureTagStore(
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
+        tagStore.reports(to: session)
+        tagStore.follow(favoriteStore)
+        memberStore.follow(favoriteStore)
+        favorites = favoriteStore
+        pictureTags = tagStore
     }
 
     /// The one card the session is entitled to, and never two: which of them is on screen is
@@ -130,6 +158,8 @@ struct MainTabView: View {
         .environment(trips)
         .environment(members)
         .environment(actions)
+        .environment(favorites)
+        .environment(pictureTags)
         // The tab switch, and only the tab switch. Whoever asked has already said which memo; the
         // Timeline is what reads that and pushes it, because it owns both the list and the stack.
         .onChange(of: jump.pending) { _, pending in
