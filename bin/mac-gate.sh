@@ -635,7 +635,7 @@ fi
 # unset, or exported by a caller at some other directory — makes a fresh copy, because the copy's
 # directory is what the run removes when it ends. The variable is dropped as soon as it is read, so
 # a gate a selftest starts makes a copy of its own.
-GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh gate-admission.sh gate-mount-guard.sh"
+GATE_RUN_HELPERS="reap-gate-lanes.sh gate-work-dir.sh gate-root-refusal.sh testcount-candidate-owner.sh gate-admission.sh gate-mount-guard.sh release-version-rule.sh"
 gate_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi \
     | awk '{print $1}'
@@ -1467,43 +1467,15 @@ fi
 
 # --- release-version authority ------------------------------------------------------------------
 # Runs HERE, on the controller, because the tags live in this checkout and the mirrored tree on
-# the build host carries no .git. The latest v* tag records what shipped (its annotation names
-# the build: "X.Y.Z (build N): ..."); the numbers in project.yml must ADVANCE past it — the
-# marketing version never below the tagged one, the build strictly greater always. A forgotten
-# bump is caught before a wasted archive; a spent build number cannot ship twice. No v* tag yet
-# is the bootstrap case and passes with a named line. Ritual: docs/RELEASING.md.
-version_at_least() { # $1 >= $2, dotted numerics
-  # Split on OWN lines: an IFS set in the same `local` statement does not govern that
-  # statement's word-splitting, and the perturbation run caught the strings comparing whole.
-  local IFS=. i
-  local -a a b
-  read -r -a a <<< "$1"
-  read -r -a b <<< "$2"
-  for i in 0 1 2; do
-    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
-    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
-  done
-  return 0
-}
-release_tag="$(git -C "$repo_root" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-if [ -n "$release_tag" ]; then
-  tagged_version="${release_tag#v}"
-  tagged_build="$(git -C "$repo_root" tag -l "$release_tag" --format='%(contents:subject)' \
-    | sed -n 's/.*build \([0-9][0-9]*\).*/\1/p')"
-  yml_version="$(sed -n 's/^ *MARKETING_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
-  yml_build="$(sed -n 's/^ *CURRENT_PROJECT_VERSION: "\(.*\)"/\1/p' "$repo_root/project.yml" | head -1)"
-  [ -n "$yml_version" ] && [ -n "$yml_build" ] \
-    || die_refuse "release check: could not read version keys from project.yml"
-  if ! version_at_least "$yml_version" "$tagged_version"; then
-    die_refuse "release check: MARKETING_VERSION $yml_version is below the shipped tag $release_tag"
-  fi
-  if [ -n "$tagged_build" ] && [ "$yml_build" -le "$tagged_build" ]; then
-    die_refuse "release check: build $yml_build does not advance past the shipped build $tagged_build ($release_tag)"
-  fi
-  say "release     : $yml_version (build $yml_build) advances past $release_tag (build ${tagged_build:-?})"
-else
-  say "release     : no v* tag yet — bootstrap, nothing to advance past"
-fi
+# the build host carries no .git: project.yml's numbers must advance past the latest v* tag, unless
+# project.yml is byte-identical to the tag's (no release candidate, MEMNG-878); no v* tag yet is
+# the bootstrap case. The rule and its reasons: scripts/release-version-rule.sh, run from this
+# run's private copy (GATE_RUN_HELPERS). Ritual: docs/RELEASING.md.
+release_rule_out="$("$GATE_RUN_COPY/scripts/release-version-rule.sh" "$repo_root" 2>&1)"
+release_rule_rc=$?
+[ "$release_rule_rc" -eq 0 ] \
+  || die_refuse "${release_rule_out:-release check: scripts/release-version-rule.sh failed (exit $release_rule_rc)}"
+say "$release_rule_out"
 
 # --- the change set, and the fast path -----------------------------------------------------------
 # Classified on every run, fast path or not, and written into the artifacts next to the log: the
