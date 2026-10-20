@@ -17,6 +17,9 @@ struct CollectionsRootView: View {
     /// The favorites ledger, when the session's composition provides one: the Favorites card's
     /// counts follow its commits (MEMNG-868).
     @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
+    /// The session's picture-tag store, built beside the favorites in `MainTabView`, which
+    /// follows them and moves it to a new identity. A host without one gets a store of its own.
+    @Environment(PictureTagStore.self) private var sessionPictureTags: PictureTagStore?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
     /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720).
@@ -114,6 +117,9 @@ struct CollectionsRootView: View {
                         )
                         store.reports(to: session)
                         covers = store
+                    }
+                    if pictureTags == nil, let sessionPictureTags {
+                        pictureTags = sessionPictureTags
                     }
                     if pictureTags == nil {
                         let store = PictureTagStore(
