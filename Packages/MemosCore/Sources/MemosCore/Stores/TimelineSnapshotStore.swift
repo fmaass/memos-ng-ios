@@ -45,7 +45,11 @@ public struct TimelineSnapshot: Sendable, Equatable, Codable {
     /// It does not catch everything, and the gap is worth naming: adding an OPTIONAL field decodes
     /// happily from a file written without it. That is a review rule, not something this number can
     /// enforce — a shape change is a shape change even when the compiler tolerates the old bytes.
-    public static let currentFormatVersion = 3
+    ///
+    /// 3: attachments carry their civil capture clock, its source and the file owner's flag
+    /// (MEMNG-860).
+    /// 4: attachments carry their own picture tags (MEMNG-867); both changes had bumped to 3.
+    public static let currentFormatVersion = 4
 
     public var formatVersion: Int
     public var identity: TimelineSnapshotIdentity

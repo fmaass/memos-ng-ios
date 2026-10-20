@@ -174,3 +174,29 @@ enum MediaTileMenu {
         return attachment.readiness == .ready ? file : nil
     }
 }
+
+extension MediaTileMenu {
+    /// The viewer's ⋯ rows: the tile's list less Share, which the viewer's bar holds instead
+    /// (`MediaViewerBar`). The tile's own list is unchanged.
+    static func viewerActions(for attachment: MemoAttachment) -> [MediaTileAction] {
+        actions(for: attachment).filter { action in
+            if case .share = action { return false }
+            return true
+        }
+    }
+
+    /// The viewer's top-right control: ALWAYS the ⋯ menu when there is anything in it, even one
+    /// row — the viewer's top row is close, date, ⋯, and a lone action drawn as its own glyph would
+    /// break that row's shape. The tile's direct-versus-menu rule (`control(of:)`, MEMNG-213) is
+    /// the tile's and stays as it is.
+    static func viewerControl(for attachment: MemoAttachment) -> MediaActionControl {
+        let actions = viewerActions(for: attachment)
+        return actions.isEmpty ? .hidden : .menu(actions)
+    }
+
+    /// Whether the bar's Share has a file to hand over — the same rule the tile's Share row is
+    /// offered under.
+    static func canShare(_ attachment: MemoAttachment) -> Bool {
+        heldFile(.shared, of: attachment) != nil
+    }
+}
