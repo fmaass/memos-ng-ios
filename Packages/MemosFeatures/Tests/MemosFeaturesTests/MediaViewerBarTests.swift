@@ -96,16 +96,20 @@ struct MediaViewerBarTests {
         let time = MediaViewerDateCapsule.timeLine(for: date, calendar: calendar, locale: .current)
         let label = MediaViewerDateCapsule.spoken(day: day, time: time)
         let side = MediaViewerBar.circleSide
+        // `PressProbe` finds a node by its label AND the button trait; the capsule is no button,
+        // so the test lends its one element the trait to be found by — nothing else changes.
+        func capsule() -> some View {
+            MediaViewerDateCapsule(date: date).accessibilityAddTraits(.isButton)
+        }
         for size in [DynamicTypeSize.large, .xxxLarge] {
-            let alone = MediaViewerDateCapsule(date: date).fixedSize()
-                .environment(\.dynamicTypeSize, size)
+            let alone = capsule().fixedSize().environment(\.dynamicTypeSize, size)
             let wanted = try #require(
                 PressProbe.withElement(labelled: label, in: alone) { $0?.accessibilityFrame },
                 "no capsule alone at \(size)")
             let row = MediaViewerTopRow {
                 Circle().frame(width: side, height: side)
             } capsule: {
-                MediaViewerDateCapsule(date: date)
+                capsule()
             } actions: {
                 Circle().frame(width: side, height: side)
             }
