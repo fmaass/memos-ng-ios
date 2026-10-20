@@ -5,6 +5,16 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (54)
+
+- An opened picture has a glass bar at the bottom: Share, an Info button and the bin for a picture I may delete.
+- The top of the viewer shows when the picture was taken: Today, Yesterday, the weekday, or the date, with the time beneath.
+- A single tap hides the viewer's controls and another tap brings them back; a double tap still zooms.
+- Info opens a sheet with when the picture was taken, the memo it belongs to and the file's type, size and dimensions.
+- Show Memo, Save Original and Use as Cover now sit in the ⋯ menu at the top right.
+- The heart is shown but does nothing yet.
+- Please open a picture from the Library, a memo and the map, tap once to hide and show the controls, open Info, and share one picture from the bar.
+
 ## 2.4.0 (53)
 
 - A trip now has its own controls in the top bar: Filter, a menu with Rename, Trip Dates and Delete Trip, and Select.
