@@ -71,13 +71,6 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     /// no owner at all. Either way there is no memo to open, which is the only question anything
     /// asks this field.
     public var memoUID: String?
-    /// The picture's OWN tags (MEMNG-867), sorted by name as the server sends them — never its
-    /// memo's tags, which are `Memo.tags` and live on the text. A favorite is one of these
-    /// (`FavoriteTag.name`), so this is what the viewer's heart reads.
-    ///
-    /// Part of the timeline snapshot's shape: adding it bumped `currentFormatVersion` (to 4, once
-    /// merged with MEMNG-860's capture fields, which had taken 3).
-    public var tags: [String]
     /// The wall-clock time the picture was taken, as the camera wrote it — `2026-01-01T13:00:00`,
     /// no offset — when the file carried one.
     ///
@@ -94,6 +87,13 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     /// Not the memo's `mine`: a picture of somebody else's can hang on a memo of mine, and the
     /// other way round. `nil` where the payload this was built from says nothing about it.
     public var mine: Bool?
+    /// The picture's OWN tags (MEMNG-867), sorted by name as the server sends them — never its
+    /// memo's tags, which are `Memo.tags` and live on the text. A favorite is one of these
+    /// (`FavoriteTag.name`), so this is what the viewer's heart reads.
+    ///
+    /// Part of the timeline snapshot's shape: adding it took `currentFormatVersion` past 2
+    /// (`TimelineSnapshot.currentFormatVersion` names the version that carries it).
+    public var tags: [String]
 
     // A public memberwise initialiser, so previews and tests in other modules can build one
     // without a server. Structs only synthesise an internal one.
@@ -131,10 +131,10 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
         self.posterURL = posterURL
         self.downloadURL = downloadURL
         self.memoUID = memoUID
-        self.tags = tags
         self.captureCivil = captureCivil
         self.captureSource = captureSource
         self.mine = mine
+        self.tags = tags
     }
 
     public var id: String { uid }

@@ -46,9 +46,12 @@ public struct TimelineSnapshot: Sendable, Equatable, Codable {
     /// happily from a file written without it. That is a review rule, not something this number can
     /// enforce — a shape change is a shape change even when the compiler tolerates the old bytes.
     ///
-    /// 3: attachments carry their civil capture clock, its source and the file owner's flag
-    /// (MEMNG-860).
-    /// 4: attachments carry their own picture tags (MEMNG-867); both changes had bumped to 3.
+    /// 3 was taken twice, on two branches: attachments carrying their civil capture clock, its
+    /// source and the file owner's flag (MEMNG-860), and attachments carrying their own tags
+    /// (MEMNG-867). A file written under either 3 lacks the other's fields, so neither may read
+    /// as current here.
+    ///
+    /// 4: both — civil capture clock, capture source, the file owner's flag and the file's tags.
     public static let currentFormatVersion = 4
 
     public var formatVersion: Int
