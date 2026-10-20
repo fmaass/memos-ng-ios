@@ -15,6 +15,8 @@ struct FavoriteFenceTests {
     nonisolated static let library = "list_attachments_api_attachments_get"
     nonisolated static let memos = "list_memos_api_memos_get"
     nonisolated static let pictureTags = "attachment_picture_tags_api_attachments_picture_tags_get"
+    nonisolated static let patch = "patch_memo_api_memos__uid__patch"
+    nonisolated static let pin = "pin_memo_api_memos__uid__pin_post"
 
     private nonisolated static func names(_ tags: [String]) -> String {
         tags.map { "\"\($0)\"" }.joined(separator: ",")
@@ -35,11 +37,18 @@ struct FavoriteFenceTests {
         Stub.json("[\(listItem(uid, pictureTags: pictureTags))]")
     }
 
-    /// A memo carrying one picture (`AttachmentRef`) with its own tags.
-    nonisolated static func memoPage(_ uid: String, pictureTags: [String]) -> String {
+    /// A memo `m-<uid>` carrying one picture (`AttachmentRef`) with its own tags.
+    nonisolated static func memo(
+        _ uid: String, pictureTags: [String], content: String = "hello", pinned: Bool = false
+    ) -> String {
         let reference = Stub.attachment(uid: uid, status: "ready").replacingOccurrences(
             of: #""renditions":[]"#, with: #""renditions":[],"tags":[\#(names(pictureTags))]"#)
-        return Stub.page([Stub.memo(uid: "m-\(uid)", attachments: [reference])])
+        return Stub.memo(
+            uid: "m-\(uid)", content: content, pinned: pinned, attachments: [reference])
+    }
+
+    nonisolated static func memoPage(_ uid: String, pictureTags: [String]) -> String {
+        Stub.page([memo(uid, pictureTags: pictureTags)])
     }
 
     /// Answers a favorite write with 204 and hands every other operation to `rest`.
@@ -94,6 +103,18 @@ struct FavoriteFenceTests {
         #expect(library.items.first?.attachment.tags == ["favorites"])
         let onDisk = try #require(TimelineSnapshotStore(root: root).read(identity: identity))
         #expect(onDisk.memos.first?.attachments.first?.tags == ["favorites"])
+    }
+
+    private static func timeline(
+        persistingTo root: URL, as identity: TimelineSnapshotIdentity
+    ) -> TimelineStore {
+        TimelineStore(
+            pageSize: 2,
+            snapshots: TimelineSnapshotWriter(
+                store: TimelineSnapshotStore(root: root), epoch: SessionEpoch()),
+            snapshotIdentity: identity,
+            persists: true
+        )
     }
 
     // MARK: - the fence
@@ -175,6 +196,103 @@ struct FavoriteFenceTests {
         #expect(members.members(for: scope).first?.attachment.tags == ["favorites"])
     }
 
+    // MARK: - the timeline's own writes (round 1, finding 1)
+
+    @Test("a refused tick held across a commit rolls back WITH the favorite, in memory and on disk")
+    func aRefusedTickRollsBackWithTheFavorite() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian")
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Self.server { operation in
+            switch operation {
+            case Self.memos:
+                return Stub.json(Stub.page([Self.memo("p1", pictureTags: [], content: "- [ ] a")]))
+            case Self.patch:
+                entered.open()
+                _ = await release.wait()
+                return Stub.empty(.internalServerError)
+            default:
+                return Self.rows("p1", pictureTags: [])
+            }
+        }
+        let favorites = FavoriteStore()
+        let timeline = Self.timeline(persistingTo: root, as: identity)
+        timeline.follow(favorites)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let ticking = Task {
+            await timeline.toggleTask(
+                at: 0, in: "m-p1", using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no tick was sent")
+        await favorite(favorites, client)
+        #expect(timeline.memos.first?.attachments.first?.tags == ["favorites"], "control: commit")
+        release.open()
+
+        #expect(await ticking.value == false, "control: the tick was refused")
+        #expect(timeline.memos.first?.content == "- [ ] a", "control: the tick rolled back")
+        #expect(timeline.memos.first?.attachments.first?.tags == ["favorites"], "favorite erased")
+        let onDisk = try #require(TimelineSnapshotStore(root: root).read(identity: identity))
+        #expect(onDisk.memos.first?.attachments.first?.tags == ["favorites"], "erased on disk")
+    }
+
+    @Test("a pin answer held across a commit lands with the favorite")
+    func aHeldPinAnswerKeepsTheFavorite() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Self.server { operation in
+            switch operation {
+            case Self.memos:
+                return Stub.json(Self.memoPage("p1", pictureTags: []))
+            case Self.pin:
+                entered.open()
+                _ = await release.wait()
+                return Stub.json(Self.memo("p1", pictureTags: [], pinned: true))
+            default:
+                return Self.rows("p1", pictureTags: [])
+            }
+        }
+        let favorites = FavoriteStore()
+        let timeline = TimelineStore(pageSize: 2)
+        timeline.follow(favorites)
+        await timeline.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let pinning = Task {
+            await timeline.setPinned(true, uid: "m-p1", using: client.handle, baseURL: Stub.baseURL)
+        }
+        #expect(await entered.wait(), "no pin was sent")
+        await favorite(favorites, client)
+        release.open()
+
+        #expect(await pinning.value, "control: the pin was saved")
+        #expect(timeline.memos.first?.pinned == true, "control: the answer landed")
+        #expect(timeline.memos.first?.attachments.first?.tags == ["favorites"], "favorite erased")
+    }
+
+    @Test("a snapshot older than a commit is restored with the favorite")
+    func aRestoredSnapshotTakesTheLedger() async {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = TimelineSnapshotIdentity(server: Stub.baseURL, subject: "fabian")
+        let client = Self.server { operation in
+            operation == Self.memos
+                ? Stub.json(Self.memoPage("p1", pictureTags: []))
+                : Self.rows("p1", pictureTags: [])
+        }
+        await Self.timeline(persistingTo: root, as: identity)
+            .refresh(using: client.handle, baseURL: Stub.baseURL)
+        let favorites = FavoriteStore()
+        let timeline = Self.timeline(persistingTo: root, as: identity)
+        timeline.follow(favorites)
+        await favorite(favorites, client)
+        await timeline.restoreSnapshot()
+
+        #expect(timeline.memos.map(\.uid) == ["m-p1"], "control: the snapshot was restored")
+        #expect(timeline.memos.first?.attachments.first?.tags == ["favorites"], "the file won")
+    }
+
+    // MARK: - picture counts
+
     @Test("picture counts read before a commit are discarded and read again exactly once")
     func aStaleCountIsReadAgainOnce() async {
         let reads = LockedValue(0)
@@ -202,6 +320,37 @@ struct FavoriteFenceTests {
         #expect(reads.get() == 2, "the stale answer was not re-requested exactly once")
         #expect(counts.tags.map(\.name) == ["favorites", "trip"])
         #expect(!counts.isStale)
+    }
+
+    @Test("a count that is stale again after its one re-read is not shown, and stays stale")
+    func aSecondStaleCountIsNotShown() async {
+        let reads = LockedValue(0)
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Self.server { _ in
+            reads.set(reads.get() + 1)
+            entered.open()
+            _ = await release.wait()
+            return Stub.json(#"[{"name":"favorites","count":\#(reads.get())}]"#)
+        }
+        let favorites = FavoriteStore()
+        let counts = PictureTagStore()
+        counts.follow(favorites)
+        let reading = Task { await counts.load(for: .all, using: client.handle) }
+        #expect(await entered.wait(), "no count was asked for")
+        await favorite(favorites, client)
+        release.open()
+        #expect(await entered.wait(), "the stale count was not read again")
+        await favorites.setFavorite(
+            uid: "p1", to: false, shownTags: [], using: client.handle, baseURL: Stub.baseURL
+        ).value
+        release.open()
+        await reading.value
+
+        #expect(reads.get() == 2, "the count was read more than once again")
+        #expect(favorites.revision == 2, "control: two commits")
+        #expect(counts.tags.isEmpty, "a count known to be stale was shown")
+        #expect(counts.isStale)
     }
 
     @Test("picture counts with no commit in between are read once (control)")

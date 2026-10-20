@@ -282,4 +282,92 @@ struct FavoriteStoreTests {
         #expect(store.tags(for: "p1", shown: []) == [])
         #expect(Self.operations(log) == [Self.put], "a refusal was reconciled: \(log.get())")
     }
+
+    // MARK: - round 1: what an identity change and a detail read leave behind
+
+    @Test("a commit's delivery stops at an identity change; the next account's commit stays last")
+    func aCommitDeliveryEndsAtAnIdentityChange() async {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let client = Stub.client { _, _, _ in Stub.empty(.noContent) }
+        let store = FavoriteStore()
+        let last = LockedValue<FavoriteCommit?>(nil)
+        store.observe { entry in
+            guard entry.revision == 1 else { return }
+            entered.open()
+            _ = await release.wait()
+        }
+        store.observe { entry in last.set(entry) }
+        let first = set(store, true, client)
+        #expect(await entered.wait(), "the first commit was not delivered")
+        store.sessionIdentityChanged()
+        await set(store, false, shown: ["favorites"], client).value
+        #expect(last.get()?.revision == 2, "control: the next account's commit was delivered")
+        release.open()
+        await first.value
+
+        #expect(last.get()?.revision == 2, "the ended account's commit was delivered after it")
+        #expect(last.get()?.tags == [])
+    }
+
+    @Test("the read of a flight an identity change let go leaves the next flight pending")
+    func anObsoleteReadLeavesTheNewFlightPending() async {
+        let reads = LockedValue(0)
+        let enteredFirst = TripLatch()
+        let releaseFirst = TripLatch()
+        let enteredSecond = TripLatch()
+        let releaseSecond = TripLatch()
+        let client = Stub.client { _, _, operation in
+            if operation == Self.put { throw URLError(.networkConnectionLost) }
+            reads.set(reads.get() + 1)
+            if reads.get() == 1 {
+                enteredFirst.open()
+                _ = await releaseFirst.wait()
+            } else {
+                enteredSecond.open()
+                _ = await releaseSecond.wait()
+            }
+            return Stub.json(Self.record("p1", tags: ["favorites"]))
+        }
+        let store = FavoriteStore()
+        let first = set(store, true, client)
+        #expect(await enteredFirst.wait(), "the first flight did not reconcile")
+        store.sessionIdentityChanged()
+        let second = set(store, true, client)
+        #expect(await enteredSecond.wait(), "the second flight did not reconcile")
+        #expect(store.isPending("p1"), "control: the second flight is reading")
+        releaseFirst.open()
+        await first.value
+
+        #expect(store.isPending("p1"), "the let-go read cleared the live flight's pending")
+        releaseSecond.open()
+        await second.value
+        #expect(!store.isPending("p1"))
+        #expect(store.tags(for: "p1", shown: []) == ["favorites"])
+    }
+
+    @Test("a detail read settles an unconfirmed favorite the ledger holds, through the ledger")
+    func aDetailReadResolvesAnUnconfirmedFavorite() async {
+        let reads = LockedValue(0)
+        let client = Stub.client { _, _, operation in
+            switch operation {
+            case Self.delete: return Stub.empty(.noContent)
+            case Self.put: throw URLError(.networkConnectionLost)
+            default:
+                reads.set(reads.get() + 1)
+                if reads.get() == 1 { throw URLError(.notConnectedToInternet) }
+                return Stub.json(Self.record("p1", tags: ["favorites"]))
+            }
+        }
+        let store = FavoriteStore()
+        await set(store, false, shown: ["favorites"], client).value
+        #expect(store.revision == 1, "control: the unmark committed")
+        await set(store, true, client).value
+        #expect(store.notice == FavoriteStore.unconfirmedNotice, "control: the outcome is unknown")
+        await store.loadDetail(uid: "p1", using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(store.details["p1"]?.tags == ["favorites"], "control: the detail landed")
+        #expect(store.tags(for: "p1", shown: []) == ["favorites"], "the ledger's stale word won")
+        #expect(store.revision == 2, "the answer was not published to the copies")
+    }
 }

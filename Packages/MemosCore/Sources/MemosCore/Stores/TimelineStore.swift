@@ -205,14 +205,6 @@ public final class TimelineStore {
 
     private var favoriteStamp: FavoriteStamp { favorites?.stamp ?? FavoriteStamp(revision: 0) }
 
-    private func fencedFavorites(_ memos: [Memo], _ issued: FavoriteStamp) -> [Memo] {
-        favorites?.overlay(memos, issuedAt: issued) ?? memos
-    }
-
-    private func fencedFavorites(_ memo: Memo, _ issued: FavoriteStamp) -> Memo {
-        favorites?.overlay(memo, issuedAt: issued) ?? memo
-    }
-
     private func applyFavorite(_ favorite: FavoriteCommit) async {
         let next = memos.map { memo in
             guard memo.attachments.contains(where: { $0.uid == favorite.uid }) else { return memo }
@@ -256,7 +248,12 @@ public final class TimelineStore {
             MemosLog.api.info("a snapshot read under a session that has moved on was not rendered")
             return
         }
-        memos = snapshot.memos
+        // The file carries no issue time, and every commit made while this list was empty
+        // reached none of its rows, so it is taken as older than every commit: the ledger is this
+        // session's newest word on a picture's favorite.
+        memos =
+            favorites?.overlay(snapshot.memos, issuedAt: FavoriteStamp(revision: 0))
+            ?? snapshot.memos
         showingSnapshot = true
     }
 
@@ -573,7 +570,7 @@ public final class TimelineStore {
             // picture of it is taken.
             await commit(
                 effective(
-                    admitted(fencedFavorites(page.memos, favoritesIssued)), issuedAt: issued,
+                    admitted(page.memos, favoritesIssued: favoritesIssued), issuedAt: issued,
                     using: handle, baseURL: baseURL
                 ),
                 under: authority
@@ -679,13 +676,12 @@ public final class TimelineStore {
                 // Everything reaching the fence here is a uid the list does NOT hold, so a held one
                 // has no row to keep and is dropped: a memo changed while this page was in the air
                 // is not appended at the version the page describes. The next read brings it.
-                let fresh = fencedFavorites(page.memos, favoritesIssued).filter {
-                    !known.contains($0.uid)
-                }
+                let fresh = page.memos.filter { !known.contains($0.uid) }
                 let merged =
                     memos
                     + effective(
-                        admitted(fresh), issuedAt: issuedAt, using: handle, baseURL: baseURL
+                        admitted(fresh, favoritesIssued: favoritesIssued), issuedAt: issuedAt,
+                        using: handle, baseURL: baseURL
                     )
                 nextCursor = page.nextCursor
                 hasMore = page.nextCursor != nil
@@ -805,9 +801,8 @@ public final class TimelineStore {
                 // no row to keep and is left off the block rather than prepended at a stale state.
                 let fresh = effective(
                     admitted(
-                        fencedFavorites(page.memos, favoritesIssued).filter {
-                            !known.contains($0.uid)
-                        }),
+                        page.memos.filter { !known.contains($0.uid) },
+                        favoritesIssued: favoritesIssued),
                     issuedAt: issued,
                     using: handle,
                     baseURL: baseURL
@@ -978,6 +973,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        let favoritesIssued = favoriteStamp
         do {
             let response = try await client.createMemoApiMemosPost(
                 .init(body: .json(.init(content: content, visibility: visibility?.generated)))
@@ -985,7 +981,9 @@ public final class TimelineStore {
             switch response {
             case .created(let created):
                 guard sessionStillCurrent(handle) else { return false }
-                let memo = admitted(Memo(try created.body.json, baseURL: baseURL))
+                let memo = admitted(
+                    Memo(try created.body.json, baseURL: baseURL),
+                    favoritesIssued: favoritesIssued)
                 lastError = nil
                 await commit(
                     Self.placed(memo, in: memos, tie: .justCreated), under: authority
@@ -1613,6 +1611,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        let favoritesIssued = favoriteStamp
         do {
             // Each response is switched on rather than reached through the generated throwing
             // accessors: those throw an untyped "unexpected status" error, and a refusal that does
@@ -1649,7 +1648,8 @@ public final class TimelineStore {
             // Before the apply, which awaits: a line cleared afterwards would be cleared for
             // whatever session the answer came back into.
             lastError = nil
-            await apply(updated, under: authority, confirming: claim)
+            await apply(
+                updated, under: authority, confirming: claim, favoritesIssued: favoritesIssued)
             return .saved
         } catch {
             mutationFailed(claim, on: uid, with: error)
@@ -1886,16 +1886,20 @@ public final class TimelineStore {
     /// answer, a pin, an archive and a ticked checkbox all land. A funnel rather than a check in
     /// each of them because the failure mode is a lane somebody forgets, and one that has to be
     /// remembered six times is one that will be.
-    private func admitted(_ memo: Memo) -> Memo {
-        guard !removedAttachments.isEmpty else { return memo }
-        var admitted = memo
+    ///
+    /// The same door carries the favorites fence, and for the same reason: `favoritesIssued` is the
+    /// ledger's stamp when the request this memo answers was ISSUED — or, for a copy put back by a
+    /// rollback, when that copy was taken — and every picture the ledger committed since takes the
+    /// ledger's tags. Required, so a lane cannot reach the list without saying how old it is.
+    private func admitted(_ memo: Memo, favoritesIssued: FavoriteStamp) -> Memo {
+        var admitted = favorites?.overlay(memo, issuedAt: favoritesIssued) ?? memo
+        guard !removedAttachments.isEmpty else { return admitted }
         admitted.attachments.removeAll { removedAttachments.contains($0.uid) }
         return admitted
     }
 
-    private func admitted(_ memos: [Memo]) -> [Memo] {
-        guard !removedAttachments.isEmpty else { return memos }
-        return memos.map { admitted($0) }
+    private func admitted(_ memos: [Memo], favoritesIssued: FavoriteStamp) -> [Memo] {
+        memos.map { admitted($0, favoritesIssued: favoritesIssued) }
     }
 
     /// The rows of a read that may still be published, judged against the instant the read LEFT.
@@ -2051,8 +2055,8 @@ public final class TimelineStore {
             switch response {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return false }
-                let read = fencedFavorites(
-                    Memo(try ok.body.json, baseURL: baseURL), favoritesIssued)
+                let read = admitted(
+                    Memo(try ok.body.json, baseURL: baseURL), favoritesIssued: favoritesIssued)
                 // A memo changed since this read was asked keeps the row this store holds, with
                 // only the attachment states the read carries — that part of the answer is about
                 // nothing a mutation of the memo touched. The read HAPPENED either way, so the
@@ -2069,7 +2073,7 @@ public final class TimelineStore {
                         baseURL: baseURL
                     )
                 else { return true }
-                await apply(row, under: authority)
+                await apply(row, under: authority, favoritesIssued: favoritesIssued)
                 return true
             case .unprocessableContent:
                 throw APIError.server(status: 422)
@@ -2198,7 +2202,7 @@ public final class TimelineStore {
             case .ok(let ok):
                 guard sessionStillCurrent(handle) else { return .absent }
                 let memo = admitted(
-                    fencedFavorites(Memo(try ok.body.json, baseURL: baseURL), favoritesIssued))
+                    Memo(try ok.body.json, baseURL: baseURL), favoritesIssued: favoritesIssued)
                 // Changed since this read was asked: the loaded row is the newer word, so it is
                 // what the caller opens the memo with, and nothing is applied over it. No
                 // per-attachment rule here — this lane merges nothing, it hands a memo over.
@@ -2215,7 +2219,7 @@ public final class TimelineStore {
                 if !heldBack {
                     serverStillHolds(memo.uid)
                 }
-                await apply(memo, under: authority)
+                await apply(memo, under: authority, favoritesIssued: favoritesIssued)
                 // AGAIN, after the apply: it awaits its way to the disk, and the memo below is
                 // one account's own — handing it to a caller that has become somebody else is an
                 // effect exactly as much as writing it would be.
@@ -2490,6 +2494,9 @@ public final class TimelineStore {
         guard optimistic[uid] == nil, mutations[uid] == nil else { return false }
         guard let position = memos.firstIndex(where: { $0.uid == uid }) else { return false }
         let original = memos[position]
+        // How old the rollback copy is, taken with it: a favorite committed while the tick is out
+        // is newer than the copy and must survive the copy being put back.
+        let originalTaken = favoriteStamp
         let toggled = MemosCore.toggleTask(original.content, at: index)
         guard toggled != original.content else { return false }
 
@@ -2504,8 +2511,8 @@ public final class TimelineStore {
         // submitted after it must be sent after.
         return await claimMutation(.task(index: index), on: uid) { [self] gate in
             await performToggle(
-                toggled, restoring: original, in: uid, claim: claim, gate: gate,
-                using: handle, baseURL: baseURL
+                toggled, restoring: original, takenAt: originalTaken, in: uid, claim: claim,
+                gate: gate, using: handle, baseURL: baseURL
             )
         }.value.isSaved
     }
@@ -2514,6 +2521,7 @@ public final class TimelineStore {
     private func performToggle(
         _ toggled: String,
         restoring original: Memo,
+        takenAt originalTaken: FavoriteStamp,
         in uid: String,
         claim: Int,
         gate: Int,
@@ -2538,6 +2546,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        let favoritesIssued = favoriteStamp
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(.init(content: toggled)))
@@ -2556,8 +2565,8 @@ public final class TimelineStore {
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 await apply(
-                    Memo(try ok.body.json, baseURL: baseURL), under: authority, confirming: gate
-                )
+                    Memo(try ok.body.json, baseURL: baseURL), under: authority, confirming: gate,
+                    favoritesIssued: favoritesIssued)
                 // LAST: the apply above is awaited, and a tap taken inside it would overlap this
                 // one. The settle gives up both claims and then writes whatever they were holding
                 // back.
@@ -2612,7 +2621,7 @@ public final class TimelineStore {
             }
             if let current = memos.firstIndex(where: { $0.uid == uid }) {
                 var restored = memos
-                restored[current] = admitted(original)
+                restored[current] = admitted(original, favoritesIssued: originalTaken)
                 await commit(restored, under: authority)
             }
             // After the rollback has landed, for the reason the success path settles last.
@@ -2670,6 +2679,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        let favoritesIssued = favoriteStamp
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(body))
@@ -2690,8 +2700,8 @@ public final class TimelineStore {
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 await apply(
-                    Memo(try ok.body.json, baseURL: baseURL), under: authority, confirming: claim
-                )
+                    Memo(try ok.body.json, baseURL: baseURL), under: authority, confirming: claim,
+                    favoritesIssued: favoritesIssued)
                 return .saved
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was, so the sheet stays open with the reason in it rather
@@ -2744,16 +2754,21 @@ public final class TimelineStore {
     /// the one place every server answer lands, so an archive made from a card, from the memo's own
     /// screen, or noticed by the reconciling read all reach the same conclusion.
     public func apply(_ memo: Memo) async {
-        await apply(memo, under: issuedAuthority())
+        // A memo handed in from outside carries no issue time, so it is taken as older than every
+        // commit: the ledger is the newest word this session has on a picture's favorite.
+        await apply(memo, under: issuedAuthority(), favoritesIssued: FavoriteStamp(revision: 0))
     }
 
     /// - Parameter claim: the mutation this memo is the server's confirmation of, if it is one.
     ///   The row is stamped HERE, before the early return below and before anything suspends: the
     ///   memo in hand is what the server says, whether or not this list has a row to put it in, and
     ///   a stamp taken after an await would be a statement about an instant that has passed.
-    private func apply(_ memo: Memo, under authority: Int, confirming claim: Int? = nil) async {
+    private func apply(
+        _ memo: Memo, under authority: Int, confirming claim: Int? = nil,
+        favoritesIssued: FavoriteStamp
+    ) async {
         if let claim { mutationApplied(claim, on: memo.uid) }
-        let memo = admitted(memo)
+        let memo = admitted(memo, favoritesIssued: favoritesIssued)
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
         guard query.admitsArchiveState(of: memo) else {
             // Same fence a delete raises, and for the same reason: a cursor page read while this

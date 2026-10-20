@@ -74,15 +74,23 @@ public final class PictureTagStore {
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 let now = favorites?.revision ?? 0
                 let behind = issued.map { $0.revision < now } ?? false
-                if behind, !reissued {
-                    MemosLog.api.info("picture tags read before a favorite landed; read again")
-                    reissued = true
-                    continue
+                if behind {
+                    // One re-read, never a loop. An answer that is stale AGAIN is known to be
+                    // wrong, so it is not shown: the counts stay as they were and stay marked
+                    // stale, and the next load asks once more.
+                    guard reissued else {
+                        MemosLog.api.info("picture tags read before a favorite landed; read again")
+                        reissued = true
+                        continue
+                    }
+                    MemosLog.api.info("picture tags stale again after their one re-read; dropped")
+                    isStale = true
+                    return
                 }
                 tags = rows
                 loadedFilter = filter
                 lastError = nil
-                isStale = behind
+                isStale = false
                 return
             } catch {
                 guard lineage == Lineage(generation: generation, filter: filter) else { return }

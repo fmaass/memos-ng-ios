@@ -258,7 +258,9 @@ public final class FavoriteStore {
         unconfirmed.insert(uid)
         details[uid] = nil
         detailGeneration += 1
-        defer { pending.remove(uid) }
+        // Only the flight that set the mark takes it down: a flight an identity change let go
+        // still lands here, and by then the uid may be marked by the flight that replaced it.
+        defer { if owns(uid, token) { pending.remove(uid) } }
         do {
             let read = try await TripMemberStore.attachment(
                 handle.client, uid: uid, baseURL: baseURL)
@@ -287,7 +289,17 @@ public final class FavoriteStore {
         let entry = FavoriteCommit(uid: uid, tags: tags, revision: revision)
         committed[uid] = entry
         details[uid]?.tags = tags
-        for observer in observers { await observer(entry) }
+        // Each observer awaits, and the ledger can move inside any of them: an identity change
+        // empties it and a later commit replaces the entry (revisions are never reused). Either
+        // way this entry is no longer the word on `uid`, and the observers not yet told must not
+        // be handed it after the one that replaced it.
+        for observer in observers {
+            guard committed[uid] == entry else {
+                MemosLog.api.info("a favorite commit outlived by the ledger stops being delivered")
+                return
+            }
+            await observer(entry)
+        }
     }
 
     private func owns(_ uid: String, _ token: Int) -> Bool { flights[uid]?.token == token }
@@ -304,6 +316,18 @@ public final class FavoriteStore {
                 handle.client, uid: uid, baseURL: baseURL)
             guard generation == detailGeneration, sessionStillCurrent(handle) else { return }
             session?.noteTransportSuccess(issuedUnder: handle.generation)
+            // A picture whose last write has an unknown outcome is decided by its own record, the
+            // same way the flight's reconciling read decides it — through the ledger, so the heart
+            // and every copy hear it. Not while a flight is out (its own answer decides), and not
+            // over a commit newer than this read.
+            if unconfirmed.contains(uid), flights[uid] == nil,
+                (committed[uid]?.revision ?? 0) <= issued.revision
+            {
+                unconfirmed.remove(uid)
+                details[uid] = read
+                await commit(uid, tags: read.tags)
+                return
+            }
             details[uid] = overlay(read, issuedAt: issued)
         } catch {
             guard generation == detailGeneration, sessionStillCurrent(handle) else { return }
