@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (56)
+
+- The bin is now in every picture viewer: the Timeline, the Library, a trip, a collection and the map, on each picture of mine.
+- Tapping it asks first, as before; the picture then leaves the grid behind the viewer.
+- Pictures that are not mine show no bin.
+- Please delete one test picture from the Library viewer and one from a trip, and check that a picture someone else posted has no bin.
+
 ## 2.4.0 (55)
 
 - The heart in the picture viewer now works: a tap marks one of my pictures as a favorite, and another tap takes it back.
