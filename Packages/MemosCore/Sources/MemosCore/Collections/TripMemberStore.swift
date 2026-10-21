@@ -417,10 +417,44 @@ public final class TripMemberStore {
         }
     }
 
-    /// The trip drain's walk over `GET /api/attachments`, no `type`, oldest taken first. `bucket=`
-    /// only says where the walk STARTS — the listing runs on past the period, and past an empty
-    /// bucket into the next — so a period keeps a row only while it was taken before `nextStart`
-    /// and asks for no page after the first row that was not.
+    /// An automatic collection's drain: `walkAutomatic` under the unfiltered query — every kind,
+    /// oldest taken first — into the members the hero, the Journal and the Map read.
+    private func runAutomaticDrain(
+        _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
+    ) async {
+        defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
+        let owned = { self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token }
+        let walked: AutomaticWalk?
+        do {
+            walked = try await walkAutomatic(
+                lineage.request, query: .unfiltered, handle, baseURL, owned: owned)
+        } catch {
+            await report(error, handle: handle, while: owned)
+            return
+        }
+        guard let walked else { return }
+        var landed = lineage
+        landed.revision = trips.revision
+        drained[lineage.uid] = Drained(
+            lineage: landed, rows: fenced(walked.rows, walked.issued), complete: walked.complete)
+        lastError = nil
+    }
+
+    /// What one walk of an automatic collection read: its rows, whether it reached the end, and
+    /// the favorites ledger's revision it is fenced by.
+    private struct AutomaticWalk {
+        var rows: [LibraryRow]
+        var complete: Bool
+        var issued: FavoriteStamp
+    }
+
+    /// The walk over `GET /api/attachments` under `request`, with `query`'s kind, order, "Captured
+    /// by me" and Visibility on the wire (MEMNG-827; the drain's is `.unfiltered`). `bucket=` only
+    /// says where the walk STARTS — the listing runs on past the period, and past an empty bucket
+    /// into the next — so a period keeps a row only while it lies inside the period, in the
+    /// direction the walk goes: before `nextStart` oldest first, at or after `start` newest first
+    /// (under `taken_desc` the bucket opens at the period's newest). It asks for no page after the
+    /// first row that does not.
     ///
     /// A picture tag's walk is fenced WHOLE by the favorites ledger (MEMNG-868): a favorite is
     /// membership here, not just a field of a row, and the keyset cursor means a later page never
@@ -430,17 +464,19 @@ public final class TripMemberStore {
     /// every row and the cursor and walks again from the first page, under the new stamp — once
     /// per answered page however many commits landed while it was out. A walk whose stamp is still
     /// current when its last page answers lands as any other.
-    private func runAutomaticDrain(
-        _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
-    ) async {
-        defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
+    ///
+    /// Nil when `owned` no longer holds as a page answers: the slot or the lineage moved.
+    private func walkAutomatic(
+        _ request: MemberRequest, query: TripMemberQuery, _ handle: SessionHandle, _ baseURL: URL,
+        owned: () -> Bool
+    ) async throws -> AutomaticWalk? {
         var issued = favoriteStamp
         var tag: String?
         var pictureTag: String?
         var bucket: String?
         var period: CollectionPeriod?
-        switch lineage.request {
-        case .trip: return
+        switch request {
+        case .trip: return nil
         case .tag(let name): tag = name
         case .pictureTag(let name): pictureTag = name
         case .period(let key, let interval):
@@ -451,56 +487,56 @@ public final class TripMemberStore {
         var cursor: String?
         var complete = true
         var walking = true
-        do {
-            while walking {
-                let page = try await MediaLibraryStore.page(
-                    handle.client, filter: .all, order: .oldestFirst, tag: tag, bucket: bucket,
-                    timeZone: period?.zone.identifier, pictureTag: pictureTag, cursor: cursor,
-                    limit: pageSize, baseURL: baseURL)
-                session?.noteTransportSuccess(issuedUnder: handle.generation)
-                guard stillCurrent(lineage), flights[lineage.uid]?.token == token else {
-                    MemosLog.api.info("a collection's member page answered for a moved revision")
-                    return
-                }
-                if pictureTag != nil, favoriteStamp != issued {
-                    MemosLog.api.info("a favorite landed during a picture tag's walk; walk again")
-                    issued = favoriteStamp
-                    rows = []
-                    cursor = nil
-                    continue
-                }
-                var items = page.items
-                var next = page.nextCursor
-                // An undated row cannot be placed against the bound; the server dates every row
-                // (`taken_at_expr` coalesces), so one would be a contract change, and it is kept.
-                if let period,
-                    let past = items.firstIndex(where: {
-                        $0.takenAt.map { $0 >= period.nextStart } ?? false
-                    })
-                {
-                    items = Array(items[..<past])
-                    next = nil
-                }
-                rows = MediaLibraryStore.merged(rows, with: items, filter: .all)
-                cursor = next
-                if rows.count >= memberCap, rows.count > memberCap || cursor != nil {
-                    complete = false
-                    rows = Array(rows.prefix(memberCap))
-                    break
-                }
-                walking = cursor != nil
+        while walking {
+            let page = try await MediaLibraryStore.page(
+                handle.client, filter: query.filter, order: query.order, tag: tag,
+                mine: query.mine, visibility: query.visibility, bucket: bucket,
+                timeZone: period?.zone.identifier, pictureTag: pictureTag, cursor: cursor,
+                limit: pageSize, baseURL: baseURL)
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
+            guard owned() else {
+                MemosLog.api.info("a collection's member page answered for a moved revision")
+                return nil
             }
-        } catch {
-            await report(error, handle: handle) {
-                self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token
+            if pictureTag != nil, favoriteStamp != issued {
+                MemosLog.api.info("a favorite landed during a picture tag's walk; walk again")
+                issued = favoriteStamp
+                rows = []
+                cursor = nil
+                continue
             }
-            return
+            var items = page.items
+            var next = page.nextCursor
+            // An undated row cannot be placed against the bound; the server dates every row
+            // (`taken_at_expr` coalesces), so one would be a contract change, and it is kept.
+            if let period,
+                let past = items.firstIndex(where: { row in
+                    row.takenAt.map { Self.isOutside($0, period, walking: query.order) } ?? false
+                })
+            {
+                items = Array(items[..<past])
+                next = nil
+            }
+            rows = MediaLibraryStore.merged(rows, with: items, filter: query.filter)
+            cursor = next
+            if rows.count >= memberCap, rows.count > memberCap || cursor != nil {
+                complete = false
+                rows = Array(rows.prefix(memberCap))
+                break
+            }
+            walking = cursor != nil
         }
-        var landed = lineage
-        landed.revision = trips.revision
-        drained[lineage.uid] = Drained(
-            lineage: landed, rows: fenced(rows, issued), complete: complete)
-        lastError = nil
+        return AutomaticWalk(rows: rows, complete: complete, issued: issued)
+    }
+
+    /// Whether a row taken at `taken` lies past `period`'s end in the direction the walk goes.
+    private static func isOutside(
+        _ taken: Date, _ period: CollectionPeriod, walking order: MediaLibraryOrder
+    ) -> Bool {
+        switch order {
+        case .oldestFirst: taken >= period.nextStart
+        case .newestFirst: taken < period.start
+        }
     }
 
     /// Reads the trip's members. Joins a drain of the same lineage already on the wire.
@@ -669,6 +705,157 @@ public final class TripMemberStore {
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: uid)
         filteredDrains[uid] = (
             query, Drained(lineage: landed, rows: fenced(rows, issued), complete: complete)
+        )
+        lastError = nil
+    }
+
+    // MARK: - An automatic collection's filter (MEMNG-827)
+
+    /// A scope's grid read as `query` asks: a trip's through `drainFiltered(_:query:using:baseURL:)`;
+    /// a tag's, a month's, a year's or a picture tag's from the Library's listing under its own
+    /// `tag=`, `bucket=` or `pictureTag=`, narrowed by the server with `query`'s kind, order,
+    /// "Captured by me" and Visibility (`walkAutomatic`), into the filtered slot. The unfiltered
+    /// query sends nothing and retires a read still out. A query that differs from the drain in
+    /// its order alone is answered by the drain turned round once the drain has read every member,
+    /// so the common newest-first showing costs no second walk; a drain the cap stopped short is no
+    /// such answer — its newest rows were never read — and the server is asked. A read of the same
+    /// lineage and query on the wire is joined; one of another query takes the slot.
+    public func drainFiltered(
+        _ scope: CollectionScope, query: TripMemberQuery, using handle: SessionHandle, baseURL: URL
+    ) async {
+        let key = scope.id
+        switch scope {
+        case .trip(let trip):
+            await drainFiltered(trip, query: query, using: handle, baseURL: baseURL)
+            return
+        case .automatic: break
+        }
+        activeQueries[key] = query
+        guard !query.isUnfiltered, let request = Self.request(for: scope) else {
+            filteredFlights[key] = nil
+            return
+        }
+        if query.isOrderOnly {
+            // The drain answers an order alone unless the cap stopped it: read it when nothing
+            // is held — joining the screen's own drain when that is already on the wire — so a
+            // first showing newest first walks the collection once, not twice.
+            if held(key, request: request) == nil {
+                await drain(scope, using: handle, baseURL: baseURL)
+            }
+            guard activeQueries[key] == query else { return }
+            if drainAnswers(key, request) {
+                filteredFlights[key] = nil
+                return
+            }
+        }
+        var lineage = stamp(key, handle)
+        lineage.request = request
+        if let running = filteredFlights[key], running.lineage == lineage, running.query == query {
+            await running.task.value
+            return
+        }
+        filteredFailures[key] = nil
+        nextToken += 1
+        let token = nextToken
+        let task = Task {
+            await self.runAutomaticFiltered(lineage, query, token: token, handle, baseURL)
+        }
+        filteredFlights[key] = FilteredFlight(
+            lineage: lineage, query: query, token: token, task: task)
+        await task.value
+    }
+
+    /// A lapsed signature's re-read of a scope's grid under `query`, for the showing `lease` was
+    /// minted for: nothing unless the lease is still live and `query` is still the grid's choice,
+    /// both asked in this turn.
+    public func renewFiltered(
+        _ scope: CollectionScope, under lease: CoverLease, query: TripMemberQuery,
+        using handle: SessionHandle, baseURL: URL
+    ) async {
+        guard leaseIsLive(lease, for: scope), !query.isUnfiltered,
+            activeQueries[scope.id] == query
+        else { return }
+        await drainFiltered(scope, query: query, using: handle, baseURL: baseURL)
+    }
+
+    /// What a scope's grid shows for `query`: a trip's as `filteredMembers(for:query:)` says; an
+    /// automatic collection's drained members for the unfiltered query, the drain turned round
+    /// for an order alone while the drain is whole, else the filtered read of exactly that query
+    /// and the current lineage — less every picture Delete took. Nil while there is none.
+    public func filteredMembers(for scope: CollectionScope, query: TripMemberQuery) -> [LibraryRow]?
+    {
+        switch scope {
+        case .trip(let trip): return filteredMembers(for: trip, query: query)
+        case .automatic: break
+        }
+        guard let request = Self.request(for: scope) else { return nil }
+        if query.isUnfiltered {
+            return held(scope.id, request: request) == nil ? nil : members(for: scope)
+        }
+        if query.isOrderOnly, drainAnswers(scope.id, request) {
+            return Array(members(for: scope).reversed())
+        }
+        guard let held = filteredDrains[scope.id], held.query == query,
+            current(held.drain.lineage), held.drain.lineage.request == request
+        else { return nil }
+        guard !deleted.isEmpty else { return held.drain.rows }
+        return held.drain.rows.filter { !deleted.contains($0.id) }
+    }
+
+    /// Where a scope's grid read for `query` stands; the drain's own state for the unfiltered one.
+    public func filteredState(for scope: CollectionScope, query: TripMemberQuery) -> TripMemberState
+    {
+        switch scope {
+        case .trip(let trip): return filteredState(for: trip, query: query)
+        case .automatic: break
+        }
+        if query.isUnfiltered { return state(for: scope) }
+        guard let request = Self.request(for: scope) else { return .notLoaded }
+        if query.isOrderOnly, drainAnswers(scope.id, request) { return .complete }
+        if let flight = filteredFlights[scope.id], flight.query == query { return .draining }
+        guard let held = filteredDrains[scope.id], held.query == query,
+            current(held.drain.lineage), held.drain.lineage.request == request
+        else { return .notLoaded }
+        return held.drain.complete ? .complete : .truncated
+    }
+
+    /// Whether a scope's grid read of `query` failed under the current lineage and nothing has
+    /// asked again since.
+    public func filteredFailed(for scope: CollectionScope, query: TripMemberQuery) -> Bool {
+        guard let failure = filteredFailures[scope.id], failure.query == query else { return false }
+        return current(failure.lineage)
+    }
+
+    /// Whether the drain held for `key` read every member of `request`: then an order alone is
+    /// answered by it.
+    private func drainAnswers(_ key: String, _ request: MemberRequest) -> Bool {
+        held(key, request: request)?.complete == true
+    }
+
+    private func runAutomaticFiltered(
+        _ lineage: Lineage, _ query: TripMemberQuery, token: Int, _ handle: SessionHandle,
+        _ baseURL: URL
+    ) async {
+        let key = lineage.uid
+        defer { if filteredFlights[key]?.token == token { filteredFlights[key] = nil } }
+        let owned = { self.stillCurrent(lineage) && self.filteredFlights[key]?.token == token }
+        let walked: AutomaticWalk?
+        do {
+            walked = try await walkAutomatic(
+                lineage.request, query: query, handle, baseURL, owned: owned)
+        } catch {
+            if owned() { filteredFailures[key] = (lineage, query) }
+            await report(error, handle: handle, while: owned)
+            return
+        }
+        guard let walked else { return }
+        var landed = lineage
+        landed.revision = trips.revision
+        filteredDrains[key] = (
+            query,
+            Drained(
+                lineage: landed, rows: fenced(walked.rows, walked.issued),
+                complete: walked.complete)
         )
         lastError = nil
     }
@@ -1137,4 +1324,8 @@ public struct TripMemberQuery: Sendable, Hashable {
     public static let unfiltered = TripMemberQuery()
 
     public var isUnfiltered: Bool { self == .unfiltered }
+
+    /// Every kind, everyone's, any visibility, newest first: the drain's members in the other
+    /// order, which a whole drain answers turned round (MEMNG-827).
+    public var isOrderOnly: Bool { !isUnfiltered && TripMemberQuery(order: order) == self }
 }

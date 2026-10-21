@@ -175,6 +175,10 @@ struct MediaLibraryView: View {
         // before the read is idempotent on a second pass.
         // A favorite committed in the viewer reaches every copy of the picture in this grid.
         .followsFavorites(library) { store, favorites in store.follow(favorites) }
+        // Sort By is the device's, and a collection's filter menu writes it too (MEMNG-827): the
+        // grid follows a choice made there, as it follows its own.
+        .onChange(of: preferences.order) { followOrder() }
+        .onAppear { followOrder() }
         .task(id: session.state.user?.subject) {
             if library == nil {
                 library = MediaLibraryStore(
@@ -586,6 +590,14 @@ struct MediaLibraryView: View {
                 Task { await load() }
             }
         )
+    }
+
+    /// A Sort By chosen elsewhere — a collection's filter menu (MEMNG-827) — reloads this grid
+    /// from that end, as its own choice does; nothing while the store already reads that way.
+    private func followOrder() {
+        guard let library, library.order != preferences.order else { return }
+        library.setOrder(preferences.order)
+        Task { await load() }
     }
 
     /// Choosing a direction persists it and reloads the grid from the other end — the store treats

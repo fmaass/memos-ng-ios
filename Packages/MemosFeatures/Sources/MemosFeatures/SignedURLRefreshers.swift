@@ -249,6 +249,9 @@ final class TripURLRefresher: SignedURLRefreshing {
             case .automatic:
                 guard let lease else { return }
                 await members.drain(scope, under: lease, using: handle, baseURL: baseURL)
+                // The grid's filtered read (MEMNG-827), fenced as the trip's is, and by the lease.
+                await members.renewFiltered(
+                    scope, under: lease, query: query, using: handle, baseURL: baseURL)
             }
         }
     }

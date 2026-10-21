@@ -2450,6 +2450,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             if gone.contains(uid) { return nil }
             let film = films.contains(uid)
             if film, query["type"] == "image" { return nil }
+            if !film, query["type"] == "video" { return nil }
             // `mine=true` leaves another member's picture out, as the server does (MEMNG-787).
             if query["mine"] == "true", theirs.contains(uid) { return nil }
             return item(

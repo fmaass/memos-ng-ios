@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (58)
+
+- Every collection now has the Library's filter button: a tag, a month or a year can show only videos, only photos, or only my own pictures.
+- Sort and view options are shared with the Library, so tag, month and year collections now open newest first and grouped by day, like the Library.
+- Changing the sort inside a collection changes it for the Library too.
+- Trips keep their own filter menu and still show no day headings.
+- Please open a tag and a month, pick Videos, and check that only that collection's videos remain; then clear the filter.
+
 ## 2.4.0 (57)
 
 - The heart now works on every picture, not only on my own: anyone in the family can mark a picture as a favorite or take the heart away again.

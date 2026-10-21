@@ -56,9 +56,23 @@ struct CollectionScreenTests {
         return (trips, TripMemberStore(trips: trips, pageSize: 2, memberCap: memberCap))
     }
 
+    /// The device's Sort By and View Options over a scratch suite, so no stored choice decides a
+    /// case: oldest first in one block — the grid as it was drawn before a collection read the
+    /// Library's (MEMNG-827) — unless a case names its own.
+    static func preferences(
+        order: MediaLibraryOrder = .oldestFirst, groupByDay: Bool = false
+    ) -> LibraryPreferences {
+        let suite = "collection-screen-" + UUID().uuidString
+        let preferences = LibraryPreferences(defaults: UserDefaults(suiteName: suite) ?? .standard)
+        preferences.select(order)
+        preferences.select(groupByDay: groupByDay)
+        return preferences
+    }
+
     private func screen(
         _ stores: (TripStore, TripMemberStore), _ wire: TripWire, _ scope: CollectionScope,
-        source: IdentitySource? = nil, dock: AppDock? = nil, zone: TimeZone = Self.utc
+        source: IdentitySource? = nil, dock: AppDock? = nil, zone: TimeZone = Self.utc,
+        preferences: LibraryPreferences = Self.preferences()
     ) -> some View {
         let access = wire.access
         let source = source ?? IdentitySource(alice)
@@ -66,7 +80,7 @@ struct CollectionScreenTests {
             NavigationStack {
                 TripView(
                     scope: scope, openedUnder: alice, trips: stores.0, memberStore: stores.1,
-                    identity: who, access: { access }, modes: modes)
+                    identity: who, access: { access }, modes: modes, preferences: preferences)
             }
         }
         .environment(dock ?? AppDock())
@@ -883,6 +897,78 @@ struct CollectionScreenTests {
         }
         #expect(reads() > 0, "control: \(what): the new showing's callback did not read")
         #expect(landed(), "control: \(what): the new showing's read did not land")
+    }
+
+    // MARK: - The filter menu (MEMNG-827)
+
+    @Test(
+        "a tag's and a month's Photos view has the Library's filter menu; Videos leaves the videos",
+        arguments: ["tag", "month"])
+    func theFilterMenuNarrowsToVideos(_ kind: String) async {
+        let scope = kind == "tag" ? Self.tag : Self.month
+        let wire = TripWire()
+        wire.transport.film("p1")
+        wire.transport.film("p3")
+        await CollectionsHost.with(screen(stores(), wire, scope), height: 3000) { screen in
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(grid, "control: the grid landed: \(TripProbe.tiles(in: screen.window))")
+            let rows = TripMenuProbe.rows(of: TripView.filterButton, in: screen.window)
+            let wanted = [
+                "All Items", "Photos", "Videos", "Captured by me", "Any", "Public", "Just us",
+                "Oldest First", "Newest First", "Group by Day", "Mixed Sizes", "Square Grid",
+            ]
+            let positions = wanted.map { rows.firstIndex(of: $0) ?? -1 }
+            #expect(
+                !positions.contains(-1) && positions == positions.sorted(),
+                "the filter menu's rows: \(rows)")
+            #expect(!rows.contains(TripView.removedRowButton), "a trip-only row: \(rows)")
+
+            #expect(TripMenuProbe.perform("Videos", in: screen.window), "no Videos row")
+            let narrowed = await screen.until {
+                TripProbe.tiles(in: screen.window) == ["p1", "p3"]
+            }
+            #expect(narrowed, "Videos left: \(TripProbe.tiles(in: screen.window))")
+            let asked = wire.transport.listReads.contains { $0["type"] == "video" }
+            #expect(asked, "the kind was not read from the server: \(wire.transport.listReads)")
+        }
+    }
+
+    @Test("View Options' Group by Day cuts a collection's grid into days as it cuts All")
+    func viewOptionsCutTheCollectionGrid() async {
+        let wire = TripWire()
+        let preferences = Self.preferences(groupByDay: false)
+        let host = screen(stores(), wire, Self.tag, preferences: preferences)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(grid, "control: the grid landed: \(TripProbe.tiles(in: screen.window))")
+            #expect(TripProbe.headings(in: screen.window).isEmpty, "one block drew a day")
+
+            #expect(TripMenuProbe.perform("Group by Day", in: screen.window), "no such row")
+            #expect(preferences.groupByDay, "the menu did not write the device's choice")
+            let days = await screen.until {
+                TripProbe.headings(in: screen.window) == TripScreenRenderTests.days
+            }
+            #expect(days, "the days drawn: \(TripProbe.headings(in: screen.window))")
+        }
+    }
+
+    @Test("Sort By on a collection is the Library's: Newest First turns the grid round, no read")
+    func sortByIsTheDevicesOrder() async {
+        let wire = TripWire()
+        let preferences = Self.preferences(order: .oldestFirst)
+        let host = screen(stores(), wire, Self.tag, preferences: preferences)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(grid, "control: the grid landed: \(TripProbe.tiles(in: screen.window))")
+            let reads = wire.transport.listReads.count
+            #expect(TripMenuProbe.perform("Newest First", in: screen.window), "no such row")
+            #expect(preferences.order == .newestFirst, "the menu did not write the device's order")
+            let turned = await screen.until {
+                TripProbe.tiles(in: screen.window) == Array(Self.files.reversed())
+            }
+            #expect(turned, "the grid: \(TripProbe.tiles(in: screen.window))")
+            #expect(wire.transport.listReads.count == reads, "a whole drain was read again")
+        }
     }
 }
 

@@ -173,6 +173,9 @@ struct TripView: View {
     private let shareLane: TripShareLane?
     /// The clock Trip Dates is opened with.
     private let now: () -> Date
+    /// The device's Sort By and View Options, the Library's own (MEMNG-827): a tag's, a month's
+    /// and a year's grid reads and writes them as the Library's All does. A test hands in its own.
+    private let preferences: LibraryPreferences
 
     init(
         trip: Trip,
@@ -205,7 +208,8 @@ struct TripView: View {
         modes: CollectionModeChoice = CollectionModeChoice(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
-        now: @escaping () -> Date = { Date() }
+        now: @escaping () -> Date = { Date() },
+        preferences: LibraryPreferences = .shared
     ) {
         self.scope = scope
         self.openedUnder = openedUnder
@@ -219,6 +223,7 @@ struct TripView: View {
         self.viewerTransport = viewerTransport
         self.shareLane = shareLane
         self.now = now
+        self.preferences = preferences
     }
 
     /// The toolbar menu's name, read by VoiceOver.
@@ -637,6 +642,10 @@ struct TripView: View {
                             manageMenu
                         }
                         ToolbarSpacer(.fixed, placement: .primaryAction)
+                    } else if mode == .photos {
+                        // A tag's, a month's or a year's (MEMNG-827): the Library's own menu.
+                        ToolbarItem(placement: .primaryAction) { collectionFilterMenu }
+                        ToolbarSpacer(.fixed, placement: .primaryAction)
                     }
                     if mode == .photos {
                         ToolbarItem(placement: .primaryAction) {
@@ -734,7 +743,7 @@ struct TripView: View {
             // the store let the read go; the unfiltered query reads nothing of its own.
             .task(
                 id: FilterKey(
-                    identity: identity, id: scope.id, query: manage.query,
+                    identity: identity, id: scope.id, query: gridQuery,
                     stale: filteredState == .notLoaded && !filteredFailed)
             ) {
                 await drainFiltered()
@@ -896,7 +905,7 @@ struct TripView: View {
     private func grid(_ shown: CollectionScope) -> some View {
         let members = viewerRows.rows
         let items = gridRows
-        let state = manage.query.isUnfiltered ? memberStore.state(for: shown) : filteredState
+        let state = readsMembers ? memberStore.state(for: shown) : filteredState
         return LibraryGrid(
             items: items,
             errorText: memberStore.lastError,
@@ -916,7 +925,10 @@ struct TripView: View {
             below: footerText(shown, state: state, empty: items.isEmpty).map {
                 AnyView(TripFooter(text: $0))
             },
-            grouping: .flat
+            // A trip is one block whatever the device prefers (MEMNG-740); any other collection
+            // is cut as the Library's All is (MEMNG-827).
+            grouping: scope.isTrip ? .flat : preferences.allGrouping,
+            preferences: preferences
         )
         .environment(\.signedURLRefresher, refresher)
         // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the
@@ -1242,6 +1254,31 @@ struct TripView: View {
         }
     }
 
+    /// A tag's, a month's or a year's filter menu (MEMNG-827): the Library's own rows. The kinds,
+    /// "Captured by me" and Visibility narrow this screen alone; Sort By and View Options are the
+    /// device's, shared with the Library.
+    private var collectionFilterMenu: some View {
+        Menu(Self.filterButton, systemImage: LibraryFilterMenuContent.symbol) {
+            LibraryFilterMenuContent(
+                filter: $manage.query.filter,
+                mine: $manage.query.mine,
+                visibility: $manage.query.visibility,
+                order: Binding(
+                    get: { preferences.order },
+                    set: { chosen in
+                        guard chosen != preferences.order else { return }
+                        preferences.select(chosen)
+                    }),
+                groupByDay: Binding(
+                    get: { preferences.groupByDay },
+                    set: { preferences.select(groupByDay: $0) }),
+                tileLayout: Binding(
+                    get: { preferences.tileLayout },
+                    set: { preferences.select(tileLayout: $0) })
+            )
+        }
+    }
+
     /// The ellipsis menu: Rename, Trip Dates, then Delete Trip.
     private var manageMenu: some View {
         Menu(Self.manageButton, systemImage: "ellipsis") {
@@ -1274,7 +1311,7 @@ struct TripView: View {
             scope: scope,
             session: IssuingSession(handle: { access()?.handle }, baseURL: { access()?.baseURL }),
             lease: coverLease,
-            query: manage.query
+            query: gridQuery
         )
     }
 
@@ -1318,23 +1355,39 @@ struct TripView: View {
         await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
     }
 
-    /// The grid's filtered read of the trip, or the retirement of one for the unfiltered query.
+    /// The grid's filtered read, or the retirement of one for the unfiltered query.
     private func drainFiltered() async {
-        guard let trip = live ?? openedTrip, let access = access() else { return }
+        guard let access = access() else { return }
         await memberStore.drainFiltered(
-            trip, query: manage.query, using: access.handle, baseURL: access.baseURL)
+            shownScope, query: gridQuery, using: access.handle, baseURL: access.baseURL)
     }
 
-    /// Where the grid's filtered read stands; a collection that is no trip has none.
+    /// Where the grid's filtered read stands.
     private var filteredState: TripMemberState {
-        guard let trip = live ?? openedTrip else { return .notLoaded }
-        return memberStore.filteredState(for: trip, query: manage.query)
+        memberStore.filteredState(for: shownScope, query: gridQuery)
     }
 
     /// Whether the grid's filtered read failed and nothing has asked again: no re-read by itself.
     private var filteredFailed: Bool {
-        guard let trip = live ?? openedTrip else { return false }
-        return memberStore.filteredFailed(for: trip, query: manage.query)
+        memberStore.filteredFailed(for: shownScope, query: gridQuery)
+    }
+
+    /// What the grid is read under: a trip's own choice (MEMNG-780); on any other collection the
+    /// kinds, "Captured by me" and Visibility chosen here, in the Library's order (MEMNG-827).
+    private var gridQuery: TripMemberQuery {
+        guard !scope.isTrip else { return manage.query }
+        var query = manage.query
+        query.order = preferences.order
+        return query
+    }
+
+    /// Whether the grid draws the screen's own members (`shownMembers`) — under the unfiltered
+    /// query, or, on a collection that is no trip, an order alone over members read whole, which
+    /// are then turned round — rather than a read of its own.
+    private var readsMembers: Bool {
+        let query = gridQuery
+        if query.isUnfiltered { return true }
+        return !scope.isTrip && query.isOrderOnly && shownMembers.summary?.complete == true
     }
 
     /// What the grid draws: `viewerRows`, narrowed to the chosen pictures while Show Selected is
@@ -1354,11 +1407,13 @@ struct TripView: View {
     /// viewer over and pages through, and what the selection is kept within. Under a filter a
     /// picture of the filtered read is there even when the capped drain never reached it.
     private var viewerRows: (rows: [LibraryRow], loaded: Bool) {
-        guard !manage.query.isUnfiltered, let trip = live ?? openedTrip else {
+        let query = gridQuery
+        guard !readsMembers else {
             let current = shownMembers
-            return (current.rows, current.loaded)
+            let rows = query.isOrderOnly ? Array(current.rows.reversed()) : current.rows
+            return (rows, current.loaded)
         }
-        let filtered = memberStore.filteredMembers(for: trip, query: manage.query)
+        let filtered = memberStore.filteredMembers(for: shownScope, query: query)
         return (filtered ?? [], filtered != nil)
     }
 
