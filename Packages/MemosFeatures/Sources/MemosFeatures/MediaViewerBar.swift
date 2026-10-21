@@ -21,12 +21,11 @@ struct MediaViewerBar: View {
     var share: () -> Void = {}
     var info: () -> Void = {}
     var delete: () -> Void = {}
-    /// The session's favorites, the session they are written under, and where a tap on somebody
-    /// else's picture says why it wrote nothing. No store: the heart is drawn and does nothing.
+    /// The session's favorites and the session they are written under. No store: the heart is
+    /// drawn and does nothing.
     var favorites: FavoriteStore? = nil
     var handle: SessionHandle? = nil
     var baseURL: URL? = nil
-    var notice: (String) -> Void = { _ in }
 
     static let circleSide: CGFloat = 48
     static let capsuleHeight: CGFloat = 48
@@ -79,19 +78,18 @@ struct MediaViewerBar: View {
         .accessibilityLabel("Share")
     }
 
-    /// What the heart shows for `attachment`: its owner's flag, its own tags as the store reports
-    /// them (a write in flight or a committed one outranks the copy the page carries), and
-    /// whether a write to it has an unknown outcome.
+    /// What the heart shows for `attachment`: its own tags as the store reports them (a write in
+    /// flight or a committed one outranks the copy the page carries), and whether a write to it
+    /// has an unknown outcome. Whose picture it is does not enter: anybody's heart writes.
     static func heart(for attachment: MemoAttachment, in favorites: FavoriteStore)
         -> FavoriteHeartPresentation
     {
         FavoriteHeartPresentation(
-            mine: attachment.mine == true,
             tags: favorites.tags(for: attachment.uid, shown: attachment.tags),
             pending: favorites.isPending(attachment.uid))
     }
 
-    /// What a tap on the heart does: writes the state it asks for, or says why it wrote nothing.
+    /// What a tap on the heart does: writes the state it asks for, on anybody's picture.
     /// The store decides whether a write goes on the wire (join, follow-up or no-op), so a second
     /// tap while the first is in the air is the store's question, never this button's.
     @discardableResult
@@ -99,17 +97,12 @@ struct MediaViewerBar: View {
         _ attachment: MemoAttachment,
         favorites: FavoriteStore,
         handle: SessionHandle?,
-        baseURL: URL?,
-        notice: (String) -> Void
+        baseURL: URL?
     ) -> Task<Void, Never>? {
+        guard let handle, let baseURL else { return nil }
         let heart = heart(for: attachment, in: favorites)
-        if let sentence = heart.notice {
-            notice(sentence)
-            return nil
-        }
-        guard let target = heart.target, let handle, let baseURL else { return nil }
         return favorites.setFavorite(
-            uid: attachment.uid, to: target, shownTags: attachment.tags, using: handle,
+            uid: attachment.uid, to: heart.target, shownTags: attachment.tags, using: handle,
             baseURL: baseURL)
     }
 
@@ -118,12 +111,9 @@ struct MediaViewerBar: View {
         if let favorites {
             let heart = Self.heart(for: attachment, in: favorites)
             Button {
-                Self.tapHeart(
-                    attachment, favorites: favorites, handle: handle, baseURL: baseURL,
-                    notice: notice)
+                Self.tapHeart(attachment, favorites: favorites, handle: handle, baseURL: baseURL)
             } label: {
                 glyph(heart.symbolName)
-                    .opacity(heart.isDimmed ? Self.heartOpacity : 1)
                     .overlay {
                         if heart.showsProgress { ProgressView().tint(.white) }
                     }
@@ -133,7 +123,6 @@ struct MediaViewerBar: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Favorite")
             .accessibilityValue(Self.heartValue(heart))
-            .accessibilityHint(heart.notice.map { Text($0) } ?? Text(verbatim: ""))
         } else {
             Button(action: {}) {
                 glyph("heart")

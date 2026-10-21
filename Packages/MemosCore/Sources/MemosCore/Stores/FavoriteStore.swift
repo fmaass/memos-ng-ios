@@ -29,7 +29,8 @@ public struct FavoriteStamp: Sendable, Equatable {
     public let revision: Int
 }
 
-/// Marks and unmarks the reader's own pictures as favorites (MEMNG-867, plan decision 6).
+/// Marks and unmarks any picture the reader can see as a favorite (MEMNG-867, plan decision 6):
+/// memos-ng is a family app, so the heart is nobody's in particular and works across all users.
 ///
 /// The write is a SET — `PUT`/`DELETE /api/attachments/{uid}/tags/favorites`, both answering 204
 /// with no body — so a call names the state it wants and nothing is parsed from the answer.
@@ -41,7 +42,7 @@ public struct FavoriteStamp: Sendable, Equatable {
 /// * Fenced by the session that issued it, before the request and after the answer: an answer for
 ///   a session that has moved on neither commits nor reverts.
 /// * Three failure classes, said differently because they mean different things. A CONFIRMED
-///   rejection (not found, not the reader's, invalid) reverts and says nothing changed — which is
+///   rejection (not found, invalid) reverts and says nothing changed — which is
 ///   then literally true. A refused credential goes to the session as one typed refusal and says
 ///   nothing here. Anything else is an UNKNOWN outcome — the server may have committed — so the
 ///   picture is held pending and ONE reconciling read of its own record decides; only when that

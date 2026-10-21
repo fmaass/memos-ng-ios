@@ -487,14 +487,24 @@ private let readRecord = "attachment_meta_api_attachments__uid__get"
 final class HeartTransport: ClientTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var operations: [String] = []
+    private var paths: [String: [String]] = [:]
     private let losesPut: Bool
+    private let refusesPut: Bool
     private let recordAsked = AsyncStream<Void>.makeStream()
     private let recordGate = AsyncStream<Void>.makeStream()
 
-    init(losesPut: Bool = false) { self.losesPut = losesPut }
+    init(losesPut: Bool = false, refusesPut: Bool = false) {
+        self.losesPut = losesPut
+        self.refusesPut = refusesPut
+    }
 
     func count(_ operation: String) -> Int {
         lock.withLock { operations.filter { $0 == operation }.count }
+    }
+
+    /// The paths `operation` was sent to, in order.
+    func paths(_ operation: String) -> [String] {
+        lock.withLock { paths[operation] ?? [] }
     }
 
     func releaseRecord() {
@@ -505,10 +515,15 @@ final class HeartTransport: ClientTransport, @unchecked Sendable {
     func send(
         _ request: HTTPRequest, body: HTTPBody?, baseURL: URL, operationID: String
     ) async throws -> (HTTPResponse, HTTPBody?) {
-        lock.withLock { operations.append(operationID) }
+        lock.withLock {
+            operations.append(operationID)
+            paths[operationID, default: []].append(request.path ?? "")
+        }
         switch operationID {
         case putFavorite where losesPut:
             throw URLError(.networkConnectionLost)
+        case putFavorite where refusesPut:
+            return (HTTPResponse(status: .notFound), nil)
         case putFavorite, deleteFavorite:
             return (HTTPResponse(status: .noContent), nil)
         case readRecord:
@@ -565,12 +580,11 @@ struct MediaViewerBarHeartTests {
     }
 
     private func bar(
-        _ file: MemoAttachment, _ favorites: FavoriteStore, _ handle: SessionHandle? = nil,
-        notice: @escaping (String) -> Void = { _ in }
+        _ file: MemoAttachment, _ favorites: FavoriteStore, _ handle: SessionHandle? = nil
     ) -> MediaViewerBar {
         MediaViewerBar(
             attachment: file, binShown: false, favorites: favorites, handle: handle,
-            baseURL: heartBase, notice: notice)
+            baseURL: heartBase)
     }
 
     /// The heart as VoiceOver reads it: its value, its hint, and whether it takes a press.
@@ -591,19 +605,19 @@ struct MediaViewerBarHeartTests {
     }
 
     @Test(
-        "the bar shows the heart's state and whether it writes, mine × tagged",
+        "the bar shows the heart's state, and it writes on every picture, mine × tagged",
         arguments: [(true, true), (true, false), (false, true), (false, false)])
     func heartMatrixInTheBar(mine: Bool, tagged: Bool) throws {
         let file = picture("h", mine: mine, tags: tagged ? [FavoriteTag.name] : [])
         let shown = try #require(read(bar(file, FavoriteStore())), "no heart drawn")
 
         #expect(shown.value == (tagged ? "On" : "Off"))
-        // Somebody else's picture is drawn dimmed and still takes a tap — the tap says why it
-        // writes nothing — so the hint is the difference, never a disabled button.
-        #expect((shown.hint ?? "") == (mine ? "" : FavoriteHeartPresentation.notMineNotice))
+        // A family app: whoever's picture it is, the heart is the same live button with nothing
+        // to explain (owner, 2026-10-21).
+        #expect((shown.hint ?? "") == "")
         #expect(shown.enabled)
         let heart = MediaViewerBar.heart(for: file, in: FavoriteStore())
-        #expect(heart.isDimmed == !mine)
+        #expect(heart.target == !tagged, "a tap asks for the other state")
     }
 
     @Test("a tap on my picture's heart writes the favorite, and the next tap takes it back")
@@ -628,21 +642,40 @@ struct MediaViewerBarHeartTests {
         #expect(favorites.tags(for: "h", shown: []).contains(FavoriteTag.name) == false)
     }
 
-    @Test("a tap on somebody else's picture writes nothing and says why")
-    func aTapOnTheirsSaysWhy() async throws {
+    @Test("a tap on somebody else's picture writes the favorite: one PUT, and the heart fills")
+    func aTapOnTheirsWritesTheFavorite() async throws {
         let transport = HeartTransport()
         let handle = session(transport)
-        let said = Box<[String]>([])
-        let view = bar(picture("h", mine: false), FavoriteStore(), handle) {
-            said.value.append($0)
-        }
+        let favorites = FavoriteStore()
+        let file = picture("h", mine: false)
 
-        await PressProbe.withScreen(view) { screen in
+        await PressProbe.withScreen(bar(file, favorites, handle)) { screen in
+            #expect(screen.element(labelled: "Favorite")?.accessibilityValue == "Off")
             #expect(screen.press("Favorite"))
-            try? await Task.sleep(for: .milliseconds(100))
+            #expect(await eventually { transport.count(putFavorite) == 1 })
+            #expect(await shows(screen, "On"))
         }
-        #expect(said.value == [FavoriteHeartPresentation.notMineNotice])
-        #expect(transport.count(putFavorite) == 0)
+        #expect(transport.paths(putFavorite) == ["/api/attachments/h/tags/favorites"])
+        #expect(transport.count(deleteFavorite) == 0)
+        #expect(favorites.tags(for: "h", shown: []).contains(FavoriteTag.name))
+        #expect(favorites.notice == nil)
+    }
+
+    @Test("a refused write on somebody else's picture goes back and says nothing changed")
+    func aRefusalOnTheirsIsSaid() async throws {
+        // A server that still keeps favorites per owner answers not-found: the store's confirmed
+        // rejection, never a silent no-op.
+        let transport = HeartTransport(refusesPut: true)
+        let handle = session(transport)
+        let favorites = FavoriteStore()
+
+        await PressProbe.withScreen(bar(picture("h", mine: false), favorites, handle)) { screen in
+            #expect(screen.press("Favorite"))
+            #expect(await eventually { favorites.notice != nil })
+            #expect(await shows(screen, "Off"))
+        }
+        #expect(transport.count(putFavorite) == 1)
+        #expect(favorites.notice == FavoriteStore.nothingChangedNotice)
     }
 
     @Test("a write whose answer was lost shows pending until the record read settles it")

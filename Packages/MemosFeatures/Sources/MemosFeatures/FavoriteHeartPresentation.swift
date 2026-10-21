@@ -1,13 +1,15 @@
 import MemosCore
 
-/// What the viewer's heart shows for one picture (MEMNG-867), decided from three facts and
-/// nothing else: whether the picture is the reader's own, its own tags as `FavoriteStore` reports
-/// them (`tags(for:shown:)`), and whether a write to it has an unknown outcome
-/// (`isPending(_:)`).
+/// What the viewer's heart shows for one picture (MEMNG-867), decided from two facts and nothing
+/// else: the picture's own tags as `FavoriteStore` reports them (`tags(for:shown:)`), and whether
+/// a write to it has an unknown outcome (`isPending(_:)`).
+///
+/// Whose picture it is decides nothing: memos-ng is a family app, so anybody can set and remove
+/// the heart on any picture the viewer shows (owner, 2026-10-21).
 ///
 /// Pure, so the matrix is tested here rather than read off a rendered bar. The bar's one-line
-/// hookup reads `symbolName`, `showsProgress`, `isDimmed` and `target`, and a tap with a target
-/// calls `setFavorite` with it.
+/// hookup reads `symbolName`, `showsProgress` and `target`, and a tap calls `setFavorite` with
+/// the target.
 nonisolated struct FavoriteHeartPresentation: Equatable, Sendable {
     enum Glyph: Equatable, Sendable {
         case filled
@@ -16,36 +18,22 @@ nonisolated struct FavoriteHeartPresentation: Equatable, Sendable {
         case pending
     }
 
-    static let notMineNotice = "Only your own pictures can be marked as favorite."
-
     let glyph: Glyph
-    /// Only the reader's own pictures can carry their favorite: the server answers anybody
-    /// else's with not-found.
-    let isEnabled: Bool
 
-    init(mine: Bool, tags: [String], pending: Bool) {
+    init(tags: [String], pending: Bool) {
         if pending {
             glyph = .pending
         } else {
             glyph = tags.contains(FavoriteTag.name) ? .filled : .outline
         }
-        isEnabled = mine
     }
 
-    /// Somebody else's picture: drawn, dimmed, and a tap says why instead of writing.
-    var isDimmed: Bool { !isEnabled }
-
-    /// What a tap says instead of writing, or nil when a tap writes.
-    var notice: String? { isEnabled ? nil : Self.notMineNotice }
-
-    /// The state a tap asks for, or nil when a tap writes nothing. A pending heart asks for
-    /// "favorite": the outcome is unknown, and the store sends it rather than treating it as a
-    /// no-op.
-    var target: Bool? {
-        guard isEnabled else { return nil }
+    /// The state a tap asks for. A pending heart asks for "favorite": the outcome is unknown, and
+    /// the store sends it rather than treating it as a no-op.
+    var target: Bool {
         switch glyph {
-        case .filled: return false
-        case .outline, .pending: return true
+        case .filled: false
+        case .outline, .pending: true
         }
     }
 

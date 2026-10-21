@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (57)
+
+- The heart now works on every picture, not only on my own: anyone in the family can mark a picture as a favorite or take the heart away again.
+- The Favorites card shows every favorite, whoever set it.
+- Please heart a picture someone else posted, check that it appears on the Favorites card, then take the heart away again.
+
 ## 2.4.0 (56)
 
 - The bin is now in every picture viewer: the Timeline, the Library, a trip, a collection and the map, on each picture of mine.

@@ -62,8 +62,6 @@ struct MediaViewerView: View {
     /// The session's favorites, which the bar's heart reads and writes. Optional for the same
     /// reason: a host without one draws the heart inert.
     @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
-    /// Why the last heart tap wrote nothing (somebody else's picture), until the page changes.
-    @State private var heartNotice: String?
     /// The download the menu's slow action starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
     /// The page the pager has settled on — the identity of the page, not an index, because a
@@ -170,7 +168,6 @@ struct MediaViewerView: View {
         .onAppear { playback.advance(.opened) }
         .onChange(of: currentPage) { _, settled in
             guard let settled else { return }
-            heartNotice = nil
             favorites?.dismissNotice()
             playback.advance(.paged(to: settled))
             Task { await advance(to: settled) }
@@ -281,8 +278,7 @@ struct MediaViewerView: View {
                 delete: { send(.tapped(page.attachment.uid)) },
                 favorites: favorites,
                 handle: session?.activeHandle,
-                baseURL: session?.serverBaseURL,
-                notice: { heartNotice = $0 }
+                baseURL: session?.serverBaseURL
             )
             .opacity(shown ? 1 : 0)
             .allowsHitTesting(shown)
@@ -375,9 +371,6 @@ struct MediaViewerView: View {
                 .padding(DesignTokens.Space.roomy)
         } else if let favorite = favorites?.notice {
             NoticeCard(text: favorite, tone: .error)
-                .padding(DesignTokens.Space.roomy)
-        } else if let heartNotice {
-            NoticeCard(text: heartNotice, tone: .warning)
                 .padding(DesignTokens.Space.roomy)
         }
     }
