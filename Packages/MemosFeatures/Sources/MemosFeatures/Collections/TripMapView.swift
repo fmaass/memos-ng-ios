@@ -159,7 +159,7 @@ struct TripMapScreen<Hero: View>: View {
         .placesViewer($presenting.viewing, action: viewerAction, delete: deletePicture)
         .onAppear { probe?.presenting = { presenting } }
         .onChange(of: TripMapPresentation.kept(markers, members: uids)) { _, kept in
-            presenting.keep(only: kept)
+            presenting.keep(only: kept, deleted: members.deleted)
         }
         .task {
             if places == nil {

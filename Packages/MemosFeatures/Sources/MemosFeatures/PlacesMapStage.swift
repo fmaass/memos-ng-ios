@@ -44,12 +44,24 @@ struct PlacesPresenting {
     /// over exactly the pages it was opened with (`.fixed`), and a sheet lists exactly its
     /// markers, so a presentation still holding a photograph that left is closed rather than
     /// left showing it. The viewer a sheet presents goes with the sheet.
-    mutating func keep(only kept: Set<String>?) {
+    ///
+    /// A photograph in `deleted` is the exception: deleted from a viewer, it is pruned from the
+    /// sheet, which stays over the rest, and a viewer holding it stays — the viewer takes its own
+    /// deleted page away and moves on to the next.
+    mutating func keep(only kept: Set<String>?, deleted: Set<String> = []) {
         let kept = kept ?? []
+        let allowed = kept.union(deleted)
         func fits(_ selection: MediaViewerSelection?) -> Bool {
-            selection.map { Set($0.pages.map(\.id)).isSubset(of: kept) } ?? true
+            selection.map { Set($0.pages.map(\.id)).isSubset(of: allowed) } ?? true
         }
         if !fits(viewing) { viewing = nil }
+        if !deleted.isEmpty, var pruned = sheet,
+            pruned.markers.contains(where: { deleted.contains($0.uid) })
+        {
+            pruned.markers.removeAll { deleted.contains($0.uid) }
+            sheet = pruned.markers.isEmpty ? nil : pruned
+            if sheet == nil { viewingFromSheet = nil }
+        }
         if let sheet, !Set(sheet.markers.map(\.uid)).isSubset(of: kept) {
             self.sheet = nil
             viewingFromSheet = nil

@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (59)
+
+- Deleting a picture inside a trip now moves the viewer on to the next picture instead of closing it.
+- On a trip's map, a deleted picture leaves the cluster's photo list, and the list stays open while pictures remain.
+- Please delete a test picture from a trip's viewer and check that the next picture shows; then delete one from the trip map's photo list.
+
 ## 2.4.0 (58)
 
 - Every collection now has the Library's filter button: a tag, a month or a year can show only videos, only photos, or only my own pictures.

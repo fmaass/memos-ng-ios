@@ -23,11 +23,17 @@ enum MediaGridHosting {
     /// select mode's Delete sends (`MediaLibraryStore.delete`, `TripMemberStore.delete`), and gone
     /// only when the run says THIS uid went. A run the store refused because another is out is
     /// not gone: the store serialises its deletes by refusal, so the viewer's request never rides
-    /// beside select mode's.
+    /// beside select mode's. Nor is a run that outlived its session: the store applied nothing it
+    /// learned, so the row stays, and the page must stay with it.
     static func deletingOne(
         _ run: @escaping @MainActor ([String]) async -> LibraryDeleteOutcome?
     ) -> @MainActor (String) async -> Bool {
-        { uid in await run([uid])?.deleted.contains(uid) == true }
+        { uid in
+            guard let outcome = await run([uid]), !outcome.stoppedForSessionChange else {
+                return false
+            }
+            return outcome.deleted.contains(uid)
+        }
     }
 
     /// A tile menu's fetch: the named rendition of the file through the session's download lane,

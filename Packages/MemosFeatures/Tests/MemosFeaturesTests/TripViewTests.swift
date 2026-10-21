@@ -3768,3 +3768,54 @@ extension TripScreenRenderTests {
         #expect(left.contains("p1"), "another member's picture left with it")
     }
 }
+
+// MARK: - The bin moves the trip's viewer on (MEMNG-886)
+
+extension TripScreenRenderTests {
+    @Test("a confirmed bin in the trip's viewer moves it to the next picture, never closes it")
+    func theBinMovesTheViewerOn() async {
+        let jump = MemoJump()
+        await openViewer(excluding: "p4", at: 0, jump: jump) { screen, pager, _, members, _ in
+            #expect(members == ["p0", "p1", "p2", "p3"], "the members: \(members)")
+            #expect(pager.map(TripProbe.pageCount) == 4, "precondition: a viewer over four")
+            let bin = screen.element(labelled: "Delete Photo")
+            #expect(bin?.accessibilityActivate() == true, "the viewer drew no bin on p0")
+            let asked = await screen.until {
+                TripProbe.dialogActions(in: screen.host)?.contains("Delete Photo") == true
+            }
+            #expect(asked, "the bin asked no question")
+            #expect(TripProbe.pressDialog("Delete Photo", in: screen.host), "no Delete Photo")
+            // The viewer stays up over the three survivors: the closed one answers no pager.
+            let moved = await TripProbe.settled(seconds: 10) {
+                TripProbe.pager(over: screen.host).map(TripProbe.pageCount) == 3
+            }
+            let left = TripProbe.pager(over: screen.host).map(TripProbe.pageCount)
+            #expect(moved, "the viewer holds \(left.map(String.init) ?? "no") pages")
+            // A closing cover still answers a pager while it animates away: wait it out.
+            let closed = await screen.until(seconds: 2) {
+                screen.host.presentedViewController == nil
+            }
+            #expect(!closed, "the viewer closed over the three left after the delete")
+        }
+    }
+
+    @Test("a picture deleted from the viewer does not make it outlive the trip")
+    func aDeletedPageDoesNotOutliveTheViewer() throws {
+        let opened = MediaFixture.attachment(uid: "trip-bin-opened")
+        let paged = MediaFixture.attachment(uid: "trip-bin-paged")
+        let next = LibraryRow(attachment: paged, takenAt: nil, mine: true, filename: "p.jpg")
+        let pair = try #require(
+            MediaViewerPresentation.viewer(for: [opened, paged], startingAt: opened.uid))
+        // Control: the same reading without the delete is a picture that left the trip.
+        #expect(TripView.viewerOutlived(pair, holding: [], members: [next], loaded: true))
+        #expect(
+            !TripView.viewerOutlived(
+                pair, holding: [], members: [next], loaded: true, deleted: [opened.uid]),
+            "the bin on one page closed the viewer over the rest")
+        // Every page deleted: nothing outlived, and the viewer closes itself on its last page.
+        #expect(
+            !TripView.viewerOutlived(
+                pair, holding: [], members: [], loaded: true,
+                deleted: [opened.uid, paged.uid]))
+    }
+}

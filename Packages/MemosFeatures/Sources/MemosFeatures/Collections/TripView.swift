@@ -382,14 +382,16 @@ struct TripView: View {
     /// untagged. ANY such picture, not only the one it opened on: the reader may have paged to
     /// another. Such a viewer is closed rather than left showing pictures that are no longer the
     /// trip's — it keeps the pages in front of somebody when its source changes under them
-    /// (`MediaViewerPager.extended`), so only closing takes them away.
+    /// (`MediaViewerPager.extended`), so only closing takes them away. A picture in `deleted`
+    /// does not count: the viewer takes a deleted page away itself and moves on to the next
+    /// (`MediaViewerView.gone`), so the bin on one page does not close it over the rest.
     static func viewerOutlived(
         _ selection: MediaViewerSelection, holding: Set<String>, members: [LibraryRow],
-        loaded: Bool
+        loaded: Bool, deleted: Set<String> = []
     ) -> Bool {
         guard loaded else { return false }
         let now = Set(members.map(\.id))
-        return !holding.union(selection.pages.map(\.id)).isSubset(of: now)
+        return !holding.union(selection.pages.map(\.id)).subtracting(deleted).isSubset(of: now)
     }
 
     /// The trip as the store holds it now, or nil once it is gone.
@@ -717,7 +719,10 @@ struct TripView: View {
             .onChange(of: ViewerFit(members: members.map(\.id), loaded: loaded)) { _, fit in
                 guard let open = viewing else { return }
                 let now = viewerRows.rows
-                if Self.viewerOutlived(open, holding: held, members: now, loaded: fit.loaded) {
+                if Self.viewerOutlived(
+                    open, holding: held, members: now, loaded: fit.loaded,
+                    deleted: memberStore.deleted)
+                {
                     viewing = nil
                 } else {
                     held = Self.viewerHolds(open, earlier: held, members: now, loaded: fit.loaded)

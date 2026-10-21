@@ -265,6 +265,35 @@ struct TripMapTests {
         #expect(presenting.viewingFromSheet == nil, "the viewer stayed over a deleted trip")
     }
 
+    @Test("a picture deleted from a cluster's sheet leaves the sheet and the viewer over the rest")
+    func aDeletedPictureIsPrunedFromTheSheet() async throws {
+        let wire = TripMapWire(members: 3, located: ["t0", "t1", "t2"])
+        let (_, trips, record) = await stores(wire)
+        await trips.drain(record, using: wire.access.handle, baseURL: TripMapWire.baseURL)
+        let places = await loadedPlaces(wire)
+        let shown = TripMapPresentation.markers(
+            places.markers, of: TripMapPresentation.memberUids(of: record, in: trips))
+        #expect(shown.map(\.uid) == ["t0", "t1", "t2"], "precondition: all three are on the map")
+        var presenting = PlacesPresenting()
+        presenting.open(.sheet(PlaceSheet(markers: shown, canZoomIn: false, members: [])))
+        presenting.open(.viewer(try #require(PlacesPresentation.open("t0", in: shown))))
+        #expect(presenting.viewingFromSheet != nil, "precondition: a viewer over the sheet")
+
+        // The viewer's bin on t0: the trip's own run, as `TripMapScreen` sends it.
+        let gone = await MediaGridHosting.deletingOne { uids in
+            await trips.delete(uids, using: wire.access.handle, baseURL: TripMapWire.baseURL)
+        }("t0")
+        #expect(gone, "the delete did not land")
+        let members = TripMapPresentation.memberUids(of: record, in: trips)
+        let after = TripMapPresentation.markers(places.markers, of: members)
+        presenting.keep(
+            only: TripMapPresentation.kept(after, members: members), deleted: trips.deleted)
+
+        let listed = presenting.sheet?.markers.map(\.uid)
+        #expect(listed == ["t1", "t2"], "the sheet lists \(listed ?? [])")
+        #expect(presenting.viewingFromSheet != nil, "the viewer closed over the rest of the sheet")
+    }
+
     // MARK: - the store's fence
 
     @Test("the trip map's store does not apply markers answered for a session that has ended")

@@ -113,4 +113,20 @@ struct ViewerBinTests {
             #expect(labels.contains(label) == shown, "page \(uid): \(labels)")
         }
     }
+
+    @Test("a delete whose session moved while out keeps the page, as the store keeps the row")
+    func aRunThatOutlivedItsSessionIsNotGone() async {
+        let stale = MediaGridHosting.deletingOne { uids in
+            LibraryDeleteOutcome(
+                deleted: uids, failed: nil, notAttempted: [], stoppedForSessionChange: true)
+        }
+        #expect(await stale("a") == false, "a page left the viewer while its row stays")
+        let landed = MediaGridHosting.deletingOne { uids in
+            LibraryDeleteOutcome(
+                deleted: uids, failed: nil, notAttempted: [], stoppedForSessionChange: false)
+        }
+        #expect(await landed("a"), "control: a run that landed is gone")
+        let refused = MediaGridHosting.deletingOne { _ in nil }
+        #expect(await refused("a") == false, "a refused run read as gone")
+    }
 }
