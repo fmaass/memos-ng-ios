@@ -96,25 +96,29 @@ struct AttachmentDeleteWiringTests {
 
     /// The capability the viewer's overlay reads. It is a fact about where the pages came from, so
     /// it is asserted on the projection that builds them rather than on the view.
-    @Test("only a memo of mine opens a viewer that can delete")
+    @Test("only a memo of mine opens a memo viewer that can delete; a list's answers per file")
     func theViewerCarriesTheCapabilityOnlyForMyOwnMemo() throws {
         let mine = try #require(
             MediaViewerPresentation.viewer(for: memo([photo("a1")]), startingAt: "a1")
         )
-        #expect(mine.deletable)
+        #expect(mine.deletable(mine.startPage.attachment))
 
         let theirs = try #require(
             MediaViewerPresentation.viewer(
                 for: memo([photo("a1")], mine: false), startingAt: "a1"
             )
         )
-        #expect(!theirs.deletable, "somebody else's picture opened a viewer that can delete it")
+        #expect(
+            !theirs.deletable(theirs.startPage.attachment),
+            "somebody else's picture opened a viewer that can delete it")
 
-        // The library has no memo in hand — a row there is an upload that may belong to anybody.
+        // A list viewer answers per file: one whose owner the payload never named is not mine.
         let library = try #require(
             MediaViewerPresentation.viewer(for: [photo("a1")], startingAt: "a1")
         )
-        #expect(!library.deletable, "the media library's viewer offered to delete")
+        #expect(
+            !library.deletable(library.startPage.attachment),
+            "a file of nobody named offered to delete")
     }
 
     // MARK: - what the viewer does with the page that has gone

@@ -2173,8 +2173,9 @@ struct TripJournalOpeningTests {
 
         #expect(selection.pages.map(\.id) == ["a", "b"])
         #expect(selection.startPage.id == "b", "opened on \(selection.startPage.id)")
-        // As the grid's: nothing in a trip's viewer deletes.
-        #expect(!selection.deletable)
+        // As the grid's: each page by its own file, and these name no owner.
+        #expect(selection.deletability == .ownFiles)
+        #expect(!selection.deletable(selection.startPage.attachment))
         // Each page names its memo, so the viewer offers Show Memo as a grid page does.
         let actions = MediaTileMenu.actions(for: selection.startPage.attachment)
         #expect(actions.first == .showMemo(uid: "j1"), "the page offers \(actions)")
@@ -3721,5 +3722,48 @@ extension TripScreenRenderTests {
         #expect(parts.count == 5, "the menu's body is \(type(of: content.body))")
         #expect(parts.first == "MediaFilterRows", "the shared rows are not first: \(parts)")
         #expect(parts.count == 5 && parts[2] == "SortByMenu", "\(parts)")
+    }
+}
+
+// MARK: - The viewer's bin on a trip (WP-446)
+
+/// The bin in a trip's viewer: shown on the member's own page only, and its confirmed delete is
+/// ONE `DELETE /api/attachments/{uid}` on the wire, through the trip's own run, after which the
+/// picture is no longer a member.
+extension TripScreenRenderTests {
+    @Test("a confirmed bin in the trip's viewer sends ONE delete for its picture, which leaves")
+    func theViewerBinDeletesOnePicture() async throws {
+        let wire = TripWire()
+        wire.transport.others("p1")
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        let rows = stores.1.members(for: record)
+        #expect(rows.count == 5, "control: the drain landed")
+        let mine = try #require(rows.first { $0.id == "p0" })
+        let theirs = try #require(rows.first { $0.id == "p1" })
+        let selection = try #require(MediaGridHosting.viewing(mine.attachment, in: rows))
+        #expect(selection.deletable(mine.attachment), "the member's own page has no bin")
+        #expect(!selection.deletable(theirs.attachment), "another member's page offered the bin")
+
+        let access = wire.access
+        let delete = MediaGridHosting.deletingOne { uids in
+            await stores.1.delete(uids, using: access.handle, baseURL: access.baseURL)
+        }
+        // The viewer's own machine, driven as its bin and the alert's yes drive it.
+        let flow = AttachmentDeleteFlow()
+        #expect(!flow.claim(.tapped("p0")), "the bin alone started a delete")
+        #expect(flow.claim(.confirmed), "the yes started no delete")
+        #expect(!flow.claim(.confirmed), "a second yes started a second run")
+        // Two runs asked for at once still put one request on the wire: the store refuses the
+        // second while the first is out.
+        let first = Task { await flow.perform(delete: delete) }
+        let second = Task { await delete("p0") }
+        let answers = (await first.value, await second.value)
+        #expect(answers.0 || answers.1, "the picture was not deleted")
+        #expect(wire.transport.deletes == ["/api/attachments/p0"], "\(wire.transport.deletes)")
+        let left = stores.1.members(for: record).map(\.id)
+        #expect(!left.contains("p0"), "the deleted picture is still a member: \(left)")
+        #expect(left.contains("p1"), "another member's picture left with it")
     }
 }

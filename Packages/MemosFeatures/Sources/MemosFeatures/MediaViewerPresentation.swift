@@ -72,22 +72,36 @@ public struct MediaPage: Identifiable, Equatable, Sendable {
 public struct MediaViewerSelection: Identifiable, Equatable, Sendable {
     public let pages: [MediaPage]
     public let startIndex: Int
-    /// Whether these pictures may be REMOVED from where they are being looked at.
+    /// Which of these pictures may be REMOVED from where they are being looked at.
     ///
     /// It rides on the selection rather than on the viewer because the answer is a fact about where
-    /// the pages came from, and the viewer serves two places that differ in exactly that: a memo of
-    /// mine, whose attachments the server will let me delete, and the media library, which is a
-    /// read surface over files that may belong to anybody. Defaulted to false so the capability is
-    /// something a caller has to ASK for — a new surface that forgets to think about it gets the
-    /// safe answer.
-    public let deletable: Bool
+    /// the pages came from. A memo's own viewer answers for the whole memo, as it always has; every
+    /// viewer over a list answers page by page, from the file's own owner flag
+    /// (`MemoAttachment.mine`), because a list mixes my pictures with other members'.
+    public enum Deletability: Equatable, Sendable {
+        /// Every page or none, by the memo's own flag: the memo detail screen's viewer.
+        case memo(mine: Bool)
+        /// Each page by its own file: the Timeline, the Library, a collection and Places.
+        case ownFiles
+    }
+
+    public let deletability: Deletability
+
+    /// Whether the page showing `attachment` may be removed. A file whose owner the payload did
+    /// not name is not mine: the server refuses a delete of somebody else's file.
+    public func deletable(_ attachment: MemoAttachment) -> Bool {
+        switch deletability {
+        case .memo(let mine): mine
+        case .ownFiles: attachment.mine == true
+        }
+    }
 
     /// Non-empty pages and an in-range start index are the invariant; the only way to build one is
     /// `MediaViewerPresentation.viewer(for:startingAt:)`, which enforces both.
-    init(pages: [MediaPage], startIndex: Int, deletable: Bool = false) {
+    init(pages: [MediaPage], startIndex: Int, deletability: Deletability = .ownFiles) {
         self.pages = pages
         self.startIndex = min(max(0, startIndex), max(0, pages.count - 1))
-        self.deletable = deletable
+        self.deletability = deletability
     }
 
     public var startPage: MediaPage { pages[startIndex] }
@@ -133,20 +147,20 @@ public enum MediaViewerPresentation {
     /// `mine` gate every other own-memo affordance is nil-gated on, because the server refuses the
     /// delete on somebody else's file.
     public static func viewer(for memo: Memo, startingAt uid: String) -> MediaViewerSelection? {
-        viewer(for: memo.attachments, startingAt: uid, deletable: memo.mine)
+        viewer(for: memo.attachments, startingAt: uid, deletability: .memo(mine: memo.mine))
     }
 
-    /// The list overload, which the media library uses. It defaults to NOT deletable: a row there
-    /// is an upload with no memo in hand, so nothing on that screen knows whose it is.
+    /// The list overload, which every other viewer uses. Each page is deletable by its own file's
+    /// owner flag (`MediaViewerSelection.Deletability.ownFiles`).
     public static func viewer(
         for attachments: [MemoAttachment],
         startingAt uid: String,
-        deletable: Bool = false,
+        deletability: MediaViewerSelection.Deletability = .ownFiles,
         takenAt: (MemoAttachment) -> Date? = { _ in nil }
     ) -> MediaViewerSelection? {
         let pages = pages(for: attachments, takenAt: takenAt)
         guard let index = pages.firstIndex(where: { $0.id == uid }) else { return nil }
-        return MediaViewerSelection(pages: pages, startIndex: index, deletable: deletable)
+        return MediaViewerSelection(pages: pages, startIndex: index, deletability: deletability)
     }
 
     /// A picture or a video with something to render.

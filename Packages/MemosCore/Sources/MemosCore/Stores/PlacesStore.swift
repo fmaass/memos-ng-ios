@@ -29,6 +29,12 @@ public final class PlacesStore {
     /// answered — deliberately leaves no sentence here at all: that one belongs to the session's
     /// banner. Derived from the sentence, it would read as "there is genuinely nothing to show".
     public private(set) var lastLoadFailed = false
+    /// A delete of one picture is out (`delete(_:using:)`), and the reason a second is refused.
+    public private(set) var isDeleting = false
+    /// The pictures this store has watched the server confirm gone. A load answered after a delete
+    /// can still list the file, so every load is filtered by it; never cleared, for the reason
+    /// `MediaLibraryStore`'s is not: a hard-deleted uid cannot legitimately return.
+    public private(set) var deleted: Set<String> = []
 
     public var status: PlacesStatus {
         PlacesStatus.of(
@@ -75,7 +81,7 @@ public final class PlacesStore {
                 MemosLog.api.info("markers answered for a session that has ended are not applied")
                 return
             }
-            markers = loaded
+            markers = deleted.isEmpty ? loaded : loaded.filter { !deleted.contains($0.uid) }
             hasSettledOnce = true
             lastLoadFailed = false
             lastError = nil
@@ -87,10 +93,44 @@ public final class PlacesStore {
         }
     }
 
+    /// Deletes one picture — the viewer's bin — through the Library's own run
+    /// (`MediaLibraryStore.deleteRun`): the same `DELETE /api/attachments/{uid}`, the same answers
+    /// read as gone (204 and 404), the same session fence before the send and after the answer.
+    ///
+    /// Serialised by REFUSAL, as the Library's delete is: a second call while one is out sends
+    /// nothing and answers false. A failure goes to the session or the refusal funnel and leaves
+    /// the map as it stands — a delete that failed is not a map that failed to load.
+    ///
+    /// - Returns: whether the server confirmed the picture gone, for the session that issued it.
+    public func delete(_ uid: String, using handle: SessionHandle) async -> Bool {
+        guard !isDeleting else {
+            MemosLog.api.info("a map delete asked for while another is running is refused")
+            return false
+        }
+        isDeleting = true
+        defer { isDeleting = false }
+        let outcome = await MediaLibraryStore.deleteRun(
+            [uid],
+            using: handle,
+            stillCurrent: { sessionStillCurrent(handle) },
+            succeeded: { session?.noteTransportSuccess(issuedUnder: handle.generation) },
+            failed: { await report($0, issuedUnder: handle, settlesLoad: false) }
+        )
+        guard !outcome.stoppedForSessionChange, outcome.deleted.contains(uid) else { return false }
+        deleted.insert(uid)
+        markers.removeAll { $0.uid == uid }
+        return true
+    }
+
     /// Says what went wrong, and records that the question settled — unless what went wrong was
     /// this app cancelling its own request, or an answer arriving for a session that has ended.
     /// Neither of those settled anything.
-    private func report(_ error: any Error, issuedUnder handle: SessionHandle) async {
+    ///
+    /// `settlesLoad` is false for a delete's failure: the refusal and the unreachable server go
+    /// where they always go, and the load's own state and sentence are left alone.
+    private func report(
+        _ error: any Error, issuedUnder handle: SessionHandle, settlesLoad: Bool = true
+    ) async {
         // Fenced for the reason `MediaLibraryStore.report` is: a stale refusal reaching
         // `onUnauthorized` ends the session running now, and a stale sentence lands on a map that
         // never asked.
@@ -107,15 +147,17 @@ public final class PlacesStore {
         // Written once, here, rather than beside each sentence below: the failure this map most has
         // to draw is the one that leaves no sentence at all, and a flag read off `lastError` would
         // report that one as "there is genuinely nothing to show".
-        hasSettledOnce = true
-        lastLoadFailed = true
+        if settlesLoad {
+            hasSettledOnce = true
+            lastLoadFailed = true
+        }
         // A server that never answered goes to the session and nowhere else — the same rule, and
         // the same reason, as `MediaLibraryStore.report`.
         if let failure = StoreFailure.transportFailure(error) {
             // And a sentence an earlier failure left must not stand in for this one: the banner
             // owns what an unreachable server says, and a stale "the server returned 500" under it
             // would be the map explaining this failure with the last one's words.
-            lastError = nil
+            if settlesLoad { lastError = nil }
             session?.noteTransportFailure(failure, issuedUnder: handle.generation)
             return
         }
@@ -126,12 +168,14 @@ public final class PlacesStore {
         if let refusal = StoreFailure.refusal(error) {
             // And asked again afterwards, with nothing awaited before the write — the same rule,
             // and the same reason, as `MediaLibraryStore.report`.
-            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle) {
+            if await onUnauthorized(refusal) == .endedSession, nothingEstablishedSince(handle),
+                settlesLoad
+            {
                 lastError = refusal.errorDescription
             }
             return
         }
-        guard let apiError = StoreFailure.reportable(error) else { return }
+        guard settlesLoad, let apiError = StoreFailure.reportable(error) else { return }
         lastError = apiError.errorDescription
     }
 

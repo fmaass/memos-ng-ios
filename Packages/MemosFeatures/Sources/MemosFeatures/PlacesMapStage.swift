@@ -77,6 +77,10 @@ struct PlacesMapStage: View {
     /// What the viewer over the sheet offers beside its own actions: a trip's "Use as Cover" on a
     /// trip's Map, nothing on the Places tab's (MEMNG-720).
     var viewerAction: MediaViewerHostAction? = nil
+    /// The host's bin for the viewer over the sheet, shown on each page that is mine.
+    var delete: (@MainActor (String) async -> Bool)? = nil
+    /// The pictures deleted since the sheet was listed: its tiles leave with them.
+    var gone: Set<String> = []
 
     var body: some View {
         // The map runs under the status bar and the tab bar so that it is the screen rather than
@@ -98,7 +102,7 @@ struct PlacesMapStage: View {
         .sheet(item: $presenting.sheet) { sheet in
             PlaceSheetContents(
                 listed: sheet, control: control, presenting: $presenting,
-                viewerAction: viewerAction
+                viewerAction: viewerAction, delete: delete, gone: gone
             )
             .presentationDetents([.medium, .large])
             // At half height the sheet is a drawer under the map, not a dialog over it: the map
@@ -115,6 +119,8 @@ struct PlaceSheetContents: View {
     let control: PlacesMapCoordinator
     @Binding var presenting: PlacesPresenting
     var viewerAction: MediaViewerHostAction? = nil
+    var delete: (@MainActor (String) async -> Bool)? = nil
+    var gone: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -123,7 +129,7 @@ struct PlaceSheetContents: View {
             }
             // The sheet opens for two photographs or more — one photograph is the viewer, not a
             // list — so the plural is not a case that has to be chosen.
-            .navigationTitle("\(listed.markers.count) Photos")
+            .navigationTitle("\(markers.count) Photos")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -143,13 +149,20 @@ struct PlaceSheetContents: View {
         // sheet dismissing and something else presenting a turn later.
         .fullScreenCover(item: $presenting.viewingFromSheet) { selection in
             MediaViewerView(
-                selection: selection, source: .fixed(selection.pages), hostAction: viewerAction)
+                selection: selection, source: .fixed(selection.pages), delete: delete,
+                hostAction: viewerAction)
         }
+    }
+
+    /// The listed photographs less the ones deleted since: a tile of a file the server no longer
+    /// has is a tile that opens nothing.
+    private var markers: [PlaceMarker] {
+        gone.isEmpty ? listed.markers : listed.markers.filter { !gone.contains($0.uid) }
     }
 
     /// One tappable square per photograph, in the order the list is already in.
     private var tiles: some View {
-        let markers = listed.markers
+        let markers = markers
         return LazyVGrid(
             columns: [GridItem(.adaptive(minimum: 96), spacing: DesignTokens.Space.hair)],
             spacing: DesignTokens.Space.hair
@@ -207,11 +220,13 @@ extension View {
     /// at, not a window onto a store that keeps loading. `action` is a trip Map's "Use as Cover",
     /// nil on the Places tab (MEMNG-720).
     func placesViewer(
-        _ viewing: Binding<MediaViewerSelection?>, action: MediaViewerHostAction? = nil
+        _ viewing: Binding<MediaViewerSelection?>, action: MediaViewerHostAction? = nil,
+        delete: (@MainActor (String) async -> Bool)? = nil
     ) -> some View {
         fullScreenCover(item: viewing) { selection in
             MediaViewerView(
-                selection: selection, source: .fixed(selection.pages), hostAction: action)
+                selection: selection, source: .fixed(selection.pages), delete: delete,
+                hostAction: action)
         }
     }
 }

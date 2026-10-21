@@ -73,7 +73,7 @@ private struct PlacesScreen: View {
         // Outside the view that presents the sheet, for the reason the library's cover is outside
         // its navigation stack: two presentations declared on one view is how one of them silently
         // stops appearing.
-        .placesViewer($presenting.viewing)
+        .placesViewer($presenting.viewing, delete: deletePicture)
         .tint(DesignTokens.accent)
         .task {
             if places == nil {
@@ -120,7 +120,16 @@ private struct PlacesScreen: View {
     /// here depends on.
     private func wholeMap(_ places: PlacesStore) -> some View {
         // The map and its sheet are `PlacesMapStage`, shared with a trip's Map (MEMNG-719).
-        PlacesMapStage(markers: places.markers, control: map, presenting: $presenting)
+        PlacesMapStage(
+            markers: places.markers, control: map, presenting: $presenting,
+            delete: deletePicture, gone: places.deleted)
+    }
+
+    /// The viewer's bin: the picture leaves the server and, with it, this map
+    /// (`PlacesStore.delete`).
+    private func deletePicture(_ uid: String) async -> Bool {
+        guard let places, let handle = session.activeHandle else { return false }
+        return await places.delete(uid, using: handle)
     }
 
     /// Try Again on the error card.

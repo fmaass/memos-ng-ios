@@ -19,6 +19,17 @@ enum MediaGridHosting {
         MediaViewerPresentation.viewer(for: items.map(\.attachment), startingAt: attachment.uid)
     }
 
+    /// The viewer's bin over a list store's delete run: ONE picture, sent through the same run
+    /// select mode's Delete sends (`MediaLibraryStore.delete`, `TripMemberStore.delete`), and gone
+    /// only when the run says THIS uid went. A run the store refused because another is out is
+    /// not gone: the store serialises its deletes by refusal, so the viewer's request never rides
+    /// beside select mode's.
+    static func deletingOne(
+        _ run: @escaping @MainActor ([String]) async -> LibraryDeleteOutcome?
+    ) -> @MainActor (String) async -> Bool {
+        { uid in await run([uid])?.deleted.contains(uid) == true }
+    }
+
     /// A tile menu's fetch: the named rendition of the file through the session's download lane,
     /// offered by `saving`. The credential the original tier needs is the session's, and it stays
     /// there (see `OriginalMedia`). With no session there is nothing to fetch with.
@@ -42,6 +53,7 @@ extension View {
     /// — the image layer's own session unless a test is watching it. `action` is the host's one
     /// extra control on a page, nil everywhere but a trip (`MediaViewerHostAction`). `gone` is
     /// the pictures deleted elsewhere, which leave a viewer open over them (`MediaViewerView.gone`).
+    /// `delete` is the host's bin, shown on each page that is mine (`MediaViewerSelection`).
     ///
     /// Declared outside the host's stack and apart from any sheet of its own, for the reason the
     /// timeline's cover is: two presentations on one view is how one of them silently stops
@@ -53,12 +65,13 @@ extension View {
         transport: any MediaTransport = MediaSession.shared,
         action: MediaViewerHostAction? = nil,
         gone: Set<String> = [],
+        delete: (@MainActor (String) async -> Bool)? = nil,
         source: @escaping (MediaViewerSelection) -> MediaViewerSource
     ) -> some View {
         fullScreenCover(item: viewing) { selection in
             MediaViewerView(
-                selection: selection, source: source(selection), hostAction: action,
-                gone: gone, transport: transport
+                selection: selection, source: source(selection), delete: delete,
+                hostAction: action, gone: gone, transport: transport
             )
             .environment(\.signedURLRefresher, refresher)
             .mediaZoomTransition(sourceID: selection.id, in: zoom)

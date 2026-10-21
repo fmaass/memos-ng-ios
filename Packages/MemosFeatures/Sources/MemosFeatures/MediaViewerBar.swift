@@ -5,10 +5,10 @@ import SwiftUI
 /// in the middle, the bin on the right.
 ///
 /// An overlay at the bottom of the viewer, never a safe-area bar: it floats over the picture and
-/// takes no room from it. The bin follows today's rule exactly — the viewer was opened deletable
-/// and was handed a delete — and when it is absent its slot stays, so the capsule keeps the
-/// middle. The heart is the picture's favorite as `FavoriteStore` reports it
-/// (`FavoriteHeartPresentation`); with no store to write through it is drawn dimmed and inert.
+/// takes no room from it. The bin shows when the page on screen is deletable and the viewer was
+/// handed a delete — and when it is absent its slot stays, so the capsule keeps the middle. The
+/// heart is the picture's favorite as `FavoriteStore` reports it (`FavoriteHeartPresentation`);
+/// with no store to write through it is drawn dimmed and inert.
 struct MediaViewerBar: View {
     enum Slot: Equatable {
         case share
@@ -35,7 +35,8 @@ struct MediaViewerBar: View {
     static let sideInset: CGFloat = 20
     static let heartOpacity: Double = 0.4
 
-    /// Today's rule for the bin, unchanged: the viewer was opened deletable AND handed a delete.
+    /// The bin's rule: the page on screen is deletable (`MediaViewerSelection.deletable`) AND the
+    /// viewer was handed a delete. Never drawn disabled: a page that is not mine has no bin.
     static func binShown(deletable: Bool, canDelete: Bool) -> Bool { deletable && canDelete }
 
     /// The slots drawn, left to right.

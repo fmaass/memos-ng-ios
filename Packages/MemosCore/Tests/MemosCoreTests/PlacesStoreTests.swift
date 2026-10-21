@@ -435,3 +435,73 @@ private final class Signal: Sendable {
         _ = await iterator.next()
     }
 }
+
+// MARK: - the viewer's bin on the map (WP-446)
+
+/// Every request a script answered, as its method and path.
+private final class SentRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sent: [String] = []
+    func note(_ request: HTTPRequest) {
+        lock.withLock { sent.append("\(request.method.rawValue) \(request.path ?? "")") }
+    }
+    var deletes: [String] { lock.withLock { sent.filter { $0.hasPrefix("DELETE ") } } }
+}
+
+extension PlacesStoreTests {
+    /// The map's server: two located files, whatever was deleted still listed — as a read that
+    /// left before a delete would — and DELETE answered with `status`.
+    private func server(_ sent: SentRequests, deleteStatus: HTTPResponse.Status = .noContent)
+        -> any APIProtocol
+    {
+        Stub.client { request, _, _ in
+            sent.note(request)
+            if request.method == .delete { return Stub.empty(deleteStatus) }
+            return Self.answer([Self.marker(uid: "a"), Self.marker(uid: "b")])
+        }
+    }
+
+    @Test("a delete from the map sends ONE request for its picture, which leaves and stays gone")
+    func aDeleteLeavesTheMap() async {
+        let sent = SentRequests()
+        let client = server(sent)
+        let store = PlacesStore()
+        await store.load(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.markers.map(\.uid) == ["a", "b"], "control: the map loaded")
+
+        #expect(await store.delete("a", using: client.handle))
+        #expect(sent.deletes == ["DELETE /api/attachments/a"], "\(sent.deletes)")
+        #expect(store.markers.map(\.uid) == ["b"])
+        // A read answered with the file still in it does not put the pin back.
+        await store.load(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.markers.map(\.uid) == ["b"], "a later read brought the deleted pin back")
+    }
+
+    @Test("two deletes asked for at once put one request on the wire")
+    func aSecondDeleteIsRefused() async {
+        let sent = SentRequests()
+        let client = server(sent)
+        let store = PlacesStore()
+        await store.load(using: client.handle, baseURL: Stub.baseURL)
+        let first = Task { await store.delete("a", using: client.handle) }
+        let second = Task { await store.delete("a", using: client.handle) }
+        let answers = (await first.value, await second.value)
+        #expect(answers.0 != answers.1, "both or neither went: \(answers)")
+        #expect(sent.deletes == ["DELETE /api/attachments/a"], "\(sent.deletes)")
+    }
+
+    @Test("a delete that failed leaves the map standing, not failed")
+    func aFailedDeleteIsNotAFailedLoad() async {
+        let sent = SentRequests()
+        let client = server(sent, deleteStatus: .internalServerError)
+        let store = PlacesStore()
+        await store.load(using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(await store.delete("a", using: client.handle) == false)
+        #expect(sent.deletes.count == 1, "control: the delete was sent")
+        #expect(store.markers.map(\.uid) == ["a", "b"])
+        #expect(store.status == .ready)
+        #expect(!store.lastLoadFailed)
+        #expect(store.lastError == nil)
+    }
+}

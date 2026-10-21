@@ -130,7 +130,8 @@ public struct TimelineView: View {
             // the timeline holds it, so a re-read with fresh URLs reaches a page already open.
             MediaViewerView(
                 selection: selection,
-                source: Self.viewerSource(for: selection, memo: viewingMemo, in: timeline)
+                source: Self.viewerSource(for: selection, memo: viewingMemo, in: timeline),
+                delete: deletePicture
             )
             .environment(\.signedURLRefresher, timeline.map(refresher(for:)))
             .mediaZoomTransition(sourceID: selection.id, in: mediaZoom)
@@ -625,12 +626,28 @@ public struct TimelineView: View {
     /// cannot show — an upload that is neither picture nor video — falls back to the memo,
     /// because a tap that does nothing at all reads as a broken card.
     private func open(_ attachment: MemoAttachment, of memo: Memo) {
-        if let selection = MediaViewerPresentation.viewer(for: memo, startingAt: attachment.uid) {
+        if let selection = Self.viewer(for: memo, startingAt: attachment.uid) {
             viewingMemo = memo.uid
             viewing = selection
         } else {
             path.append(MemoRoute(uid: memo.uid))
         }
+    }
+
+    /// What a tile opens: the memo's media, each page deletable by its own file
+    /// (`MediaViewerSelection.Deletability.ownFiles`) — a card on the Timeline mixes nothing, but
+    /// the bin answers per picture in every viewer but the memo detail screen's.
+    static func viewer(for memo: Memo, startingAt uid: String) -> MediaViewerSelection? {
+        MediaViewerPresentation.viewer(for: memo.attachments, startingAt: uid)
+    }
+
+    /// The viewer's bin: the memo detail screen's own request (`TimelineStore.deleteAttachment`),
+    /// which joins a second ask for the same picture, so the picture leaves its card here too.
+    private func deletePicture(_ attachmentUID: String) async -> Bool {
+        guard let timeline, let memoUID = viewingMemo, let handle = session.activeHandle else {
+            return false
+        }
+        return await timeline.deleteAttachment(uid: attachmentUID, from: memoUID, using: handle)
     }
 
     /// Whether the live media channel belongs open right now. The rule itself is

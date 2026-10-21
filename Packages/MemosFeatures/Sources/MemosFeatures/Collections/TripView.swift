@@ -654,7 +654,7 @@ struct TripView: View {
             .gridViewer(
                 $viewing, refresher: refresher, zoom: zoom, transport: viewerTransport,
                 action: coverAction,
-                gone: memberStore.deleted
+                gone: memberStore.deleted, delete: deletePicture
             ) {
                 Self.viewerSource(for: $0, members: members, loaded: loaded)
             }
@@ -853,7 +853,7 @@ struct TripView: View {
         .gridViewer(
             $journalViewing, refresher: journalRefresher, zoom: zoom, transport: viewerTransport,
             action: coverAction,
-            gone: memberStore.deleted
+            gone: memberStore.deleted, delete: deletePicture
         ) { Self.journalViewerSource(for: $0, memos: memos) }
     }
 
@@ -1142,6 +1142,16 @@ struct TripView: View {
                 await memberStore.delete(uids, using: access.handle, baseURL: access.baseURL)
             }
         }
+    }
+
+    /// The viewer's bin, on the grid's and the Journal's viewer and the Map's: the one picture on
+    /// screen, through the run select mode's Delete sends (`TripMemberStore.delete`), so it leaves
+    /// every trip, the grid and the hero at once.
+    private func deletePicture(_ uid: String) async -> Bool {
+        guard let access = access() else { return false }
+        return await MediaGridHosting.deletingOne { [memberStore] uids in
+            await memberStore.delete(uids, using: access.handle, baseURL: access.baseURL)
+        }(uid)
     }
 
     /// Select mode's Share: the chosen rows, in the order they were chosen, each fetched as its

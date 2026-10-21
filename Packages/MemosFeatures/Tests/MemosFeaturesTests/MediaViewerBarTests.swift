@@ -125,7 +125,9 @@ struct MediaViewerBarTests {
         let context = MediaViewerContext.resolve(selection.startPage, carried: mine)
 
         #expect(context.ownedByMe == false, "the memo's flag was read for the file's")
-        #expect(MediaViewerBar.binShown(deletable: selection.deletable, canDelete: true))
+        #expect(
+            MediaViewerBar.binShown(
+                deletable: selection.deletable(selection.startPage.attachment), canDelete: true))
         let heartEnabled = PressProbe.withElement(
             labelled: "Favorite", in: MediaViewerBar(attachment: theirs, binShown: true)
         ) { heart in heart.map { !$0.accessibilityTraits.contains(.notEnabled) } }

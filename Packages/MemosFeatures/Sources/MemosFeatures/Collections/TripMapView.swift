@@ -156,7 +156,7 @@ struct TripMapScreen<Hero: View>: View {
             content(status, markers: markers, membership: membership)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .placesViewer($presenting.viewing, action: viewerAction)
+        .placesViewer($presenting.viewing, action: viewerAction, delete: deletePicture)
         .onAppear { probe?.presenting = { presenting } }
         .onChange(of: TripMapPresentation.kept(markers, members: uids)) { _, kept in
             presenting.keep(only: kept)
@@ -173,6 +173,15 @@ struct TripMapScreen<Hero: View>: View {
         .reloadsOnRecovery(session?.reachabilityRecoveries ?? 0) { await load() }
     }
 
+    /// The bin of the Map's viewers: the trip's own delete run (`TripMemberStore.delete`), so the
+    /// picture leaves the trip's members and, with them, this map.
+    private func deletePicture(_ uid: String) async -> Bool {
+        guard let access = access() else { return false }
+        return await MediaGridHosting.deletingOne { [members] uids in
+            await members.delete(uids, using: access.handle, baseURL: access.baseURL)
+        }(uid)
+    }
+
     @ViewBuilder
     private func content(
         _ status: PlacesStatus, markers: [PlaceMarker], membership: TripMemberState
@@ -185,7 +194,7 @@ struct TripMapScreen<Hero: View>: View {
         case .ready:
             PlacesMapStage(
                 markers: markers, control: map, presenting: $presenting,
-                viewerAction: viewerAction
+                viewerAction: viewerAction, delete: deletePicture
             )
             .background {
                 Color.clear

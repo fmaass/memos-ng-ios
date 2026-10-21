@@ -36,8 +36,8 @@ struct MediaViewerView: View {
     ///
     /// Passed IN rather than reached for, exactly as the memo delete's request is: the viewer has
     /// no store and no client, and the screen that presented it is the only thing that knows which
-    /// memo these pictures hang on. `nil` is a viewer that cannot delete — the media library's —
-    /// and it is what makes a control with nothing behind it impossible rather than merely absent.
+    /// store these pictures leave. `nil` is a viewer that cannot delete, and it is what makes a
+    /// control with nothing behind it impossible rather than merely absent.
     let delete: (@MainActor (String) async -> Bool)?
     /// One more thing the presenting screen lets the reader do with the page on screen, or nil —
     /// which is every viewer but a trip's ("Use as Cover", MEMNG-720). Passed in, as `delete` is:
@@ -272,8 +272,9 @@ struct MediaViewerView: View {
         if let page = pages.first(where: { $0.id == currentPage }) {
             MediaViewerBar(
                 attachment: page.attachment,
+                // Per page: the file on screen, not the viewer, decides (MEMNG-860's `mine`).
                 binShown: MediaViewerBar.binShown(
-                    deletable: selection.deletable, canDelete: delete != nil),
+                    deletable: selection.deletable(page.attachment), canDelete: delete != nil),
                 // The share flow the ⋯ menu's Share row ran, moved here unchanged.
                 share: { Task { await fetch(page.attachment, .shared) } },
                 info: { openInfo(page) },

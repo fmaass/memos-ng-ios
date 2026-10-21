@@ -166,7 +166,9 @@ struct MediaLibraryView: View {
         // The viewer pages over the STORE, not over the rows that happened to be loaded when the
         // tile was tapped: swiping to the end of them is where the swiping used to stop, on a
         // library of over a thousand files (MEMNG-189).
-        .gridViewer($viewing, refresher: refresher, zoom: mediaZoom) { _ in viewerSource }
+        .gridViewer($viewing, refresher: refresher, zoom: mediaZoom, delete: deletePicture) { _ in
+            viewerSource
+        }
         .tint(DesignTokens.accent)
         // Keyed on the account, as the tag and bucket lists below are: when the session becomes
         // somebody else's, this reads the incoming account's first page (MEMNG-591). Everything
@@ -747,6 +749,18 @@ struct MediaLibraryView: View {
             }
             await loadBuckets(refreshing: true)
         }
+    }
+
+    /// The viewer's bin: the one picture on screen, through the store's own run, the handle taken
+    /// at the answer as `confirmDelete` takes it. The day counts are read again when it went, as
+    /// after select mode's Delete, without holding the viewer's page until they are.
+    private func deletePicture(_ uid: String) async -> Bool {
+        guard let library, let handle = session.activeHandle else { return false }
+        let gone = await MediaGridHosting.deletingOne { uids in
+            await library.delete(uids, using: handle)
+        }(uid)
+        if gone { Task { await loadBuckets(refreshing: true) } }
+        return gone
     }
 
     /// A picture this grid deletes retires the New trip sheet's counts and spans, and reads again

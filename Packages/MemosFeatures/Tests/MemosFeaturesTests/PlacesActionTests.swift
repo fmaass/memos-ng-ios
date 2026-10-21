@@ -100,11 +100,11 @@ struct PlacesActionTests {
         }
     }
 
-    @Test("leaves a photo opened from the map undeletable")
-    func leavesThePhotoUndeletable() throws {
-        // A delete from the map would be a store mutation nothing here performs, so the
-        // capability is not claimed.
-        #expect(try #require(PlacesPresentation.open("newest", in: three)).deletable == false)
+    @Test("a photo of mine opened from the map is deletable by its own file")
+    func theMapAnswersPerFile() throws {
+        let selection = try #require(PlacesPresentation.open("newest", in: three))
+        #expect(selection.deletability == .ownFiles)
+        #expect(selection.deletable(selection.startPage.attachment))
     }
 
     @Test("a pin holding one photograph opens it")
