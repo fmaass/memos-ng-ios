@@ -2690,9 +2690,10 @@ extension TripScreenRenderTests {
         }
     }
 
-    /// Select mode's More on a trip holds Remove alone: visibility belongs to a memo, and what
-    /// select mode chooses is pictures, so it offers no visibility row.
-    @Test("select mode's More on a trip holds Remove alone, no visibility row")
+    /// Select mode's More on a trip holds Use as Cover and Remove: visibility belongs to a memo,
+    /// and what select mode chooses is pictures, so it offers no visibility row (MEMNG-842 adds
+    /// the cover row).
+    @Test("select mode's More on a trip holds Use as Cover and Remove, no visibility row")
     func selectMoreHoldsRemoveAlone() async {
         let wire = TripWire()
         let stores = stores()
@@ -2707,7 +2708,9 @@ extension TripScreenRenderTests {
             #expect(await screen.until { screen.says("Show Selected (2)") })
 
             let rows = TripMenuProbe.rows(of: SelectChrome.moreLabel, in: screen.window)
-            #expect(rows == [TripView.removeRowTitle(2)], "More holds: \(rows)")
+            #expect(
+                rows == [TripView.useAsCoverButton, TripView.removeRowTitle(2)],
+                "More holds: \(rows)")
         }
     }
 

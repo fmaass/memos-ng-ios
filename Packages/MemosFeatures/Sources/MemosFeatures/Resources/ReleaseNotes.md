@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (60)
+
+- Use as Cover now works on tag, month and year collections as well as trips, from the viewer's menu or with one picture selected.
+- A chosen cover is saved on the server, so it stays after a refresh or a reinstall and everyone in the household sees it.
+- If a cover cannot be saved, the collection's screen now says why and the previous cover comes back.
+- Please choose a cover for a tag, a month and a year, then pull to refresh and check each one stays.
+
 ## 2.4.0 (59)
 
 - Deleting a picture inside a trip now moves the viewer on to the next picture instead of closing it.

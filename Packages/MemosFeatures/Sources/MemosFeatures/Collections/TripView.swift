@@ -176,6 +176,9 @@ struct TripView: View {
     /// The device's Sort By and View Options, the Library's own (MEMNG-827): a tag's, a month's
     /// and a year's grid reads and writes them as the Library's All does. A test hands in its own.
     private let preferences: LibraryPreferences
+    /// Where a tag's, a month's or a year's Use as Cover is written (MEMNG-842); with none — a
+    /// host without the Collections root's store — only a trip offers it.
+    private let chosenCovers: CollectionCoverStore?
 
     init(
         trip: Trip,
@@ -208,6 +211,7 @@ struct TripView: View {
         modes: CollectionModeChoice = CollectionModeChoice(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
+        chosenCovers: CollectionCoverStore? = nil,
         now: @escaping () -> Date = { Date() },
         preferences: LibraryPreferences = .shared
     ) {
@@ -224,6 +228,7 @@ struct TripView: View {
         self.shareLane = shareLane
         self.now = now
         self.preferences = preferences
+        self.chosenCovers = chosenCovers
     }
 
     /// The toolbar menu's name, read by VoiceOver.
@@ -281,6 +286,33 @@ struct TripView: View {
         MediaViewerHostAction(title: useAsCoverButton, symbol: "photo.badge.checkmark") {
             manage.setCover($0.uid, of: uid, in: trips, using: access())
         }
+    }
+
+    /// What a viewer opened from a tag, a month or a year offers (MEMNG-842): that picture becomes
+    /// the collection's cover for the household (`CollectionCoverStore.choose`), shown on its card
+    /// at once. A choice of the collection still being written takes no second request; a write
+    /// the server refuses says why on the hero's error line, as a trip's cover does (`manage`).
+    static func useAsCover(
+        _ key: CollectionCoverStore.Key, in covers: CollectionCoverStore, manage: TripManage,
+        access: @escaping () -> CollectionsAccess?
+    ) -> MediaViewerHostAction {
+        MediaViewerHostAction(title: useAsCoverButton, symbol: "photo.badge.checkmark") {
+            manage.setCover($0, of: key, in: covers, using: access())
+        }
+    }
+
+    /// What a viewer opened on `scope` offers: a trip's record cover, or a tag's, a month's or a
+    /// year's chosen cover while there is a store to write it (MEMNG-842); favorites, which has no
+    /// server cover, offers none.
+    static func coverAction(
+        for scope: CollectionScope, trips: TripStore, manage: TripManage,
+        chosenCovers: CollectionCoverStore?, access: @escaping () -> CollectionsAccess?
+    ) -> MediaViewerHostAction? {
+        if scope.isTrip { return useAsCover(scope.id, in: trips, manage: manage, access: access) }
+        guard let chosenCovers, case .automatic(let collection) = scope,
+            let key = CollectionCoverStore.Key(collection.kind)
+        else { return nil }
+        return useAsCover(key, in: chosenCovers, manage: manage, access: access)
     }
 
     /// The line under the title while a change to the trip is out.
@@ -537,7 +569,18 @@ struct TripView: View {
     /// What the screen draws: the trip as the store holds it, or as it was on its way out; or the
     /// automatic collection as its card opened it.
     private var shownScope: CollectionScope {
-        (live ?? openedTrip).map(CollectionScope.trip) ?? scope
+        (live ?? openedTrip).map(CollectionScope.trip) ?? Self.chosen(scope, covers: chosenCovers)
+    }
+
+    /// An automatic collection carrying the cover chosen for it (MEMNG-842) in place of the one
+    /// its card opened it with — kept, as any carried cover, only while it is a drained member
+    /// (`TripMemberStore.summary(of:rows:complete:deleted:)`); any other scope as it is.
+    static func chosen(_ scope: CollectionScope, covers: CollectionCoverStore?) -> CollectionScope {
+        guard case .automatic(var collection) = scope,
+            let picture = covers?.cover(of: collection.kind)
+        else { return scope }
+        collection.cover = CollectionCover(uid: picture.uid, thumbnailURL: picture.thumbnailURL)
+        return .automatic(collection)
     }
 
     /// What the reads are keyed on: a trip only while the store holds it — one that is gone is read
@@ -549,9 +592,11 @@ struct TripView: View {
     /// Whether the card's own cover and count may be drawn: only under the account it was read for.
     private var carrying: Bool { identity == openedUnder }
 
-    /// Use as Cover writes a server collection: offered on a trip's viewers only.
+    /// Use as Cover writes the server's cover: a trip's record, or a tag's, a month's or a year's
+    /// chosen cover (MEMNG-842). Favorites has no server cover and offers none.
     private var coverAction: MediaViewerHostAction? {
-        scope.isTrip ? Self.useAsCover(scope.id, in: trips, manage: manage, access: access) : nil
+        Self.coverAction(
+            for: scope, trips: trips, manage: manage, chosenCovers: chosenCovers, access: access)
     }
 
     var body: some View {
@@ -1188,17 +1233,35 @@ struct TripView: View {
     /// while something is chosen and no share or delete is out; none elsewhere. No visibility row:
     /// visibility belongs to a memo, and what select mode chooses is pictures.
     private var selectRows: [SelectAction] {
-        guard scope.isTrip else { return [] }
         let free = LibrarySelectionPresentation.actionsEnabled(
             count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
         // Under a filter whose read is still out there are no rows to act on.
         let enabled = rowsSettled && free
-        return [
-            SelectAction(
-                id: "remove", title: Self.removeRowTitle(selection.count),
-                systemImage: "minus.circle", role: .destructive, disabled: !enabled
-            ) { askRemove() }
-        ]
+        var rows: [SelectAction] = []
+        if coverAction != nil {
+            rows.append(
+                SelectAction.useAsCover(count: selection.count, free: enabled) {
+                    useSelectedAsCover()
+                })
+        }
+        if scope.isTrip {
+            rows.append(
+                SelectAction(
+                    id: "remove", title: Self.removeRowTitle(selection.count),
+                    systemImage: "minus.circle", role: .destructive, disabled: !enabled
+                ) { askRemove() })
+        }
+        return rows
+    }
+
+    /// The Use as Cover row: the one chosen picture becomes the cover, as from the viewer, and
+    /// select mode ends as the Photos app's does.
+    private func useSelectedAsCover() {
+        guard rowsSettled, let action = coverAction,
+            let picture = SelectAction.coverPick(selection, in: currentMembers)
+        else { return }
+        action.perform(picture)
+        selection.close()
     }
 
     /// The Remove row: the question is asked about the pictures chosen NOW, the trip and the
@@ -1759,6 +1822,19 @@ final class TripManage {
                 uid: uid, patch: TripPatch(cover: .set(picture)), using: access.handle,
                 baseURL: access.baseURL)
         }
+    }
+
+    /// Makes `picture` the chosen cover of a tag, a month or a year (MEMNG-842), saved and said as
+    /// a trip's cover is: the hero's saving line while it is out, its error line if it fails.
+    /// Nil, with nothing sent, while that collection's earlier choice is still being written.
+    @discardableResult
+    func setCover(
+        _ picture: MemoAttachment, of key: CollectionCoverStore.Key,
+        in covers: CollectionCoverStore, using access: CollectionsAccess?
+    ) -> Task<Bool, Never>? {
+        guard let access, let write = covers.choose(picture, for: key, using: access.handle)
+        else { return nil }
+        return save { try await write.value }
     }
 
     /// The title a rename files: the draft trimmed, or nil when it is empty or unchanged.

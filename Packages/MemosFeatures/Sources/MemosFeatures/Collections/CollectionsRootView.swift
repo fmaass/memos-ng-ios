@@ -29,6 +29,8 @@ struct CollectionsRootView: View {
     @State private var months: LibraryBucketStore?
     /// The tag cards' covers, one lookup per tag (MEMNG-783).
     @State private var covers: TagCoverStore?
+    /// The covers chosen for tags, months and years, the household's on the server (MEMNG-842).
+    @State private var chosenCovers: CollectionCoverStore?
     /// The pictures' own tags and counts, the Favorites card's (MEMNG-868).
     @State private var pictureTags: PictureTagStore?
     /// The collections pushed onto the tab's stack (MEMNG-714, MEMNG-817).
@@ -57,7 +59,7 @@ struct CollectionsRootView: View {
     @ViewBuilder
     private var content: some View {
         if let session, let trips, let members, let tags, let years, let months, let covers,
-            let pictureTags
+            let pictureTags, let chosenCovers
         {
             CollectionsScreen(
                 trips: trips,
@@ -66,6 +68,7 @@ struct CollectionsRootView: View {
                 years: years,
                 months: months,
                 tagCovers: covers,
+                chosenCovers: chosenCovers,
                 pictureTags: pictureTags,
                 favorites: favorites,
                 identity: session.snapshotIdentity,
@@ -83,6 +86,7 @@ struct CollectionsRootView: View {
                 years.sessionIdentityChanged()
                 months.sessionIdentityChanged()
                 covers.sessionIdentityChanged()
+                chosenCovers.sessionIdentityChanged()
                 pictureTags.sessionIdentityChanged()
             }
         } else {
@@ -117,6 +121,13 @@ struct CollectionsRootView: View {
                         )
                         store.reports(to: session)
                         covers = store
+                    }
+                    if chosenCovers == nil {
+                        let store = CollectionCoverStore(
+                            onUnauthorized: { [session] refusal in await session.handle(refusal) }
+                        )
+                        store.reports(to: session)
+                        chosenCovers = store
                     }
                     if pictureTags == nil, let sessionPictureTags {
                         pictureTags = sessionPictureTags
@@ -169,6 +180,9 @@ struct CollectionsScreen: View {
     var months: LibraryBucketStore? = nil
     /// The tag cards' covers; with none, every tag card is the plain tile.
     var tagCovers: TagCoverStore? = nil
+    /// The covers chosen for tags, months and years (MEMNG-842): a card draws its chosen one over
+    /// its own, and a collection's Use as Cover writes here. With none, no such choice is offered.
+    var chosenCovers: CollectionCoverStore? = nil
     /// The pictures' own tags (MEMNG-868): the Favorites card's count; with none, no such card.
     var pictureTags: PictureTagStore? = nil
     /// The favorites ledger, when there is one: each of its commits reads the counts again.
@@ -251,7 +265,7 @@ struct CollectionsScreen: View {
             TripView(
                 scope: Self.destination(route, in: trips), openedUnder: route.openedUnder,
                 trips: trips, memberStore: members, identity: identity, access: access,
-                trail: trail, manage: tripManage(), now: now)
+                trail: trail, manage: tripManage(), chosenCovers: chosenCovers, now: now)
         }
         // Back from the sheet the list is read again: one list, whatever the sheet did.
         .sheet(item: $newTrip, onDismiss: { Task { await refresh() } }) { flow in
@@ -449,10 +463,11 @@ struct CollectionsScreen: View {
                             zone: timeZone, under: identity))
                 }
             case .tag(let tag):
-                TagCard(tag: tag, covers: tagCovers, access: access) {
+                let chosen = chosenCovers?.cover(of: .tag(tag.name))
+                TagCard(tag: tag, covers: tagCovers, chosen: chosen, access: access) {
                     push(
                         Self.tagRoute(
-                            tag, cover: tagCovers?.cover(for: tag.name), zone: timeZone,
+                            tag, cover: chosen ?? tagCovers?.cover(for: tag.name), zone: timeZone,
                             under: identity))
                 }
             }
@@ -475,6 +490,20 @@ struct CollectionsScreen: View {
     private func refresh() async {
         guard let access = access() else { return }
         await trips.refresh(using: access.handle, baseURL: access.baseURL)
+        await loadChosenCovers(access)
+    }
+
+    /// Reads the covers chosen for tags, months and years: they are the server's, so a refresh
+    /// and a reinstall show them again.
+    private func loadChosenCovers(_ access: CollectionsAccess) async {
+        await chosenCovers?.load(using: access.handle, baseURL: access.baseURL)
+    }
+
+    /// What a computed collection's card draws: its chosen cover, else its own.
+    static func shownCover(
+        _ kind: AutomaticCollection.Kind, chosen: CollectionCoverStore?, own: MemoAttachment?
+    ) -> MemoAttachment? {
+        chosen?.cover(of: kind) ?? own
     }
 
     /// Reads the tags; a tag whose cover lookup found nothing is asked again once its card is
@@ -493,14 +522,15 @@ struct CollectionsScreen: View {
 
     private func monthsRow(_ shown: [LibraryBucket]) -> some View {
         row(Self.monthsHeader, CollectionsPresentation.monthCards(shown)) { month in
+            let cover = Self.shownCover(.month(month.key), chosen: chosenCovers, own: month.cover)
             Button {
                 push(
                     Self.bucketRoute(
-                        .month(month.key), count: month.count, coverUid: month.cover?.uid ?? "",
-                        thumbnailURL: month.cover?.thumbnailURL,
+                        .month(month.key), count: month.count, coverUid: cover?.uid ?? "",
+                        thumbnailURL: cover?.thumbnailURL,
                         answeredZone: months?.loadedRequest?.timeZoneIdentifier, under: identity))
             } label: {
-                CollectionCard(cover: month.cover, title: month.title, count: month.count)
+                CollectionCard(cover: cover, title: month.title, count: month.count)
             }
             .buttonStyle(.plain)
         }
@@ -525,16 +555,16 @@ struct CollectionsScreen: View {
 
     private func yearsRow(_ shown: [LibraryBucket]) -> some View {
         row(Self.yearsHeader, shown) { year in
+            let own = LibraryBucketCover.attachment(for: year)
+            let cover = Self.shownCover(.year(year.key), chosen: chosenCovers, own: own)
             Button {
                 push(
                     Self.bucketRoute(
-                        .year(year.key), count: year.count, coverUid: year.coverUID,
-                        thumbnailURL: year.coverThumbnailURL,
+                        .year(year.key), count: year.count, coverUid: cover?.uid ?? year.coverUID,
+                        thumbnailURL: cover?.thumbnailURL ?? year.coverThumbnailURL,
                         answeredZone: years?.loadedRequest?.timeZoneIdentifier, under: identity))
             } label: {
-                CollectionCard(
-                    cover: LibraryBucketCover.attachment(for: year), title: year.key,
-                    count: year.count)
+                CollectionCard(cover: cover, title: year.key, count: year.count)
             }
             .buttonStyle(.plain)
         }

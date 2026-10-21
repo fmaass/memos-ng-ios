@@ -104,6 +104,8 @@ struct CollectionCard: View {
 struct TagCard: View {
     let tag: LibraryTag
     let covers: TagCoverStore?
+    /// The cover chosen for this tag (MEMNG-842), drawn over its newest picture.
+    var chosen: MemoAttachment? = nil
     let access: () -> CollectionsAccess?
     let open: () -> Void
 
@@ -114,7 +116,8 @@ struct TagCard: View {
     var body: some View {
         Button(action: open) {
             CollectionCard(
-                cover: covers?.cover(for: tag.name), title: Self.label(tag.name), count: tag.count)
+                cover: chosen ?? covers?.cover(for: tag.name), title: Self.label(tag.name),
+                count: tag.count)
         }
         .buttonStyle(.plain)
         .task(id: tag.name) {

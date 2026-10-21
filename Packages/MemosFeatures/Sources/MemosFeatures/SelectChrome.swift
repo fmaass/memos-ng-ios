@@ -1,3 +1,4 @@
+import MemosCore
 import SwiftUI
 
 /// One row of select mode's actions menu (MEMNG-779): a title, its symbol, and what it does.
@@ -12,6 +13,26 @@ struct SelectAction: Identifiable {
     /// nothing; empty for an ordinary row.
     var children: [SelectAction] = []
     var action: () -> Void = {}
+}
+
+extension SelectAction {
+    /// Select mode's Use as Cover row (MEMNG-842): offered wherever the viewer offers it,
+    /// pressable only with exactly one picture chosen and nothing else out.
+    static func useAsCover(count: Int, free: Bool, perform: @escaping () -> Void) -> SelectAction {
+        SelectAction(
+            id: "cover", title: TripView.useAsCoverButton, systemImage: "photo.badge.checkmark",
+            disabled: !(free && count == 1), action: perform)
+    }
+
+    /// The one picture the Use as Cover row makes the cover, or nil unless exactly one picture on
+    /// screen is chosen.
+    static func coverPick(_ selection: LibrarySelection, in members: [LibraryRow])
+        -> MemoAttachment?
+    {
+        let chosen = selection.rows(in: members)
+        guard selection.count == 1, chosen.count == 1 else { return nil }
+        return chosen.first?.attachment
+    }
 }
 
 /// Select mode's actions menu's rows, in order: the Library's header menu and the trip's system

@@ -35,6 +35,7 @@ filter:
     - attachment_meta_api_attachments__uid__get
     - attachment_picture_tags_api_attachments_picture_tags_get
     - attachment_tags_api_attachments_tags_get
+    - clear_collection_cover_api_collection_covers__kind___key__delete
     - create_collection_api_collections_post
     - create_memo_api_memos_post
     - create_pat_api_pats_post
@@ -59,6 +60,7 @@ filter:
     - include_attachment_api_collections__uid__exclusions__attachment_uid__delete
     - include_attachments_api_collections__uid__attachments_post
     - list_attachments_api_attachments_get
+    - list_collection_covers_api_collection_covers_get
     - list_collections_api_collections_get
     - list_digest_recipients_api_admin_digest_recipients_get
     - list_digest_runs_api_admin_digest_runs_get
@@ -91,6 +93,7 @@ filter:
     - serve_asset_api_attachments__uid___tier__get
     - serve_file_compat_file_attachments__uid___filename__get
     - serve_rendition_api_attachments__uid__rendition__variant_key__get
+    - set_collection_cover_api_collection_covers__kind___key__put
     - start_upload_api_uploads_post
     - stats_heatmap_api_stats_heatmap_get
     - subscribe_api_push_subscribe_post

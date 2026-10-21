@@ -236,4 +236,31 @@ struct CollectionFilterTests {
         #expect(members.filteredMembers(for: scope, query: videos) == nil)
         #expect(members.filteredState(for: scope, query: videos) == .notLoaded)
     }
+
+    @Test("leaving the collection while newest first waits on its drain sends nothing more")
+    func forgetDuringTheNewestFirstDrainEndsTheRead() async throws {
+        let entered = TripLatch()
+        let release = TripLatch()
+        let calls = LockedValue(0)
+        let client = CollectionScopeDrainTests.held(
+            entered: entered, release: release, calls: calls
+        ) { _ in
+            Stub.json("[\(Self.item("pic-1", "2026-09-02T10:00:00Z", mime: "image/jpeg"))]")
+        }
+        let (_, members) = await seeder.members()
+        let scope = CollectionScopeDrainTests.scope(.tag("lisbon"))
+        let newest = TripMemberQuery(order: .newestFirst)
+        let showing = Task {
+            await members.drainFiltered(
+                scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
+        }
+        await entered.wait()
+        members.forget(scope)
+        release.open()
+        await showing.value
+        #expect(calls.get() == 1, "the forgotten collection was read again")
+        #expect(members.filteredMembers(for: scope, query: newest) == nil)
+        #expect(members.filteredState(for: scope, query: newest) == .notLoaded)
+        #expect(members.members(for: scope).isEmpty)
+    }
 }

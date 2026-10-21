@@ -428,6 +428,7 @@ struct CollectionsRootRenderTests {
         _ stores: (TripStore, TripMemberStore, LibraryTagStore),
         _ wire: CollectionsWire,
         years: LibraryBucketStore? = nil,
+        chosenCovers: CollectionCoverStore? = nil,
         now: Date = Self.now,
         pushed: Box<[CollectionRoute]>? = nil
     ) -> some View {
@@ -437,7 +438,8 @@ struct CollectionsRootRenderTests {
         return NavigationStack {
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: stores.2, years: years,
-                identity: alice, access: { access }, now: { now }, trail: trail)
+                chosenCovers: chosenCovers, identity: alice, access: { access }, now: { now },
+                trail: trail)
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -933,6 +935,9 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var answeredYears: [String] = []
     private nonisolated(unsafe) var heldSpans: Set<String> = []
     private nonisolated(unsafe) var tagsAnswer: String?
+    /// The household's chosen covers as `/api/collection-covers` keeps them, `kind/key` to uid.
+    private nonisolated(unsafe) var chosenCovers: [String: String] = [:]
+    private nonisolated(unsafe) var refusesCoverWrites = false
     private nonisolated(unsafe) var pictureTagsAnswer: String?
     private nonisolated(unsafe) var pictureTagsScript: [String] = []
     private nonisolated(unsafe) var pictureTagsHeld = false
@@ -1091,6 +1096,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     /// Whose year reads have answered, in order.
     nonisolated var yearsAnswered: [String] { lock.withLock { answeredYears } }
 
+    /// Answers every cover write 404, as the server does for a picture it no longer has.
+    nonisolated func refuseCoverWrites() {
+        lock.withLock { refusesCoverWrites = true }
+    }
+
     /// Answers every year read 401: the token, as far as that read is concerned, is dead.
     nonisolated func refuseYears() {
         lock.withLock { refusesYears = true }
@@ -1123,6 +1133,33 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         case "add_picture_tag_api_attachments__uid__tags__name__put",
             "remove_picture_tag_api_attachments__uid__tags__name__delete":
             return (HTTPResponse(status: .noContent), nil)
+        case "set_collection_cover_api_collection_covers__kind___key__put":
+            if lock.withLock({ refusesCoverWrites }) {
+                var response = HTTPResponse(status: .notFound)
+                response.headerFields[.contentType] = "application/json"
+                return (response, HTTPBody(#"{"detail":"Attachment not found"}"#))
+            }
+            let parts = path.split(separator: "/").map(String.init)
+            guard parts.count == 4, let body else {
+                return (HTTPResponse(status: .badRequest), nil)
+            }
+            let data = try await Data(collecting: body, upTo: 1 << 16)
+            let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let uid = fields?["attachmentUid"] as? String ?? ""
+            lock.withLock { chosenCovers["\(parts[2])/\(parts[3])"] = uid }
+            return Self.json(Self.cover(parts[2], parts[3], uid))
+        case "list_collection_covers_api_collection_covers_get":
+            let rows = lock.withLock { chosenCovers }.sorted { $0.key < $1.key }.map { entry in
+                let parts = entry.key.split(separator: "/", maxSplits: 1).map(String.init)
+                return Self.cover(parts[0], parts[1], entry.value)
+            }
+            return Self.json("[\(rows.joined(separator: ","))]")
+        case "attachment_meta_api_attachments__uid__get":
+            let uid = path.split(separator: "/").last.map(String.init) ?? ""
+            guard lock.withLock({ chosenCovers.values.contains(uid) }) else {
+                return (HTTPResponse(status: .notFound), nil)
+            }
+            return Self.json(Self.record(uid))
         case "attachment_picture_tags_api_attachments_picture_tags_get":
             let (call, script) = lock.withLock { () -> (Int, [String]) in
                 pictureTagsRead += 1
@@ -1266,6 +1303,27 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
         "downloadUrl":"/api/attachments/\(uid)/download",\
         "printUrl":"/api/attachments/\(uid)/print"}
         """
+    }
+
+    /// One chosen cover as `/api/collection-covers` answers it.
+    nonisolated static func cover(_ kind: String, _ key: String, _ uid: String) -> String {
+        #"{"kind":"\#(kind)","key":"\#(key)","attachmentUid":"\#(uid)"}"#
+    }
+
+    /// A picture's own record, its URLs signed far ahead.
+    nonisolated static func record(_ uid: String) -> String {
+        let query = "?exp=4000000000&scope=1&sig=s"
+        return #"{"uid":"\#(uid)","mime":"image/jpeg","size":1024,"sha256":null,"status":"ready","#
+            + #""width":1000,"height":800,"duration":null,"blurhash":null,"captured_at":null,"#
+            + #""capture_instant":null,"capture_civil":null,"capture_source":null,"mine":true,"#
+            + #""hasPrint":false,"hasLegacyPrint":false,"hasPoster":false,"renditions":[],"#
+            + #""filename":null,"latitude":null,"longitude":null,"locationSource":null,"#
+            + #""addedBy":null,"camera":null,"webReady":true,"#
+            + #""downloadUrl":"/api/attachments/\#(uid)/o","printUrl":"/api/attachments/\#(uid)/p","#
+            + #""thumbnailUrl":"/api/attachments/\#(uid)/thumb\#(query)","#
+            + #""previewUrl":"/api/attachments/\#(uid)/mobile\#(query)","#
+            + #""webUrl":"/api/attachments/\#(uid)/web\#(query)","#
+            + #""posterUrl":"/api/attachments/\#(uid)/poster\#(query)"}"#
     }
 
     private nonisolated static func json(_ text: String) -> (HTTPResponse, HTTPBody?) {
@@ -1799,5 +1857,138 @@ extension CollectionsRootRenderTests {
                 CollectionsHost.identified(CollectionCard.coverIdentifier(nil), in: screen.window))
             wire.transport.trips.release(TripRows.members)
         }
+    }
+}
+
+// MARK: - Use as Cover on a tag, a month and a year (MEMNG-842)
+
+extension CollectionsRootRenderTests {
+    /// A picture as a viewer page hands it to Use as Cover, its thumbnail signed far ahead.
+    static func page(_ uid: String) -> MemoAttachment {
+        MemoAttachment(
+            uid: uid, mime: "image/jpeg", status: .ready,
+            thumbnailURL: URL(
+                string: "/api/attachments/\(uid)/thumb?exp=4000000000&scope=1&sig=s",
+                relativeTo: CollectionsWire.baseURL)?.absoluteURL)
+    }
+
+    @Test("Use as Cover from a tag changes its card on the root at once, and a reinstall reads it")
+    func aTagsChosenCoverShowsOnTheRoot() async {
+        let wire = CollectionsWire()
+        let covers = CollectionCoverStore()
+        let access = wire.access
+        let key = CollectionCoverStore.Key(kind: .tag, key: "portugal2026")
+        await CollectionsHost.with(screen(stores(), wire, chosenCovers: covers)) { screen in
+            #expect(await screen.until { screen.element(labelled: "#portugal2026") != nil })
+            // What the tag's viewer's Use as Cover does.
+            TripView.useAsCover(key, in: covers, manage: TripManage(), access: { access })
+                .perform(Self.page("chosen9"))
+            let shown = await screen.until {
+                CollectionsHost.identified(
+                    CollectionCard.coverIdentifier("chosen9"), in: screen.window)
+            }
+            #expect(shown, "the tag card did not draw the chosen cover")
+            #expect(await screen.until { !covers.isSaving(key) })
+        }
+        let writes = wire.transport.sent.filter { $0.hasPrefix("set_collection_cover") }
+        #expect(
+            writes == [
+                "set_collection_cover_api_collection_covers__kind___key__put "
+                    + "/api/collection-covers/tag/portugal2026"
+            ])
+        // A reinstall: a store that has never seen the choice reads it from the server.
+        let fresh = CollectionCoverStore()
+        await fresh.load(using: access.handle, baseURL: CollectionsWire.baseURL)
+        #expect(fresh.cover(of: .tag("portugal2026"))?.uid == "chosen9")
+    }
+
+    @Test("a tag's cover the server refuses goes back and says why on the hero's error line")
+    func aRefusedCoverSaysWhy() async throws {
+        let wire = CollectionsWire()
+        wire.transport.refuseCoverWrites()
+        let covers = CollectionCoverStore()
+        let manage = TripManage()
+        let access = wire.access
+        let key = CollectionCoverStore.Key(kind: .tag, key: "portugal2026")
+        // What the tag's viewer's, and its Select row's, Use as Cover does.
+        TripView.useAsCover(key, in: covers, manage: manage, access: { access })
+            .perform(Self.page("chosen9"))
+        #expect(covers.cover(for: key)?.uid == "chosen9", "control: shown at once")
+        #expect(manage.isSaving, "the hero's saving line is not up")
+        for _ in 0..<500 where manage.failure == nil || manage.isSaving {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let said = try #require(TripStore.Failure.server(status: 404).errorDescription)
+        #expect(manage.failure == said)
+        #expect(covers.cover(for: key) == nil, "the refused choice still shows")
+        #expect(!covers.isSaving(key))
+    }
+
+    @Test("a month's and a year's chosen cover is what its card draws, over the bucket's own")
+    func bucketCardsDrawTheChosenCover() async throws {
+        let wire = CollectionsWire()
+        let covers = CollectionCoverStore()
+        let month = try #require(CollectionCoverStore.Key(.month("2026-03")))
+        let year = try #require(CollectionCoverStore.Key(.year("2019")))
+        try await covers.choose(Self.page("m1"), for: month, using: wire.access.handle)?.value
+        try await covers.choose(Self.page("y1"), for: year, using: wire.access.handle)?.value
+        let own = Self.page("bucket")
+        #expect(
+            CollectionsScreen.shownCover(.month("2026-03"), chosen: covers, own: own)?.uid == "m1")
+        #expect(CollectionsScreen.shownCover(.year("2019"), chosen: covers, own: own)?.uid == "y1")
+        #expect(
+            CollectionsScreen.shownCover(.year("2020"), chosen: covers, own: own)?.uid == "bucket",
+            "a year with no choice keeps its bucket's cover")
+        #expect(CollectionsScreen.shownCover(.year("2019"), chosen: nil, own: own)?.uid == "bucket")
+    }
+
+    @Test("a collection's screen carries its chosen cover; favorites offers no Use as Cover")
+    func theScreenCarriesTheChosenCover() async throws {
+        let wire = CollectionsWire()
+        let covers = CollectionCoverStore()
+        let tag = AutomaticCollection(
+            kind: .tag("portugal2026"), count: 3,
+            cover: CollectionCover(uid: "newest", thumbnailURL: nil), zone: .gmt)
+        let key = CollectionCoverStore.Key(kind: .tag, key: "portugal2026")
+        let before = TripView.chosen(.automatic(tag), covers: covers)
+        #expect(before.carriedCover?.uid == "newest", "control: no choice yet")
+        try await covers.choose(Self.page("chosen9"), for: key, using: wire.access.handle)?.value
+        #expect(TripView.chosen(.automatic(tag), covers: covers).carriedCover?.uid == "chosen9")
+        #expect(CollectionCoverStore.Key(.pictureTag(FavoriteTag.name)) == nil)
+    }
+
+    @Test("a tag's, a month's and a year's viewer offers Use as Cover; favorites' does not")
+    func automaticViewersOfferUseAsCover() {
+        let covers = CollectionCoverStore()
+        let trips = stores().0
+        func offered(_ kind: AutomaticCollection.Kind, _ store: CollectionCoverStore?) -> String? {
+            let scope = CollectionScope.automatic(
+                AutomaticCollection(kind: kind, count: 1, cover: nil, zone: .gmt))
+            return TripView.coverAction(
+                for: scope, trips: trips, manage: TripManage(), chosenCovers: store,
+                access: { nil })?.title
+        }
+        for kind in [AutomaticCollection.Kind.tag("garden"), .month("2026-03"), .year("2019")] {
+            #expect(offered(kind, covers) == TripView.useAsCoverButton, "\(kind)")
+            #expect(offered(kind, nil) == nil, "offered with nowhere to write it: \(kind)")
+        }
+        #expect(offered(.pictureTag(FavoriteTag.name), covers) == nil)
+    }
+
+    @Test("Select's Use as Cover takes exactly one chosen picture")
+    func selectUseAsCoverTakesOnePicture() {
+        let rows = ["a", "b"].map {
+            LibraryRow(attachment: Self.page($0), takenAt: nil, mine: true, filename: $0)
+        }
+        var selection = LibrarySelection()
+        selection.begin()
+        #expect(SelectAction.useAsCover(count: 0, free: true) {}.disabled)
+        selection.toggle(rows[0])
+        #expect(SelectAction.coverPick(selection, in: rows)?.uid == "a")
+        #expect(!SelectAction.useAsCover(count: selection.count, free: true) {}.disabled)
+        #expect(SelectAction.useAsCover(count: selection.count, free: false) {}.disabled)
+        selection.toggle(rows[1])
+        #expect(SelectAction.coverPick(selection, in: rows) == nil, "two pictures chosen")
+        #expect(SelectAction.useAsCover(count: selection.count, free: true) {}.disabled)
     }
 }

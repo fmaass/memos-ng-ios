@@ -90,6 +90,10 @@ public final class TripMemberStore {
     /// the grid does not take a failure for an invalidation and ask again by itself; a new read,
     /// an invalidation or another lineage ends it.
     private var filteredFailures: [String: (lineage: Lineage, query: TripMemberQuery)] = [:]
+    /// How many times each scope has been left (`forget`): a filtered ask that awaited the drain
+    /// holds the count it started under and goes no further once the scope was left meanwhile,
+    /// because `activeQueries` outlives the forget and alone would let it read again (MEMNG-893).
+    private var departures: [String: Int] = [:]
 
     private struct FilteredFlight {
         let lineage: Lineage
@@ -739,10 +743,13 @@ public final class TripMemberStore {
             // The drain answers an order alone unless the cap stopped it: read it when nothing
             // is held — joining the screen's own drain when that is already on the wire — so a
             // first showing newest first walks the collection once, not twice.
+            let departure = departures[key, default: 0]
             if held(key, request: request) == nil {
                 await drain(scope, using: handle, baseURL: baseURL)
             }
-            guard activeQueries[key] == query else { return }
+            guard departures[key, default: 0] == departure, activeQueries[key] == query else {
+                return
+            }
             if drainAnswers(key, request) {
                 filteredFlights[key] = nil
                 return
@@ -1076,6 +1083,7 @@ public final class TripMemberStore {
     /// a scope is this call. It retires the showing's lease too, so a lapsed signature's callback
     /// held past it — cover, members or journal — starts no read at all.
     public func forget(_ scope: CollectionScope) {
+        departures[scope.id, default: 0] += 1
         invalidate(uid: scope.id)
         journals[scope.id] = nil
         journalErrors[scope.id] = nil
