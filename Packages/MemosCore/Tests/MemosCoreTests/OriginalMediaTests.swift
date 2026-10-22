@@ -429,18 +429,18 @@ struct AttachmentRenditionTests {
         )
     }
 
-    @Test("a picture is handed on as the file it was uploaded as, never a derived tier")
-    func aPictureIsSharedAsItsOriginal() throws {
+    @Test("a picture is handed on as its mobile tier, never the original (MEMNG-874)")
+    func aPictureIsSharedAsItsMobileTier() throws {
         let file = picture()
         let shared = try #require(file.file(.shared))
 
-        #expect(shared == file.file(.original))
-        #expect(shared.url == file.downloadURL)
-        #expect(shared.mime == "image/heic")
-        // The three tiers it is NOT — and the payload carries a signed URL for every one of them,
-        // which is exactly why "there is a URL" was never enough to share by.
+        #expect(shared.url == file.previewURL)
+        #expect(shared != file.file(.original))
+        #expect(shared.url != file.downloadURL)
+        // The mobile tier is a JPEG whatever was uploaded, so a HEIC is handed on as `.jpeg`.
+        #expect(shared.mime == "image/jpeg")
+        #expect(OriginalMedia.filename(uid: "a1", mime: shared.mime) == "a1.jpeg")
         #expect(shared.url != file.webURL)
-        #expect(shared.url != file.previewURL)
         #expect(shared.url != file.thumbnailURL)
     }
 
@@ -485,16 +485,18 @@ struct AttachmentRenditionTests {
         #expect(clip().file(.shared) != clip().file(.original))
     }
 
-    @Test("an attachment naming no original has nothing to hand over")
+    @Test("a picture naming no mobile tier has nothing to hand over, and never falls back")
     func nothingToHandOver() {
-        let bare = picture(original: nil)
+        var bare = picture()
+        bare.previewURL = nil
 
-        #expect(bare.file(.original) == nil)
-        // Not the web URL it does carry either. That link is the defect itself, and for a picture
-        // there is no file behind it at all.
+        // Not the original, which it does carry: a picture is never shared as its master. Not the
+        // web URL either — for a picture there is no file behind it at all.
         #expect(bare.file(.shared) == nil)
-        // The control: the same picture WITH an original does have one.
+        #expect(bare.file(.original) != nil)
+        // The control: the same picture WITH a mobile tier does have one, original or not.
         #expect(picture().file(.shared) != nil)
+        #expect(picture(original: nil).file(.shared)?.url == picture().previewURL)
     }
 }
 
@@ -533,14 +535,15 @@ struct SessionOriginalDownloadTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer memos_pat_good")
     }
 
-    @Test("sharing a picture fetches the file that was uploaded, not a derived tier")
-    func sharingAPictureFetchesTheOriginal() async throws {
+    @Test("sharing a picture fetches the mobile tier over the fenced lane, never the original")
+    func sharingAPictureFetchesTheMobileTier() async throws {
         let session = await signedIn()
         let transport = StubDownloads()
         let file = MemoAttachment(
             uid: "a1",
-            mime: "image/jpeg",
+            mime: "image/png",
             status: .ready,
+            previewURL: URL(string: "https://memos.example.invalid/api/attachments/a1/mobile"),
             webURL: URL(string: "https://memos.example.invalid/api/attachments/a1/web?sig=abc"),
             downloadURL: URL(string: "https://memos.example.invalid/api/attachments/a1/original")
         )
@@ -548,8 +551,30 @@ struct SessionOriginalDownloadTests {
         let saved = try await session.download(file, .shared, transport: transport)
 
         let request = try #require(transport.seen.get())
-        #expect(request.url?.path == "/api/attachments/a1/original")
+        #expect(request.url?.path == "/api/attachments/a1/mobile")
+        #expect(request.url?.path != "/api/attachments/a1/original")
+        // Named for the JPEG that arrived, not for the PNG that was uploaded.
         #expect(saved.lastPathComponent == "a1.jpeg")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer memos_pat_good")
+    }
+
+    @Test("Save Original on a picture still fetches the file that was uploaded")
+    func savingAPictureOriginalFetchesTheOriginal() async throws {
+        let session = await signedIn()
+        let transport = StubDownloads()
+        let file = MemoAttachment(
+            uid: "a1",
+            mime: "image/png",
+            status: .ready,
+            previewURL: URL(string: "https://memos.example.invalid/api/attachments/a1/mobile"),
+            downloadURL: URL(string: "https://memos.example.invalid/api/attachments/a1/original")
+        )
+
+        let saved = try await session.download(file, .original, transport: transport)
+
+        let request = try #require(transport.seen.get())
+        #expect(request.url?.path == "/api/attachments/a1/original")
+        #expect(saved.lastPathComponent == "a1.png")
     }
 
     @Test("sharing a clip fetches the derived mp4 over this same fenced lane")

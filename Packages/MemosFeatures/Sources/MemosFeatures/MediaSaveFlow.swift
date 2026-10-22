@@ -218,10 +218,29 @@ struct ShareSheet: UIViewControllerRepresentable {
     /// was a signed URL into the household server.
     static func activityItems(for file: URL) -> [URL] { [file] }
 
+    /// Called once the share has COMPLETED; see `controller(items:onComplete:)`.
+    var onComplete: @MainActor @Sendable () -> Void = {}
+
+    /// The activity controller this sheet shows, with the one thing it must do on the way out.
+    ///
+    /// A completed share dismisses the activity controller, but not the SwiftUI sheet hosting it —
+    /// nothing clears the sheet's binding, so the empty sheet stayed up after a share to Telegram
+    /// (owner, 2.4.0 58/59). `completed` clears it; a cancel is the sheet's own dismissal already.
+    /// Clearing the binding only stops the offer — the file stays held (`FetchedFileHold`,
+    /// MEMNG-210) and is never deleted here.
+    static func controller(
+        items: [URL], onComplete: @escaping @MainActor @Sendable () -> Void
+    ) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, completed, _, _ in
+            guard completed else { return }
+            MainActor.assumeIsolated { onComplete() }
+        }
+        return controller
+    }
+
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(
-            activityItems: Self.activityItems(for: url), applicationActivities: nil
-        )
+        Self.controller(items: Self.activityItems(for: url), onComplete: onComplete)
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
@@ -251,7 +270,7 @@ extension View {
             .sheet(
                 item: Binding(get: { flow.saved }, set: { if $0 == nil { flow.finish() } })
             ) { original in
-                ShareSheet(url: original.url)
+                ShareSheet(url: original.url, onComplete: { flow.finish() })
             }
             .alert(
                 "Could not download",

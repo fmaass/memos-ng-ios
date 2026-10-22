@@ -1,6 +1,7 @@
 import Foundation
 import MemosCore
 import Testing
+import UniformTypeIdentifiers
 
 @testable import MemosFeatures
 
@@ -10,6 +11,8 @@ private func row(_ uid: String, filename: String, mime: String = "image/jpeg") -
             uid: uid,
             mime: mime,
             status: .ready,
+            previewURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/mobile"),
+            webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
             downloadURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/o")
         ),
         takenAt: nil,
@@ -143,20 +146,114 @@ struct MediaBatchShareFlowTests {
         #expect(requests.asked.map { $0.uid } == ["a1", "a2"])
     }
 
-    @Test("only the original is ever asked for, never a derived tier")
-    func onlyTheOriginalIsAskedFor() async throws {
+    @Test("sharing N pictures asks for N mobile tiers and never an original (MEMNG-874)")
+    func picturesAreSharedAsTheirMobileTier() async throws {
+        let flow = MediaBatchShareFlow(remove: { _ in })
+        let rows = (1...3).map { row("p\($0)", filename: "IMG_\($0).PNG", mime: "image/png") }
+        var paths: [String] = []
+
+        await flow.share(rows, generation: { 1 }) { attachment, rendition in
+            // The URL the download lane will fetch is the one `file(_:)` resolves for the
+            // rendition asked — the request itself, not merely the label on it.
+            paths.append(attachment.file(rendition)?.url.path ?? "none")
+            return try fetchedFile("\(attachment.uid).jpeg")
+        }
+
+        #expect(paths == ["p1", "p2", "p3"].map { "/api/attachments/\($0)/mobile" })
+        #expect(!paths.contains { $0.hasSuffix("/o") })
+        let batch = try #require(flow.offered, "nothing was offered")
+        // The picture's own name, under the extension of the JPEG that arrived (MEMNG-836).
+        #expect(batch.files.map(\.lastPathComponent) == ["IMG_1.jpeg", "IMG_2.jpeg", "IMG_3.jpeg"])
+        // Every item, the camera PNGs included, is handed over as ONE type: a JPEG by its name.
+        #expect(batch.files.allSatisfy { UTType(filenameExtension: $0.pathExtension) == .jpeg })
+    }
+
+    @Test("a completed share closes the sheet and keeps the files; a cancel leaves it to the sheet")
+    func aCompletedShareClosesTheSheet() async throws {
+        let removed = Removals()
+        let flow = MediaBatchShareFlow(remove: { removed.record($0) })
+        let file = try fetchedFile("a1.jpeg")
+        await flow.share([row("a1", filename: "a.jpg")], generation: { 1 }) { _, _ in file }
+        let batch = try #require(flow.offered, "nothing was offered")
+        let controller = ShareSheet.controller(items: batch.files, onComplete: { flow.finish() })
+
+        controller.completionWithItemsHandler?(nil, false, nil, nil)
+        #expect(flow.offered != nil, "a cancel cleared the offer itself")
+        controller.completionWithItemsHandler?(nil, true, nil, nil)
+        #expect(flow.offered == nil, "a completed share left the sheet up")
+        // MEMNG-210: closing stops the offer; the file stays where the share target reads it.
+        #expect(removed.all.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: batch.files[0].path))
+    }
+
+    @Test("a clip in the selection is still handed on as its mp4, never its master")
+    func aClipIsSharedAsItsMp4() async throws {
         let flow = MediaBatchShareFlow(remove: { _ in })
         let requests = Requests()
         let rows = [row("v1", filename: "clip.mov", mime: "video/quicktime")]
-        let file = try fetchedFile("v1.mov")
+        var paths: [String] = []
 
         await flow.share(rows, generation: { 1 }) { attachment, rendition in
             requests.record(attachment, rendition)
-            return file
+            paths.append(attachment.file(rendition)?.url.path ?? "none")
+            return try fetchedFile("v1.mp4")
         }
 
         #expect(requests.asked.count == 1)
-        #expect(requests.asked.first?.rendition == .original)
+        #expect(requests.asked.first?.rendition == .shared)
+        #expect(paths == ["/api/attachments/v1/web"])
+        #expect(flow.offered?.files.map(\.lastPathComponent) == ["clip.mp4"])
+    }
+
+    @Test("a shared file keeps its name, and takes the extension of the file that arrived")
+    func theNameFollowsTheArrivedType() {
+        let jpeg = URL(filePath: "/enclosure/u1.jpeg")
+        // Already the arrived type, under another spelling of it: left alone.
+        #expect(MediaBatchShareFlow.named("first.jpg", like: jpeg) == "first.jpg")
+        #expect(MediaBatchShareFlow.named("Holiday 2026.HEIC", like: jpeg) == "Holiday 2026.jpeg")
+        #expect(MediaBatchShareFlow.named("scan", like: jpeg) == "scan.jpeg")
+        #expect(MediaBatchShareFlow.named("u2.mov", like: URL(filePath: "/e/u2.mp4")) == "u2.mp4")
+        // A dot inside a name is not a type: only a suffix the system knows is replaced.
+        #expect(MediaBatchShareFlow.named("beach.v2", like: jpeg) == "beach.v2.jpeg")
+        #expect(MediaBatchShareFlow.named("a.jpeg.PNG", like: jpeg) == "a.jpeg.jpeg")
+        // A file that arrived with no extension leaves the name as it was.
+        #expect(MediaBatchShareFlow.named("a.png", like: URL(filePath: "/e/u3")) == "a.png")
+    }
+
+    @Test("pictures that convert to one name are offered under different ones, in selection order")
+    func namesStayUniqueAfterConversion() async throws {
+        let flow = MediaBatchShareFlow(remove: { _ in })
+        let rows = [
+            row("p1", filename: "IMG_0001.PNG", mime: "image/png"),
+            row("p2", filename: "IMG_0001.HEIC", mime: "image/heic"),
+            // The same name in another case is the same name to the Files app.
+            row("p3", filename: "img_0001.JPEG"),
+            // A name that is already what the second file was given takes a suffix of its own.
+            row("p4", filename: "IMG_0001-2.jpeg"),
+        ]
+
+        await flow.share(rows, generation: { 1 }) { attachment, _ in
+            try fetchedFile("\(attachment.uid).jpeg")
+        }
+
+        let batch = try #require(flow.offered, "nothing was offered")
+        let names = batch.files.map(\.lastPathComponent)
+        #expect(
+            names == ["IMG_0001.jpeg", "IMG_0001-2.jpeg", "img_0001-3.JPEG", "IMG_0001-2-2.jpeg"]
+        )
+        #expect(Set(names.map { $0.lowercased() }).count == rows.count)
+        #expect(batch.files.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+    }
+
+    @Test("a name no earlier file holds is kept; a taken one takes the first free suffix")
+    func aTakenNameTakesTheFirstFreeSuffix() {
+        #expect(MediaBatchShareFlow.unique("a.jpeg", among: []) == "a.jpeg")
+        #expect(MediaBatchShareFlow.unique("a.jpeg", among: ["b.jpeg"]) == "a.jpeg")
+        #expect(MediaBatchShareFlow.unique("a.jpeg", among: ["a.jpeg", "a-2.jpeg"]) == "a-3.jpeg")
+        #expect(MediaBatchShareFlow.unique("A.JPEG", among: ["a.jpeg"]) == "A-2.JPEG")
+        #expect(MediaBatchShareFlow.unique("scan", among: ["scan"]) == "scan-2")
+        let dotted = MediaBatchShareFlow.unique("beach.v2.jpeg", among: ["beach.v2.jpeg"])
+        #expect(dotted == "beach.v2-2.jpeg")
     }
 
     @Test("a second tap while a batch is running starts no download and no second batch")

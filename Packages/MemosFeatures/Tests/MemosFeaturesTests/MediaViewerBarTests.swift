@@ -92,9 +92,10 @@ struct MediaViewerBarTests {
     func shareMovedToTheBar() {
         let file = picture("a", memoUID: "m7")
         #expect(MediaTileMenu.viewerActions(for: file) == [.showMemo(uid: "m7")])
-        // The viewer's top-right is the ⋯ menu even for one row; the tile keeps its own rule.
+        // The viewer's top-right is the ⋯ menu even for one row; the tile keeps its own rule, and
+        // there a picture's mobile tier is a Share of its own (MEMNG-874).
         #expect(MediaTileMenu.viewerControl(for: file) == .menu([.showMemo(uid: "m7")]))
-        #expect(MediaTileMenu.control(for: file) == .direct(.showMemo(uid: "m7")))
+        #expect(MediaTileMenu.control(for: file) == .menu([.showMemo(uid: "m7"), .share(file)]))
         let top = ScreenProbe.labels(
             of: MediaViewerActions(
                 control: MediaTileMenu.viewerControl(for: file), showMemo: { _ in }))

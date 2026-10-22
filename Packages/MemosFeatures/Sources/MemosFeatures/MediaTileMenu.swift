@@ -93,10 +93,11 @@ enum MediaTileMenu {
     /// nothing is worse than no action.
     ///
     /// `Save Original` appears only where it is a DIFFERENT file from the one Share sends. A
-    /// picture and a document ARE shared as their own original (`MemoAttachment.file(_:)`), so on
-    /// those two rows would fetch the same bytes under two names — a menu that offers the same
-    /// thing twice is one nobody can choose from. A clip is where they genuinely part: Share hands
-    /// on the derived mp4, this fetches the master beside it.
+    /// document IS shared as its own original (`MemoAttachment.file(_:)`), so there the two rows
+    /// would fetch the same bytes under two names — a menu that offers the same thing twice is one
+    /// nobody can choose from. A picture and a clip are where they genuinely part: Share hands on
+    /// the mobile JPEG or the mp4 (MEMNG-874), this fetches the master beside it, and it is the
+    /// only way to that master.
     ///
     /// It is also LAST because it is the slow one, and the archive master is the reason: it is
     /// megabytes to gigabytes over a household connection.
@@ -166,8 +167,8 @@ enum MediaTileMenu {
         of attachment: MemoAttachment
     ) -> AttachmentFile? {
         guard let file = attachment.file(rendition) else { return nil }
-        // The master, whichever rendition asked for it: `shared` IS the original for everything
-        // but a clip.
+        // The master, whichever rendition asked for it: `shared` IS the original for a document
+        // and for a clip whose mp4 is not made yet.
         if file == attachment.file(.original) {
             return attachment.status == .uploading ? nil : file
         }

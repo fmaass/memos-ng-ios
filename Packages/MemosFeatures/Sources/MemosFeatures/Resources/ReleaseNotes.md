@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (61)
+
+- Share now sends a phone-sized copy of each picture instead of the full original, so large camera files no longer fail to arrive in WhatsApp.
+- The share sheet now closes by itself once a share has gone through.
+- Sharing several pictures at once gives every file its own name, so none of them is lost when two have the same name.
+- Save Original is now in the menu for pictures too, for when I want the full file.
+- Please share a few pictures, including a big one, to WhatsApp and to Telegram, and check they arrive and the sheet closes.
+
 ## 2.4.0 (60)
 
 - Use as Cover now works on tag, month and year collections as well as trips, from the viewer's menu or with one picture selected.

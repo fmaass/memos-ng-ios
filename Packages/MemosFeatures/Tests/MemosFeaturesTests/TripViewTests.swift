@@ -508,9 +508,10 @@ struct TripScreenRenderTests {
         }
     }
 
-    /// Share on a trip's selection: each chosen picture's ORIGINAL is fetched, in the order chosen,
-    /// and the share sheet offers exactly those files, under the names they were uploaded as.
-    @Test("a trip's Share fetches the chosen originals in the order chosen and offers just them")
+    /// Share on a trip's selection: each chosen picture's SHARED copy — its mobile tier, never the
+    /// original (MEMNG-874) — is fetched, in the order chosen, and the share sheet offers exactly
+    /// those files, under the names they were uploaded as.
+    @Test("a trip's Share fetches the chosen pictures' shared copies in order and offers just them")
     func shareOnATrip() async {
         let lane = TripShareRecorder()
         await selectingTrip(TripWire(), shareLane: lane.lane) { screen, _ in
@@ -523,7 +524,7 @@ struct TripScreenRenderTests {
             #expect(screen.element(labelled: "Share")?.accessibilityActivate() == true)
             let offered = await screen.until { TripProbe.shareSheet(over: screen.host) != nil }
             #expect(offered, "no share sheet: asked \(lane.asked)")
-            #expect(lane.asked == ["p3 original", "p1 original"], "asked \(lane.asked)")
+            #expect(lane.asked == ["p3 shared", "p1 shared"], "asked \(lane.asked)")
             let sheet = TripProbe.shareSheet(over: screen.host)
             #expect(sheet.flatMap(TripProbe.sharedNames) == ["p3.jpg", "p1.jpg"])
         }
@@ -553,7 +554,7 @@ struct TripScreenRenderTests {
             #expect(again, "Select stood no toolbar the second time")
             await screen.settle(turns: 40)
             #expect(TripProbe.shareSheet(over: screen.host) == nil, "the left batch was offered")
-            #expect(lane.asked == ["p0 original"], "the left batch asked on: \(lane.asked)")
+            #expect(lane.asked == ["p0 shared"], "the left batch asked on: \(lane.asked)")
         }
     }
 

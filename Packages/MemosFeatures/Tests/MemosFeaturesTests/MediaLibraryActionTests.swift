@@ -70,14 +70,26 @@ private func photo(_ uid: String, memoUID: String? = nil) -> MemoAttachment {
         previewURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/mobile"),
         webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
         // Every real payload carries one: `downloadUrl` is required on both `AttachmentRef` and
-        // `AttachmentListItem`, and it is the file Share hands over for a picture.
+        // `AttachmentListItem`. Save Original fetches it; Share hands over `mobile` (MEMNG-874).
         downloadURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/original"),
         memoUID: memoUID
     )
 }
 
-/// A clip: the one kind of file whose shared copy is NOT its own original, and so the one file that
-/// really has two different things that can be done with it.
+/// A document: the one kind of file still shared as its own original, and so the file with exactly
+/// one thing that can be done with it.
+@MainActor
+private func document(_ uid: String) -> MemoAttachment {
+    MemoAttachment(
+        uid: uid,
+        mime: "application/pdf",
+        status: .ready,
+        downloadURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/original")
+    )
+}
+
+/// A clip: its shared copy is the derived mp4, NOT its own original, so — like a picture since
+/// MEMNG-874 — it has two different things that can be done with it.
 @MainActor
 private func clip(_ uid: String) -> MemoAttachment {
     MemoAttachment(
@@ -131,27 +143,48 @@ struct MediaTileMenuTests {
         #expect(!offersAMemo, "an orphan was offered a memo it does not have")
         // The control: the orphan still gets a menu, so the absence above is about the OWNER and
         // not about an empty action list.
-        #expect(orphan.count == 1)
+        #expect(orphan == [.share(photo("b")), .saveOriginal(photo("b"))])
     }
 
     /// Two files, two shapes of menu, and the order is the order they are shown in.
-    @Test("Show Memo comes first and Share follows it")
+    @Test("Show Memo comes first, Share follows it and Save Original comes last")
     func order() {
         #expect(
             MediaTileMenu.actions(for: photo("a", memoUID: "m7")).map(\.title)
-                == ["Show Memo", "Share"]
+                == ["Show Memo", "Share", "Save Original"]
         )
+    }
+
+    /// MEMNG-874: a picture's Share and its Save Original are now two different files — the
+    /// mobile tier and the master — so a picture is offered both, and each row asks for its own.
+    @Test("on a picture, Share asks for the mobile copy and Save Original for the master")
+    func aPictureSharesItsMobileTierAndSavesItsOriginal() throws {
+        let file = photo("a")
+        let renditions = Box<[AttachmentRendition]>([])
+        let fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, rendition in
+            renditions.value.append(rendition)
+        }
+
+        MediaTileActionItem(action: .share(file), showMemo: { _ in }, fetch: fetch).tapped()
+        MediaTileActionItem(action: .saveOriginal(file), showMemo: { _ in }, fetch: fetch).tapped()
+
+        #expect(renditions.value == [.shared, .original])
+        let shared = try #require(MediaTileMenu.heldFile(.shared, of: file))
+        #expect(shared.url.path == "/api/attachments/a/mobile")
+        let master = try #require(MediaTileMenu.heldFile(.original, of: file))
+        #expect(master.url.path == "/api/attachments/a/original")
     }
 
     @Test("a file with no file to hand over is not offered a share that would share nothing")
     func nothingToShare() {
         var bare = photo("a", memoUID: "m7")
         // Not the web URL, which every payload carries whether or not a file stands behind it —
-        // the ORIGINAL, which is what a picture is handed on as (MEMNG-207).
-        bare.downloadURL = nil
-        #expect(MediaTileMenu.actions(for: bare) == [.showMemo(uid: "m7")])
-        // The control: the same file with its original is offered the share.
-        #expect(MediaTileMenu.actions(for: photo("a", memoUID: "m7")).count == 2)
+        // the MOBILE tier, which is what a picture is handed on as (MEMNG-874), and never its
+        // original in its place.
+        bare.previewURL = nil
+        #expect(MediaTileMenu.actions(for: bare) == [.showMemo(uid: "m7"), .saveOriginal(bare)])
+        // The control: the same file with its mobile tier is offered the share.
+        #expect(MediaTileMenu.actions(for: photo("a", memoUID: "m7")).count == 3)
     }
 
     /// The viewer's overlay is built from the same list, over the page's own attachment — which is
@@ -166,10 +199,14 @@ struct MediaTileMenuTests {
         #expect(page.memoUID == "m7")
         #expect(
             MediaTileMenu.actions(for: page.attachment)
-                == [.showMemo(uid: "m7"), .share(attachment)]
+                == [.showMemo(uid: "m7"), .share(attachment), .saveOriginal(attachment)]
         )
-        // MEMNG-860: the viewer's ⋯ is the same list less Share, which its bar offers instead.
-        #expect(MediaTileMenu.viewerActions(for: page.attachment) == [.showMemo(uid: "m7")])
+        // MEMNG-860: the viewer's ⋯ is the same list less Share, which its bar offers instead —
+        // and since MEMNG-874 it holds Save Original, the one way to a picture's master.
+        #expect(
+            MediaTileMenu.viewerActions(for: page.attachment)
+                == [.showMemo(uid: "m7"), .saveOriginal(attachment)]
+        )
         #expect(MediaTileMenu.canShare(page.attachment))
     }
 
@@ -177,7 +214,8 @@ struct MediaTileMenuTests {
     /// the screen it was opened from.
     @Test("a memo's own attachment is offered no Show Memo")
     func memoSourcedAttachmentHasNoOwner() {
-        #expect(MediaTileMenu.actions(for: photo("a")) == [.share(photo("a"))])
+        let file = photo("a")
+        #expect(MediaTileMenu.actions(for: file) == [.share(file), .saveOriginal(file)])
     }
 }
 
@@ -195,7 +233,7 @@ struct MediaViewerActionControlTests {
     /// so Share is the whole of the menu.
     @Test("a file with one thing to offer is offered it directly, under that action's own icon")
     func oneActionIsTheControl() {
-        let onAMemoPage = photo("a")
+        let onAMemoPage = document("a")
 
         #expect(MediaTileMenu.actions(for: onAMemoPage).map(\.title) == ["Share"])
         #expect(MediaTileMenu.control(for: onAMemoPage) == .direct(.share(onAMemoPage)))
@@ -231,6 +269,7 @@ struct MediaViewerActionControlTests {
         var owned = clip("v2")
         owned.memoUID = "m7"
         let fromTheLibrary = photo("a", memoUID: "m7")
+        let aDocument = document("d")
 
         #expect(MediaTileMenu.control(for: ready) == .menu([.share(ready), .saveOriginal(ready)]))
         #expect(
@@ -240,8 +279,12 @@ struct MediaViewerActionControlTests {
         // The library-opened viewer's own two, which is the other half of the ticket's shape.
         #expect(
             MediaTileMenu.control(for: fromTheLibrary)
-                == .menu([.showMemo(uid: "m7"), .share(fromTheLibrary)])
+                == .menu([
+                    .showMemo(uid: "m7"), .share(fromTheLibrary), .saveOriginal(fromTheLibrary),
+                ])
         )
+        // The one file still shared as itself is offered no second row for the same bytes.
+        #expect(MediaTileMenu.control(for: aDocument) == .direct(.share(aDocument)))
     }
 
     @Test("a file with nothing to offer is offered no control at all")
@@ -253,7 +296,9 @@ struct MediaViewerActionControlTests {
         #expect(MediaTileMenu.control(for: arriving) == .hidden)
         // The control: the same picture, landed, gets one — so the absence above is about the
         // upload and not about a rule that hides everything.
-        #expect(MediaTileMenu.control(for: photo("a")) == .direct(.share(photo("a"))))
+        #expect(
+            MediaTileMenu.control(for: photo("a"))
+                == .menu([.share(photo("a")), .saveOriginal(photo("a"))]))
     }
 
     /// The boundary written out over lists rather than files, because "exactly one" IS the rule and
@@ -276,7 +321,7 @@ struct MediaViewerActionControlTests {
     func theOverlayDrawsTheActionItself() {
         let labels = ScreenProbe.labels(
             of: MediaViewerActions(
-                control: MediaTileMenu.control(for: photo("a")), showMemo: { _ in }
+                control: MediaTileMenu.control(for: document("a")), showMemo: { _ in }
             )
         )
 
@@ -320,7 +365,7 @@ struct MediaViewerActionControlTests {
     /// identical on screen.
     @Test("one tap on the direct button asks for the shared file, through the row's own dispatch")
     func theDirectButtonRunsTheAction() {
-        let file = photo("a")
+        let file = document("a")
         let asked = Box<[String]>([])
         let renditions = Box<[AttachmentRendition]>([])
         let shown = Box<[String]>([])
@@ -404,7 +449,7 @@ extension MediaViewerActionControlTests {
 
     @Test("a one-action file with a host's row draws the menu, and neither row outside it")
     func aHostRowOverOneActionDrawsTheMenu() {
-        let file = photo("a")
+        let file = document("a")
         let labels = ScreenProbe.labels(
             of: MediaViewerActions(
                 control: MediaTileMenu.control(for: file), showMemo: { _ in },

@@ -93,8 +93,8 @@ extension OriginalMediaError: APIErrorCarrying {
 public enum AttachmentRendition: Sendable, Equatable {
     /// The file as it was uploaded — the archive master (ADR-0008).
     case original
-    /// The copy this app hands to somebody else. See `MemoAttachment.file(_:)` for what that is,
-    /// and why it is the master nearly every time.
+    /// The copy this app hands to somebody else. See `MemoAttachment.file(_:)` for what that is:
+    /// a derived tier for a picture or a clip, the file itself only for a document.
     case shared
 }
 
@@ -116,24 +116,29 @@ public struct AttachmentFile: Sendable, Equatable {
 extension MemoAttachment {
     /// Where a rendition of this file is, or nil when the payload names no such file.
     ///
-    /// `shared` is the archive master for everything except a clip, and what decides that is what
-    /// the server actually holds. Only three derived tiers are real files — `thumb` and `mobile`
-    /// are JPEGs of a PICTURE, `web` is the mp4 of a VIDEO — yet every payload carries a signed
-    /// URL for all four whether the file behind it exists or not (memos-ng
-    /// `app/services/asset_urls.py` signs the set unconditionally, from the uid alone). A derived
-    /// URL is therefore a guess, and `downloadUrl` is the one file every attachment really has.
-    /// For a picture or a document that settles it twice over: the thing somebody asked to send IS
-    /// the file they are looking at, and it is the tier certain to be there.
+    /// The app never shares an original picture (owner, MEMNG-874 reversing MEMNG-588): a camera
+    /// PNG or HEIC is tens of megabytes, and the one-up tier the viewer already shows is what a
+    /// message needs. So `shared` is, by kind:
     ///
-    /// A clip is the exception, on size. Its master is what the camera wrote — HEVC, often
-    /// gigabytes — while the mp4 beside it is the rendition this app already plays and small
-    /// enough for a message to carry. That is the difference between a share that completes and
-    /// one that never does.
+    /// - a PICTURE: its `mobile` tier (`previewURL`, 2048 px), a JPEG whatever was uploaded
+    ///   (memos-ng `app/services/asset_paths.py`). No mobile URL is nothing to share — never the
+    ///   original in its place; the only way to the master is Save Original.
+    /// - a CLIP: its `web` mp4 — the camera's HEVC master can be gigabytes. Until the mp4 is made,
+    ///   the master, as before.
+    /// - anything else (a document): its own file, the only one it has.
+    ///
+    /// Every payload carries a signed URL for all four derived tiers whether a file stands behind
+    /// it or not (memos-ng `app/services/asset_urls.py` signs the set from the uid alone), so a
+    /// derived URL is a guess: what makes it a file is the attachment being `ready`, which is the
+    /// question `MediaTileMenu.heldFile` asks before Share is offered.
     public func file(_ rendition: AttachmentRendition) -> AttachmentFile? {
         switch rendition {
         case .original:
             return downloadURL.map { AttachmentFile(url: $0, mime: mime) }
         case .shared:
+            if mime.hasPrefix("image/") {
+                return previewURL.map { AttachmentFile(url: $0, mime: "image/jpeg") }
+            }
             guard isVideo, let webURL else { return file(.original) }
             // Not a guess about this upload: the web tier IS an mp4, whatever was uploaded
             // (memos-ng `app/services/asset_paths.py`).

@@ -11,6 +11,8 @@ private func photo(_ uid: String, original: URL?) -> MemoAttachment {
         uid: uid,
         mime: "image/jpeg",
         status: .ready,
+        // What a picture is shared AS since MEMNG-874; every payload carries it.
+        previewURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/mobile"),
         webURL: URL(string: "https://memos.example.invalid/api/attachments/\(uid)/web"),
         downloadURL: original
     )
@@ -315,15 +317,19 @@ struct MediaSaveFlowTests {
     /// fetches one: only where there is something to fetch. A payload naming no original names
     /// nothing this app could hand anybody, and an action that would download nothing is worse
     /// than no action at all.
-    @Test("a file with no original is offered no Share, because there is nothing to hand over")
+    @Test("a picture naming neither tier is offered nothing, because there is nothing to hand over")
     func nothingToHandOver() {
-        #expect(MediaTileMenu.actions(for: photo("a", original: nil)).map(\.title) == [])
-        // The control: the same file WITH an original is offered one, so the absence above is
-        // about the missing file and not about an empty menu.
+        var bare = photo("a", original: nil)
+        bare.previewURL = nil
+        #expect(MediaTileMenu.actions(for: bare).map(\.title) == [])
+        // The controls: its mobile tier alone is a Share (MEMNG-874), and with an original beside
+        // it that master is a second, different file — so the absence above is about the missing
+        // files and not about an empty menu.
+        #expect(MediaTileMenu.actions(for: photo("a", original: nil)).map(\.title) == ["Share"])
         #expect(
             MediaTileMenu.actions(
                 for: photo("a", original: URL(string: "https://memos.example.invalid/x/original"))
-            ).map(\.title) == ["Share"]
+            ).map(\.title) == ["Share", "Save Original"]
         )
     }
 
@@ -440,21 +446,26 @@ struct MediaSaveFlowTests {
         #expect(MediaTileMenu.actions(for: arrivingClip).map(\.title) == [])
         // The control: the same picture, landed, is offered its file — so the two absences above
         // are about the upload and not about an empty menu.
-        #expect(MediaTileMenu.actions(for: photo("a1", original: master)).map(\.title) == ["Share"])
+        #expect(
+            MediaTileMenu.actions(for: photo("a1", original: master)).map(\.title)
+                == ["Share", "Save Original"])
     }
 
     /// The gate is about the DERIVED file, and a picture hands over none: what Share sends for a
     /// photograph or a PDF is the master it was uploaded as, which is on disk while the tiers
     /// beside it are still being made. Taking that row away for the seconds a tile shimmers would
     /// remove an action for a file that is sitting right there.
-    @Test("a picture or a document still being derived keeps the Share of its own file")
+    /// A document is shared as itself, so it keeps its Share while the server works. A picture is
+    /// shared as its mobile tier (MEMNG-874), which does not exist until the server has made it:
+    /// until then only its master is there to save — never handed on in the mobile tier's place.
+    @Test("a document being derived keeps its Share; a picture offers only its master until then")
     func aFileBeingDerivedKeepsItsShare() {
         var deriving = photo("a1", original: URL(string: "https://memos.example.invalid/x/orig"))
         deriving.status = .processing
         var queued = document()
         queued.status = .pending
 
-        #expect(MediaTileMenu.actions(for: deriving).map(\.title) == ["Share"])
+        #expect(MediaTileMenu.actions(for: deriving).map(\.title) == ["Save Original"])
         #expect(MediaTileMenu.actions(for: queued).map(\.title) == ["Show Memo", "Share"])
     }
 

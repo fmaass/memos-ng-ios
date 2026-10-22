@@ -2,6 +2,7 @@ import Foundation
 import MemosCore
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// The files a batch fetched, offered to ONE share sheet together.
 public struct FetchedBatch: Identifiable, Equatable, Sendable {
@@ -11,8 +12,9 @@ public struct FetchedBatch: Identifiable, Equatable, Sendable {
     public var id: String { files.map(\.absoluteString).joined(separator: "\n") }
 }
 
-/// Select mode's Share (MEMNG-588): the ORIGINAL of every chosen picture, fetched one after the
-/// other, then handed to one share sheet.
+/// Select mode's Share (MEMNG-588): the SHARED copy of every chosen file — a picture's mobile tier,
+/// a clip's mp4, never an original (MEMNG-874) — fetched one after the other, then handed to one
+/// share sheet.
 ///
 /// `MediaSaveFlow` generalised from one file to several, and it keeps each of its rules: a second
 /// tap while a batch is in flight is refused rather than joined, nothing is offered that is not
@@ -55,13 +57,13 @@ public final class MediaBatchShareFlow {
         held = FetchedFileHold(remove: remove)
     }
 
-    /// Fetches the original of every row, one at a time, and offers them all in one sheet.
+    /// Fetches the shared copy of every row, one at a time, and offers them all in one sheet.
     ///
     /// - Parameters:
     ///   - rows: the chosen rows, in selection order.
     ///   - generation: the session generation now, or nil when nobody is signed in.
-    ///   - download: one file of one attachment. It is always asked for `.original` — a derived
-    ///     tier is not the picture somebody chose to send.
+    ///   - download: one file of one attachment. It is always asked for `.shared` — the light copy
+    ///     `MemoAttachment.file(_:)` names, never the archive master (MEMNG-874).
     /// - Returns: whether this call ran a batch — false for a tap that arrived while another was
     ///   in flight, and for an empty selection.
     @discardableResult
@@ -88,10 +90,12 @@ public final class MediaBatchShareFlow {
         // Not held yet: nothing is offered before the whole selection is here, and a batch that
         // ends early throws these away itself.
         var files: [URL] = []
+        // The names already given out in this batch, lowered — see `unique(_:among:)`.
+        var taken: Set<String> = []
         for row in rows {
             let file: URL
             do {
-                file = try await download(row.attachment, .original)
+                file = try await download(row.attachment, .shared)
             } catch {
                 drop(files)
                 // An abandoned batch has nobody left to tell.
@@ -111,7 +115,11 @@ public final class MediaBatchShareFlow {
                 drop(files + [file])
                 return true
             }
-            files.append(Self.rename(file, to: Self.shareName(for: row)))
+            let name = Self.unique(Self.named(Self.shareName(for: row), like: file), among: taken)
+            let renamed = Self.rename(file, to: name)
+            // What the file is now called, which a failed move leaves as the name it arrived with.
+            taken.insert(renamed.lastPathComponent.lowercased())
+            files.append(renamed)
         }
         // Held BEFORE anything can offer them, as `MediaSaveFlow` holds its one.
         for file in files { held.hold(file) }
@@ -153,6 +161,40 @@ public final class MediaBatchShareFlow {
         let cleaned = sanitise(row.filename)
         if !cleaned.isEmpty { return cleaned }
         return OriginalMedia.filename(uid: row.attachment.uid, mime: row.attachment.mime)
+    }
+
+    /// `name` under the extension of the file that ARRIVED, when that is a different type: the
+    /// shared copy of `IMG_1.PNG` is a JPEG, and a `.PNG` on it would tell Messages and Mail the
+    /// wrong thing (MEMNG-836). A name already of that type (`.jpg` for a `.jpeg`) is left alone,
+    /// and so is every name when the arrived file carries no extension. Only a suffix the system
+    /// knows as a type is replaced: the `.v2` of `beach.v2` is part of the name, not its type.
+    static func named(_ name: String, like file: URL) -> String {
+        let arrived = file.pathExtension
+        guard !arrived.isEmpty, let type = UTType(filenameExtension: arrived) else { return name }
+        let current = (name as NSString).pathExtension
+        // Lowered: a camera writes `IMG_1.PNG`, and the type of a suffix does not depend on case.
+        let currentType = current.isEmpty ? nil : UTType(filenameExtension: current.lowercased())
+        if currentType == type { return name }
+        let isAType = currentType.map { !$0.isDynamic } ?? false
+        let stem = isAType ? (name as NSString).deletingPathExtension : name
+        return "\(stem).\(arrived)"
+    }
+
+    /// `name`, or the first `stem-2.ext`, `stem-3.ext`, … that no earlier file of the batch holds.
+    /// The JPEG copies of `IMG_1.PNG` and `IMG_1.HEIC` are both `IMG_1.jpeg`, and a share target
+    /// handed two files of one name keeps one or overwrites it (MEMNG-836). Compared without case:
+    /// the Files app and most share targets do. The suffix follows selection order, so the same
+    /// selection is always offered under the same names.
+    static func unique(_ name: String, among taken: Set<String>) -> String {
+        guard taken.contains(name.lowercased()) else { return name }
+        let suffix = (name as NSString).pathExtension
+        let stem = suffix.isEmpty ? name : (name as NSString).deletingPathExtension
+        // `taken.count + 1` candidates cannot all be taken, so the loop always returns.
+        for number in 2...(taken.count + 2) {
+            let candidate = suffix.isEmpty ? "\(stem)-\(number)" : "\(stem)-\(number).\(suffix)"
+            if !taken.contains(candidate.lowercased()) { return candidate }
+        }
+        return name
     }
 
     /// A name that cannot leave the directory it is put in: `/`, `\` and `:` (the separator HFS
@@ -198,10 +240,11 @@ struct BatchShareSheet: UIViewControllerRepresentable {
     /// What the activity controller is handed: the files and nothing else (MEMNG-207).
     static func activityItems(for files: [URL]) -> [URL] { files }
 
+    /// Called once the share has COMPLETED; see `ShareSheet.controller(items:onComplete:)`.
+    var onComplete: @MainActor @Sendable () -> Void = {}
+
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(
-            activityItems: Self.activityItems(for: files), applicationActivities: nil
-        )
+        ShareSheet.controller(items: Self.activityItems(for: files), onComplete: onComplete)
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
@@ -215,7 +258,7 @@ extension View {
             .sheet(
                 item: Binding(get: { flow.offered }, set: { if $0 == nil { flow.finish() } })
             ) { batch in
-                BatchShareSheet(files: batch.files)
+                BatchShareSheet(files: batch.files, onComplete: { flow.finish() })
             }
             .alert(
                 "Could not download",
