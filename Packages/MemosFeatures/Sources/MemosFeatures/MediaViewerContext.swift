@@ -78,11 +78,12 @@ struct MediaViewerContext: Equatable {
 }
 
 /// Whether the viewer's chrome is drawn: one tap on the picture hides the top row, the date
-/// capsule and the bar together, and the next one brings all three back.
+/// capsule, the filmstrip and the bar together, and the next one brings them all back.
 struct MediaViewerChrome: Equatable {
     enum Part: CaseIterable, Hashable {
         case topRow
         case dateCapsule
+        case filmstrip
         case bar
     }
 

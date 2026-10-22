@@ -70,14 +70,13 @@ struct MediaViewerView: View {
     /// The pages this viewer has ADOPTED so far. Not what is rendered — `pages` is, and it
     /// reconciles this against the source on every evaluation.
     @State private var shown: [MediaPage]
-    /// Which page, if any, is holding the pager still. Paging is off while one is: a sideways drag
-    /// inside a zoomed picture is a pan, and a page that turns halfway through examining a photo is
-    /// the single most annoying thing a viewer can do. Fingers on the glass are enough — the hold
-    /// does not wait for the scale to have changed.
-    @State private var pagerHeldBy: String?
-    /// Which page, if any, is holding the presentation's interactive dismissal. Narrower than the
-    /// pager's hold on purpose: at fitted size a pinch-in is how the viewer is closed.
-    @State private var dismissalHeldBy: String?
+    /// Which pages hold the pager still and the presentation's interactive dismissal. Paging is
+    /// off while the page on screen holds it: a sideways drag inside a zoomed picture is a pan,
+    /// and a page that turns halfway through examining a photo is the single most annoying thing
+    /// a viewer can do. Fingers on the glass are enough — the hold does not wait for the scale to
+    /// have changed. The dismissal's hold is narrower on purpose: at fitted size a pinch-in is how
+    /// the viewer is closed.
+    @State private var holds = MediaViewerHolds()
     /// Everything playback DOES: the policy's answer, the one `AVPlayer`, and the audio session
     /// the sound needs — none of which a view body can be asked about, so none of which is
     /// decided in one (`MediaViewerPlaybackCoordinator`).
@@ -128,6 +127,13 @@ struct MediaViewerView: View {
         .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
                 failureNotice
+                // Above the bar, over the reconciled pages the pager renders (MEMNG-861).
+                MediaViewerFilmstrip(
+                    pages: pages, current: currentPage,
+                    shown: chrome.shown.contains(.filmstrip),
+                    select: { currentPage = $0 }
+                )
+                .padding(.bottom, DesignTokens.Space.snug)
                 bar
             }
         }
@@ -158,7 +164,9 @@ struct MediaViewerView: View {
         // The platform's own switch for a presentation's interactive dismissal, asked here so all
         // five presentation sites get it without being touched. The close button and the escape
         // action call `dismiss()` and are unaffected.
-        .interactiveDismissDisabled(MediaViewerPager.stands(dismissalHeldBy, among: pages))
+        .interactiveDismissDisabled(
+            holds.holdsDismissal(among: pages, current: currentPage)
+        )
         .statusBarHidden()
         // Two-finger scrub, the system-wide "get me out of here" — the same door as the button.
         .accessibilityAction(.escape) { dismiss() }
@@ -203,18 +211,7 @@ struct MediaViewerView: View {
                         page: page,
                         // Only the page that set a hold may clear it: the page being swiped away
                         // from reports its release after the page arriving has taken its own.
-                        onHoldsChange: { holds in
-                            if holds.pager {
-                                pagerHeldBy = page.id
-                            } else if pagerHeldBy == page.id {
-                                pagerHeldBy = nil
-                            }
-                            if holds.dismissal {
-                                dismissalHeldBy = page.id
-                            } else if dismissalHeldBy == page.id {
-                                dismissalHeldBy = nil
-                            }
-                        },
+                        onHoldsChange: { holds.report($0, by: page.id) },
                         // Handed to exactly one page: the one the single player belongs to. Every
                         // other page gets `nil` and draws its poster.
                         player: playback.player(for: page.id),
@@ -231,7 +228,7 @@ struct MediaViewerView: View {
         .scrollTargetBehavior(.paging)
         .scrollPosition(id: $currentPage)
         .scrollIndicators(.hidden)
-        .scrollDisabled(MediaViewerPager.stands(pagerHeldBy, among: pages))
+        .scrollDisabled(holds.holdsPager(among: pages, current: currentPage))
         .ignoresSafeArea()
     }
 
@@ -742,7 +739,9 @@ struct MediaViewerPage: View {
         }
         // Reported from the LIVE state, not the committed one: a hold that only began at a
         // gesture's end would arrive after the page it was meant to hold had already turned.
-        .onChange(of: MediaZoom.holds(transform, pinch: pinch), initial: false) { _, holds in
+        // Reported on creation too: a page the lazy pager dropped and built again starts unzoomed,
+        // and its release is what clears the hold the dropped one left (`MediaViewerHolds`).
+        .onChange(of: MediaZoom.holds(transform, pinch: pinch), initial: true) { _, holds in
             onHoldsChange(holds)
         }
     }

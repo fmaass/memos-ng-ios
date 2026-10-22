@@ -162,7 +162,7 @@ struct PlaceSheetContents: View {
         .fullScreenCover(item: $presenting.viewingFromSheet) { selection in
             MediaViewerView(
                 selection: selection, source: .fixed(selection.pages), delete: delete,
-                hostAction: viewerAction)
+                hostAction: viewerAction, gone: gone)
         }
     }
 
@@ -230,15 +230,16 @@ extension View {
     ///
     /// The photographs of that moment, paged as a value: the list is what the reader was looking
     /// at, not a window onto a store that keeps loading. `action` is a trip Map's "Use as Cover",
-    /// nil on the Places tab (MEMNG-720).
+    /// nil on the Places tab (MEMNG-720). `gone` is what was deleted elsewhere since — a trip's
+    /// `members.deleted` — and leaves the open viewer as its own bin's page would (MEMNG-894).
     func placesViewer(
         _ viewing: Binding<MediaViewerSelection?>, action: MediaViewerHostAction? = nil,
-        delete: (@MainActor (String) async -> Bool)? = nil
+        delete: (@MainActor (String) async -> Bool)? = nil, gone: Set<String> = []
     ) -> some View {
         fullScreenCover(item: viewing) { selection in
             MediaViewerView(
                 selection: selection, source: .fixed(selection.pages), delete: delete,
-                hostAction: action)
+                hostAction: action, gone: gone)
         }
     }
 }

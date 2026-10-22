@@ -193,16 +193,61 @@ enum MediaViewerPager {
     }
 
     /// Whether a hold taken by a named page still stands: only while that page is one of the
-    /// pages shown.
+    /// pages shown AND the page on screen.
+    ///
+    /// The page on screen, because the filmstrip turns the pager without a swipe (MEMNG-861): a
+    /// picture magnified and then left by a tap or a scrub on the strip never reports a release
+    /// — it is still zoomed, just not current — so a slot naming it would leave the page the
+    /// strip went to unable to swipe or be dismissed. Gone back to, still magnified, it holds
+    /// again.
     ///
     /// A page deleted from the viewer's own overlay never reports its release, because its view
     /// is gone by the time there would be anything to report — so a slot naming it would keep
     /// the pager or the interactive dismissal switched off for every page that follows. The id
-    /// left behind in the slot is harmless once the answer is asked here: ids are unique, a
-    /// deleted one is kept out of the rendered list by `removed`, and the next page to take the
-    /// hold overwrites the slot.
-    static func stands(_ holder: MediaPage.ID?, among pages: [MediaPage]) -> Bool {
-        guard let holder else { return false }
+    /// left behind among the holders (`MediaViewerHolds`) is harmless once the answer is asked
+    /// here: ids are unique, and a deleted one is kept out of the rendered list by `removed`.
+    static func stands(
+        _ holder: MediaPage.ID?, among pages: [MediaPage], current: MediaPage.ID?
+    ) -> Bool {
+        guard let holder, holder == current else { return false }
         return pages.contains { $0.id == holder }
+    }
+}
+
+/// Which pages hold the pager and the interactive dismissal: one set of page ids per surface, each
+/// id put there and taken out only by its own page's report.
+///
+/// A set, not a single slot, because a magnified page stays magnified while it is not current
+/// (MEMNG-861): zoom one picture, tap a neighbour on the filmstrip, zoom that one too, tap back.
+/// A slot the second page overwrote would forget that the first still holds, and the first —
+/// still zoomed, so never reporting anything — would come back to a pager that swipes and a
+/// presentation that dismisses on a picture being examined.
+///
+/// The other half is the page's own report on creation (`MediaViewerPage` asks `onChange` with
+/// `initial: true`): the lazy pager drops an off-screen page and builds it again, unzoomed, when
+/// it is gone back to. That new page reports its release at once, which takes the id the old one
+/// left behind out of the set; without it the page would come back holding.
+struct MediaViewerHolds: Equatable {
+    var pager: Set<MediaPage.ID> = []
+    var dismissal: Set<MediaPage.ID> = []
+
+    mutating func report(_ holds: MediaZoom.Holds, by page: MediaPage.ID) {
+        if holds.pager { pager.insert(page) } else { pager.remove(page) }
+        if holds.dismissal { dismissal.insert(page) } else { dismissal.remove(page) }
+    }
+
+    func holdsPager(among pages: [MediaPage], current: MediaPage.ID?) -> Bool {
+        Self.stands(pager, among: pages, current: current)
+    }
+
+    func holdsDismissal(among pages: [MediaPage], current: MediaPage.ID?) -> Bool {
+        Self.stands(dismissal, among: pages, current: current)
+    }
+
+    private static func stands(
+        _ holders: Set<MediaPage.ID>, among pages: [MediaPage], current: MediaPage.ID?
+    ) -> Bool {
+        guard let current, holders.contains(current) else { return false }
+        return MediaViewerPager.stands(current, among: pages, current: current)
     }
 }

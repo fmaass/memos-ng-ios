@@ -156,7 +156,12 @@ struct TripMapScreen<Hero: View>: View {
             content(status, markers: markers, membership: membership)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .placesViewer($presenting.viewing, action: viewerAction, delete: deletePicture)
+        // Both of the map's viewers take the trip's deleted set: a delete in the Library or the
+        // Timeline that lands while one is open takes its page away (MEMNG-894).
+        .placesViewer(
+            $presenting.viewing, action: viewerAction, delete: deletePicture,
+            gone: members.deleted
+        )
         .onAppear { probe?.presenting = { presenting } }
         .onChange(of: TripMapPresentation.kept(markers, members: uids)) { _, kept in
             presenting.keep(only: kept, deleted: members.deleted)
@@ -194,7 +199,7 @@ struct TripMapScreen<Hero: View>: View {
         case .ready:
             PlacesMapStage(
                 markers: markers, control: map, presenting: $presenting,
-                viewerAction: viewerAction, delete: deletePicture
+                viewerAction: viewerAction, delete: deletePicture, gone: members.deleted
             )
             .background {
                 Color.clear

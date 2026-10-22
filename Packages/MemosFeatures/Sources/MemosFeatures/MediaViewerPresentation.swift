@@ -12,11 +12,13 @@ public enum MediaKind: Equatable, Sendable {
 
 /// One swipeable page of the full-screen viewer.
 ///
-/// It carries no position and no total, and that is a decision rather than an omission (MEMNG-189).
-/// The library's viewer pages over a list that GROWS as it is swiped, so any count printed on a
-/// page would be a count of what happened to be loaded — "3 of 60" over a library of 1,314 files.
-/// Photos, Google Photos and Immich all show nothing at all for the same reason, and none of them
-/// is worse for it: the swipe itself is what says where you are.
+/// A page carries no position and no total of its own. Where the reader is shows in the viewer's
+/// filmstrip instead (MEMNG-861, replacing the stance of MEMNG-189 on purpose): a row of the
+/// thumbnails the pager holds, the current one in the middle, read from the pager's reconciled
+/// list (`MediaViewerIndex`) — so a page deleted or appended moves the strip, not a number. Still
+/// no "3 of 60": the library's viewer pages over a list that GROWS as it is swiped, so a count
+/// would be a count of what happened to be loaded, and the strip shows that loaded window as a
+/// window rather than as a total.
 public struct MediaPage: Identifiable, Equatable, Sendable {
     public let attachment: MemoAttachment
     public let kind: MediaKind

@@ -457,6 +457,82 @@ extension TripMapTests {
             #expect(closed, "the viewer stayed open over a trip that was deleted")
         }
     }
+
+    // MARK: - a delete from elsewhere reaches the map's viewers (MEMNG-894)
+
+    /// The pages of the cover `presenter` has up, or nil while it has none with two or more.
+    private static func pages(over presenter: UIViewController?) -> Int? {
+        presenter.flatMap { TripProbe.pager(over: $0) }.map(TripProbe.pageCount)
+    }
+
+    /// The delete is NOT this viewer's bin: the trip's own run, sent from outside the viewer, is
+    /// what a delete in the trip's Library or Timeline view leaves in `members.deleted`.
+    private func deleteElsewhere(
+        _ uid: String, _ stores: (TripStore, TripMemberStore, Trip),
+        _ wire: TripMapWire
+    ) async -> Bool {
+        let outcome = await stores.1.delete(
+            [uid], using: wire.access.handle, baseURL: TripMapWire.baseURL)
+        return outcome?.deleted == [uid]
+    }
+
+    @Test("a picture deleted elsewhere leaves the viewer a trip pin opened, which stays up")
+    func aDeleteElsewhereLeavesThePinViewer() async throws {
+        let wire = TripMapWire(members: 3, located: ["t0", "t1", "t2"])
+        let stores = await stores(wire)
+        let probe = PlacesStageProbe()
+        let listed = [Self.marker("t0"), Self.marker("t1"), Self.marker("t2")]
+        let selection = try #require(PlacesPresentation.open("t0", in: listed))
+        let view = host(stores, wire, stores.2, probe: probe)
+        await CollectionsHost.with(view, height: 1400) { screen in
+            let staged = await onMap(screen, probe, staged: ["t0", "t1", "t2"])
+            #expect(staged, "staged \(probe.staged)")
+            probe.tap?(.viewer(selection))
+            let opened = await TripProbe.settled(seconds: 10) {
+                Self.pages(over: screen.host) == 3
+            }
+            #expect(
+                opened,
+                "precondition: a viewer over three, not \(Self.pages(over: screen.host) ?? 0)")
+            #expect(await deleteElsewhere("t1", stores, wire), "the delete did not land")
+            let dropped = await TripProbe.settled(seconds: 10) {
+                Self.pages(over: screen.host) == 2
+            }
+            let left = Self.pages(over: screen.host)
+            #expect(dropped, "the pin's viewer holds \(left ?? 0) pages after the delete")
+            #expect(probe.presenting?().viewing != nil, "the viewer closed over the two left")
+        }
+    }
+
+    @Test("a picture deleted elsewhere leaves the viewer over a trip map's sheet")
+    func aDeleteElsewhereLeavesTheSheetViewer() async throws {
+        let wire = TripMapWire(members: 3, located: ["t0", "t1", "t2"])
+        let stores = await stores(wire)
+        let probe = PlacesStageProbe()
+        let listed = [Self.marker("t0"), Self.marker("t1"), Self.marker("t2")]
+        let sheet = PlaceSheet(markers: listed, canZoomIn: false, members: [])
+        let selection = try #require(PlacesPresentation.open("t0", in: listed))
+        let view = host(stores, wire, stores.2, probe: probe)
+        await CollectionsHost.with(view, height: 1400) { screen in
+            let staged = await onMap(screen, probe, staged: ["t0", "t1", "t2"])
+            #expect(staged, "staged \(probe.staged)")
+            probe.tap?(.sheet(sheet))
+            probe.tap?(.viewer(selection))
+            // The viewer is presented BY the sheet, so its pager hangs off the sheet.
+            let opened = await TripProbe.settled(seconds: 10) {
+                Self.pages(over: screen.host.presentedViewController) == 3
+            }
+            #expect(opened, "precondition: a viewer over the sheet, over three")
+            #expect(await deleteElsewhere("t1", stores, wire), "the delete did not land")
+            let dropped = await TripProbe.settled(seconds: 10) {
+                Self.pages(over: screen.host.presentedViewController) == 2
+            }
+            let left = Self.pages(over: screen.host.presentedViewController)
+            #expect(dropped, "the sheet's viewer holds \(left ?? 0) pages after the delete")
+            #expect(
+                probe.presenting?().viewingFromSheet != nil, "the viewer closed over the two left")
+        }
+    }
 }
 
 // MARK: - Fixtures

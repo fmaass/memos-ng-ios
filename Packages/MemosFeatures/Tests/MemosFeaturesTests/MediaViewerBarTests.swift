@@ -108,14 +108,14 @@ struct MediaViewerBarTests {
         #expect(labels.contains("Info"))
     }
 
-    @Test("one tap hides the top row, the capsule and the bar; the next shows all three")
+    @Test("one tap hides the top row, the capsule, the strip and the bar; the next shows them")
     func chromeToggles() {
         var chrome = MediaViewerChrome()
-        #expect(chrome.shown == [.topRow, .dateCapsule, .bar])
+        #expect(chrome.shown == [.topRow, .dateCapsule, .filmstrip, .bar])
         chrome.tapped()
         #expect(chrome.shown.isEmpty)
         chrome.tapped()
-        #expect(chrome.shown == [.topRow, .dateCapsule, .bar])
+        #expect(chrome.shown == [.topRow, .dateCapsule, .filmstrip, .bar])
     }
 
     @Test("ownership is the file's: a memo of mine holding a picture that is not keeps the bin")

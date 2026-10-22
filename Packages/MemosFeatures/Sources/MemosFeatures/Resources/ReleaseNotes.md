@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (62)
+
+- The picture viewer now has a row of thumbnails above its bottom bar: tap one to jump to it, or drag across the row to scroll through the pictures.
+- The thumbnail row hides and comes back with the other controls on a single tap.
+- A picture deleted in the Library or Timeline while the viewer is open from a trip's map now disappears from that viewer instead of staying on screen.
+- Please open a collection, scrub through it with the thumbnail row, zoom into a picture, jump with the strip and come back, and check swiping still works.
+
 ## 2.4.0 (61)
 
 - Share now sends a phone-sized copy of each picture instead of the full original, so large camera files no longer fail to arrive in WhatsApp.

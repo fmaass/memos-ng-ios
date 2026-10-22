@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860, MEMNG-861) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -44,6 +44,9 @@ SCENES = [
     "860a-viewer-bar",
     "860b-viewer-date-capsule",
     "860c-viewer-hide-on-tap",
+    "861a-filmstrip-tap",
+    "861b-filmstrip-scrub",
+    "861c-filmstrip-hide",
 ]
 ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
 
@@ -369,6 +372,103 @@ class Driver:
         self.tap_at(201, 440, "the picture, to show the chrome")
         time.sleep(3)
         self.find("Info")   # the bar is back, or the scene stops here
+        self.tap("Close")
+        time.sleep(2.5)
+
+    # --- MEMNG-861: the viewer's filmstrip ------------------------------------------------------
+    def thumbnails(self):
+        """The strip's thumbnails on screen, left to right, and the index of the current one: the
+        only one drawn wider than the rest."""
+        thumbs = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").endswith(" thumbnail")
+            and 0 <= e["frame"]["x"] and e["frame"]["x"] + e["frame"]["width"] <= 402
+        ]
+        thumbs.sort(key=lambda e: e["frame"]["x"])
+        wide = [i for i, e in enumerate(thumbs) if e["frame"]["width"] > 40]
+        if len(wide) != 1:
+            raise RuntimeError("%d thumbnails on screen, %d of them current" % (len(thumbs), len(wide)))
+        return thumbs, wide[0]
+
+    def capsule(self):
+        """What the top of the viewer says of a date: the capsule names the current page's day and
+        time, and every Library picture was taken at an hour of its own, so a page change shows."""
+        return sorted(
+            e.get("AXLabel") for e in self.elements()
+            if "2026" in (e.get("AXLabel") or "") and e["frame"]["y"] < 250
+        )
+
+    def moved(self, before, why):
+        after = self.capsule()
+        log("capsule %s: %r -> %r" % (why, before, after))
+        if not after or after == before:
+            raise RuntimeError("the date capsule did not follow %s" % why)
+        return after
+
+    def scene_861a(self):
+        # MEMNG-861: one test holds the three strip scenes. This one opens the Library's fourth
+        # picture — the first would leave the strip's left half empty — then taps a thumbnail four
+        # to the right of the current one and, once the strip has centred it, one two to the left:
+        # the pager follows each.
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if len(tiles) < 4:
+            raise RuntimeError("%d tiles on screen, not the four the scene opens from" % len(tiles))
+        x, y = self.centre(tiles[3])
+        self.tap_at(x, y, "the fourth tile")
+        time.sleep(3.5)
+        thumbs, current = self.thumbnails()
+        if len(thumbs) < 8:
+            raise RuntimeError("only %d thumbnails on screen" % len(thumbs))
+        date = self.capsule()
+        for step, why in ((4, "a tap four to the right"), (-2, "a tap two to the left")):
+            thumbs, current = self.thumbnails()
+            if not 0 <= current + step < len(thumbs):
+                raise RuntimeError("no thumbnail %+d from the current one" % step)
+            x, y = self.centre(thumbs[current + step])
+            self.tap_at(x, y, "thumbnail %+d" % step)
+            time.sleep(3)
+            date = self.moved(date, why)
+        time.sleep(1)
+
+    def scene_861b(self):
+        # The scrub: a slow drag left along the strip moves on page by page under the finger, and
+        # the release leaves a picture current; a shorter drag right goes back part of the way.
+        time.sleep(2)
+        thumbs, current = self.thumbnails()
+        y = self.centre(thumbs[current])[1]
+        date = self.capsule()
+        self.swipe(330, y, 90, y, 2.5)
+        time.sleep(3)
+        date = self.moved(date, "the drag left")
+        self.swipe(110, y, 240, y, 1.5)
+        time.sleep(3)
+        self.moved(date, "the drag right")
+        thumbs, current = self.thumbnails()
+        x = self.centre(thumbs[current])[0]
+        if abs(x - 201) > 12:
+            raise RuntimeError("the current thumbnail rests at x=%.0f, not the middle" % x)
+        time.sleep(1)
+
+    def scene_861c(self):
+        # One tap on the picture takes the chrome and the strip away together, the next brings
+        # both back; the pause keeps the taps from reading as the double tap that zooms.
+        time.sleep(2)
+        self.thumbnails()
+        self.tap_at(201, 440, "the picture, to hide the chrome and the strip")
+        time.sleep(3)
+        left = [e for e in self.elements() if (e.get("AXLabel") or "").endswith(" thumbnail")]
+        if left:
+            raise RuntimeError("%d thumbnails still on screen with the chrome hidden" % len(left))
+        self.tap_at(201, 440, "the picture, to show the chrome and the strip")
+        time.sleep(3)
+        self.thumbnails()
+        self.find("Info")   # the bar is back with the strip, or the scene stops here
         self.tap("Close")
         time.sleep(2.5)
 

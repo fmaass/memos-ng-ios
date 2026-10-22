@@ -165,6 +165,29 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
+        "clip 861: the viewer's filmstrip tapped, scrubbed, and hidden with the chrome",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipViewerFilmstrip() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            // The Library's forty-eight pictures: enough for a strip wider than the screen.
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver opens the first picture and taps two thumbnails, one each side.
+            #expect(await ClipStage.scene("861a-filmstrip-tap"))
+            await ClipStage.settle(window, seconds: 1)
+            // A drag along the strip and a shorter one back, each released on a picture.
+            #expect(await ClipStage.scene("861b-filmstrip-scrub"))
+            await ClipStage.settle(window, seconds: 1)
+            // One tap hides the chrome and the strip together, the next shows both; then Close.
+            #expect(await ClipStage.scene("861c-filmstrip-hide"))
+        }
+    }
+
+    @Test(
         "clip 783: the Collections root's cards, each row scrolled, one opened",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )

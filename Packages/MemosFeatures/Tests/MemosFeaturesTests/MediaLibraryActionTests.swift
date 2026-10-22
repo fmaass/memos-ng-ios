@@ -673,9 +673,9 @@ struct MediaViewerPagerTests {
     func holdNeedsItsPage() {
         let shown = pages(["a", "b"])
 
-        #expect(MediaViewerPager.stands(nil, among: shown) == false)
-        #expect(MediaViewerPager.stands("a", among: shown) == true)
-        #expect(MediaViewerPager.stands("z", among: shown) == false)
+        #expect(MediaViewerPager.stands(nil, among: shown, current: "a") == false)
+        #expect(MediaViewerPager.stands("a", among: shown, current: "a") == true)
+        #expect(MediaViewerPager.stands("z", among: shown, current: "z") == false)
     }
 
     /// The page holding the pager and the dismissal is the page deleted from the viewer's own
@@ -690,7 +690,9 @@ struct MediaViewerPagerTests {
 
         let outcome = MediaViewerPager.removing(holder, from: source, current: "a")
         #expect(outcome.current == "b")
-        #expect(MediaViewerPager.stands(holder, among: outcome.pages) == false)
+        #expect(
+            MediaViewerPager.stands(holder, among: outcome.pages, current: outcome.current) == false
+        )
 
         let rendered = MediaViewerPager.visible(
             shown: outcome.pages,
@@ -699,7 +701,7 @@ struct MediaViewerPagerTests {
         )
         #expect(rendered.map(\.id) == ["b"])
         #expect(
-            MediaViewerPager.stands(holder, among: rendered) == false,
+            MediaViewerPager.stands(holder, among: rendered, current: outcome.current) == false,
             "the pager and the interactive dismissal stayed off after the holder was deleted"
         )
     }
