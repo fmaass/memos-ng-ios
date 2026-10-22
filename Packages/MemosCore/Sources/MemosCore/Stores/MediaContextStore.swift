@@ -17,6 +17,17 @@ public struct AttachmentFacts: Sendable, Equatable {
     public var captureInstant: Date?
     public var captureCivil: String?
     public var captureSource: String?
+    /// The name the file was uploaded under, when the server kept one.
+    public var filename: String?
+    /// Where the picture was taken, when the server knows; both or neither.
+    public var latitude: Double?
+    public var longitude: Double?
+    /// Where the server read the location from (`exif`, a memo's place, …).
+    public var locationSource: String?
+    /// Who added the file, by the name the server shows.
+    public var addedBy: String?
+    /// The camera, as the original's own EXIF recorded it; nil unless the server read one.
+    public var camera: CameraFacts?
 
     public init(
         uid: String,
@@ -27,7 +38,13 @@ public struct AttachmentFacts: Sendable, Equatable {
         duration: Double? = nil,
         captureInstant: Date? = nil,
         captureCivil: String? = nil,
-        captureSource: String? = nil
+        captureSource: String? = nil,
+        filename: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        locationSource: String? = nil,
+        addedBy: String? = nil,
+        camera: CameraFacts? = nil
     ) {
         self.uid = uid
         self.mime = mime
@@ -38,6 +55,48 @@ public struct AttachmentFacts: Sendable, Equatable {
         self.captureInstant = captureInstant
         self.captureCivil = captureCivil
         self.captureSource = captureSource
+        self.filename = filename
+        self.latitude = latitude
+        self.longitude = longitude
+        self.locationSource = locationSource
+        self.addedBy = addedBy
+        self.camera = camera
+    }
+}
+
+/// The camera fields of a file record (MEMNG-869). Every one is optional: a field the file did not
+/// carry, or carried in a form that is not a usable value, is nil.
+public struct CameraFacts: Sendable, Equatable {
+    public var make: String?
+    public var model: String?
+    public var lensModel: String?
+    public var fNumber: Double?
+    /// Seconds.
+    public var exposureTime: Double?
+    /// Millimetres.
+    public var focalLength: Double?
+    /// Exposure bias in EV.
+    public var exposureBias: Double?
+    public var iso: Int?
+
+    public init(
+        make: String? = nil,
+        model: String? = nil,
+        lensModel: String? = nil,
+        fNumber: Double? = nil,
+        exposureTime: Double? = nil,
+        focalLength: Double? = nil,
+        exposureBias: Double? = nil,
+        iso: Int? = nil
+    ) {
+        self.make = make
+        self.model = model
+        self.lensModel = lensModel
+        self.fNumber = fNumber
+        self.exposureTime = exposureTime
+        self.focalLength = focalLength
+        self.exposureBias = exposureBias
+        self.iso = iso
     }
 }
 
@@ -81,6 +140,9 @@ public final class MediaContextStore {
     public private(set) var memos: [String: Lookup<Memo>] = [:]
     /// The live opening's answer, and nothing older.
     private var answered: (opening: Opening, lookup: Lookup<AttachmentFacts>)?
+    /// Every record read under the held session, by file: a later opening of the same file shows
+    /// it without asking again (MEMNG-869). A favorites commit on a file forgets its record.
+    private var records: [String: AttachmentFacts] = [:]
     private var live: Opening?
 
     private var generation = 0
@@ -109,6 +171,15 @@ public final class MediaContextStore {
     }
 
     public func reports(to session: any SessionReporting) { self.session = session }
+
+    /// Forgets the record held for each file a favorites commit touches, so the next opening of
+    /// it reads again.
+    public func follow(_ favorites: FavoriteStore) {
+        favorites.observe { [weak self] commit in self?.forget(commit.uid) }
+    }
+
+    /// The record held for `uid` is no longer this file's truth: the next opening reads again.
+    public func forget(_ uid: String) { records[uid] = nil }
 
     /// The memo held for `uid`, or nil when none was found (yet) for the session now current.
     public func memo(_ uid: String) -> Memo? {
@@ -170,6 +241,10 @@ public final class MediaContextStore {
             return
         }
         guard attempted != opening else { return }
+        if let held = records[opening.uid] {
+            answered = (opening, .found(held))
+            return
+        }
         attempted = opening
         nextToken += 1
         let token = nextToken
@@ -187,6 +262,7 @@ public final class MediaContextStore {
         memos = [:]
         answered = nil
         attempted = nil
+        records = [:]
         memoFlights = [:]
         factFlight = nil
     }
@@ -240,6 +316,7 @@ public final class MediaContextStore {
                 return
             }
             answered = (opening, .found(read))
+            records[opening.uid] = read
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         } catch {
             guard issued == generation else { return }
@@ -293,7 +370,19 @@ public final class MediaContextStore {
                 duration: meta.duration,
                 captureInstant: meta.captureInstant,
                 captureCivil: meta.captureCivil,
-                captureSource: meta.captureSource
+                captureSource: meta.captureSource,
+                filename: meta.filename,
+                latitude: meta.latitude,
+                longitude: meta.longitude,
+                locationSource: meta.locationSource,
+                addedBy: meta.addedBy,
+                camera: meta.camera.map {
+                    CameraFacts(
+                        make: $0.make, model: $0.model, lensModel: $0.lensModel,
+                        fNumber: $0.fNumber, exposureTime: $0.exposureTimeS,
+                        focalLength: $0.focalLengthMm, exposureBias: $0.exposureBiasEv,
+                        iso: $0.iso)
+                }
             )
         case .unprocessableContent: throw APIError.server(status: 422)
         case .serviceUnavailable: throw APIError.fromStatus(503)

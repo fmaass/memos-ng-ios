@@ -64,6 +64,8 @@ struct MediaViewerView: View {
     @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
     /// Why the last heart tap wrote nothing (somebody else's picture), until the page changes.
     @State private var heartNotice: String?
+    /// The place names the Info sheet has looked up, one lookup per file while the viewer is up.
+    @State private var places = PlaceNameCache()
     /// The download the menu's slow action starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
     /// The page the pager has settled on — the identity of the page, not an index, because a
@@ -253,7 +255,12 @@ struct MediaViewerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Group {
                 if let date = currentContext?.date {
+                    // The date is the Info sheet's first row, so a tap on it opens the sheet.
                     MediaViewerDateCapsule(date: date)
+                        .contentShape(Capsule())
+                        .onTapGesture { openCurrentInfo() }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { openCurrentInfo() }
                 }
             }
             .opacity(shown.contains(.dateCapsule) ? 1 : 0)
@@ -289,6 +296,11 @@ struct MediaViewerView: View {
         }
     }
 
+    private func openCurrentInfo() {
+        guard let page = pages.first(where: { $0.id == currentPage }) else { return }
+        openInfo(page)
+    }
+
     private func openInfo(_ page: MediaPage) {
         let store: MediaContextStore
         if let context {
@@ -297,6 +309,7 @@ struct MediaViewerView: View {
             store = MediaContextStore(
                 onUnauthorized: { [session] refusal in await session.handle(refusal) })
             store.reports(to: session)
+            if let favorites { store.follow(favorites) }
         } else {
             store = MediaContextStore()
         }
@@ -315,6 +328,7 @@ struct MediaViewerView: View {
             opening: subject.opening,
             handle: session?.activeHandle,
             baseURL: session?.serverBaseURL,
+            places: places,
             showMemo: { uid in
                 inspecting = nil
                 dismiss()
