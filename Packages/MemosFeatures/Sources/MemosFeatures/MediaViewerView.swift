@@ -343,6 +343,7 @@ struct MediaViewerView: View {
                 },
                 // Handed to the menu here and never to `MediaTileMenu`'s list: only the host that
                 // injected it offers it, so a library tile never grows a trip's row (MEMNG-768).
+                // The same host hands it to its grid's long press too (`LibraryGrid.hostAction`).
                 host: hostAction.flatMap { action in
                     page.map { page in
                         MediaViewerHostItem(action: action, attachment: page.attachment) {

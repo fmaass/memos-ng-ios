@@ -277,8 +277,9 @@ struct TripView: View {
 
     /// What a viewer opened from trip `id` — its grid, or its Map's pins and sheet — offers on the
     /// page on screen: that picture becomes the trip's cover on the server (`TripManage.setCover`,
-    /// a `TripStore.update`). The trip's viewers are the only ones handed it; the Library's, the
-    /// Timeline's, a memo's and the Places tab's are handed nil.
+    /// a `TripStore.update`). The trip's viewers, and its grid's long press (MEMNG-902), are the
+    /// only ones handed it; the Library's, the Timeline's, a memo's and the Places tab's are
+    /// handed nil.
     static func useAsCover(
         _ uid: String, in trips: TripStore, manage: TripManage,
         access: @escaping () -> CollectionsAccess?
@@ -978,7 +979,10 @@ struct TripView: View {
             // A trip is one block whatever the device prefers (MEMNG-740); any other collection
             // is cut as the Library's All is (MEMNG-827).
             grouping: scope.isTrip ? .flat : preferences.allGrouping,
-            preferences: preferences
+            preferences: preferences,
+            // The viewer's Use as Cover on the tile's long press too (MEMNG-902): one action, so
+            // the menu and the viewer cannot write a cover two ways.
+            hostAction: coverAction
         )
         .environment(\.signedURLRefresher, refresher)
         // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the

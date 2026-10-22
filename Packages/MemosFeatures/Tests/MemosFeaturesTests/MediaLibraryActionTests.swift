@@ -476,6 +476,21 @@ extension MediaViewerActionControlTests {
 
         #expect(log.value == ["cover p2", "closed"])
     }
+
+    /// A collection's grid hands its tiles the same row (MEMNG-902), on the tiles its viewer
+    /// pages: a picture and a clip, never a document, and nothing at all from the Library tab.
+    @Test("a tile's long press carries the host's row on a picture and a clip, never a document")
+    func aTileCarriesTheHostRowWhereTheViewerDoes() {
+        let log = Box<[String]>([])
+        let action = Self.cover(log)
+
+        LibraryGrid.hostItem(for: photo("p2"), action: action)?.tapped()
+        LibraryGrid.hostItem(for: clip("c3"), action: action)?.tapped()
+
+        #expect(log.value == ["cover p2", "cover c3"])
+        #expect(LibraryGrid.hostItem(for: document("d1"), action: action) == nil)
+        #expect(LibraryGrid.hostItem(for: photo("p2"), action: nil) == nil, "the Library tab's")
+    }
 }
 
 /// MEMNG-189: the viewer continues the grid's cursor.

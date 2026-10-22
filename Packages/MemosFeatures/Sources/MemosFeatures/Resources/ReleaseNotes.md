@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (63)
+
+- Use as Cover is now in the long-press menu of a picture inside a trip, tag, month or year, so a cover can be set straight from the grid.
+- The Library tab's long-press menu stays as it was, because the Library has no cover.
+- Please long-press a picture in a trip and in a tag, choose Use as Cover, and check the cover and the collection's card both change.
+
 ## 2.4.0 (62)
 
 - The picture viewer now has a row of thumbnails above its bottom bar: tap one to jump to it, or drag across the row to scroll through the pictures.

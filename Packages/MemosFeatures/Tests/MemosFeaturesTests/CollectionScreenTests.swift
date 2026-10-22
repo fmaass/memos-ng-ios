@@ -72,7 +72,8 @@ struct CollectionScreenTests {
     private func screen(
         _ stores: (TripStore, TripMemberStore), _ wire: TripWire, _ scope: CollectionScope,
         source: IdentitySource? = nil, dock: AppDock? = nil, zone: TimeZone = Self.utc,
-        preferences: LibraryPreferences = Self.preferences()
+        preferences: LibraryPreferences = Self.preferences(),
+        chosenCovers: CollectionCoverStore? = nil
     ) -> some View {
         let access = wire.access
         let source = source ?? IdentitySource(alice)
@@ -80,7 +81,8 @@ struct CollectionScreenTests {
             NavigationStack {
                 TripView(
                     scope: scope, openedUnder: alice, trips: stores.0, memberStore: stores.1,
-                    identity: who, access: { access }, modes: modes, preferences: preferences)
+                    identity: who, access: { access }, modes: modes, chosenCovers: chosenCovers,
+                    preferences: preferences)
             }
         }
         .environment(dock ?? AppDock())
@@ -151,6 +153,40 @@ struct CollectionScreenTests {
             #expect(TripProbe.photos(in: screen.window).count == 5, "precondition: the grid landed")
             #expect(screen.element(labelled: TripView.manageButton) == nil, "a tag has Manage")
         }
+    }
+
+    /// A tag's tile carries its viewer's Use as Cover on a long press (MEMNG-902), through the
+    /// same write: the scripted server has no cover route, so the write it sends is refused and
+    /// the hero's error line says so, as the viewer's row does. Favorites offers none because its
+    /// `coverAction` is nil ("a tag's, a month's and a year's viewer offers Use as Cover").
+    @Test("a tag's tile offers Use as Cover on its long press, through the viewer's write")
+    func longPressUseAsCover() async {
+        let wire = TripWire()
+        let covers = CollectionCoverStore()
+        let tagged = screen(stores(), wire, Self.tag, chosenCovers: covers)
+        await CollectionsHost.with(tagged, height: 3000) { screen in
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(grid, "control: the tag's grid: \(TripProbe.tiles(in: screen.window))")
+            // The menu is asked again until a tile drawn a moment ago answers for it.
+            var rows: [UIAction] = []
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, rows.isEmpty {
+                rows = LibraryMenuProbe.tileRows("p1", in: screen.window)
+                if rows.isEmpty { await screen.settle(turns: 5) }
+            }
+            let titles = rows.map(\.title)
+            let showMemo = MediaTileAction.showMemo(uid: "").title
+            #expect(titles.contains(showMemo), "control: p1's long-press menu: \(titles)")
+            let cover = rows.first { $0.title == TripView.useAsCoverButton }
+            #expect(cover != nil, "the tag's tile offers no Use as Cover: \(titles)")
+            cover?.performWithSender(nil, target: nil)
+            let refused = await screen.until(seconds: 10) {
+                CollectionsHost.identified(TripView.errorLineID, in: screen.window)
+            }
+            #expect(refused, "no error line: \(TripProbe.labels(in: screen.window))")
+        }
+        let put = "PUT set_collection_cover_api_collection_covers__kind___key__put"
+        #expect(wire.transport.writes == [put], "the tile's row wrote: \(wire.transport.writes)")
     }
 
     @Test("an automatic collection offers no Trip Dates; a trip does")

@@ -989,6 +989,10 @@ struct LibraryGrid: View {
     /// and the trip and collection screens follow it with nothing passed on. A test hands in its
     /// own, over a scratch suite.
     var preferences = LibraryPreferences.shared
+    /// The host's one extra row on a tile's long press: the action its viewer offers on a page
+    /// (`MediaViewerHostAction`), handed in by the collection that injected it and nil from the
+    /// Library tab, so the Library's tile never grows a collection's row (MEMNG-902).
+    var hostAction: MediaViewerHostAction?
     /// The way to a memo from a tab that cannot open one. Optional: a preview or a test host has
     /// no router, and a missing environment value must be a missing action, not a crash.
     @Environment(MemoJump.self) private var jump: MemoJump?
@@ -1503,6 +1507,19 @@ struct LibraryGrid: View {
                 }
             )
         }
+        if let host = Self.hostItem(for: attachment, action: hostAction) { host }
+    }
+
+    /// The host's row on this tile's menu, last as it is in the viewer's: only on a tile the
+    /// viewer pages — a picture or a clip — because the row is the viewer's own, and a document
+    /// never opens there. Nothing to close afterwards: a context menu closes itself.
+    static func hostItem(
+        for attachment: MemoAttachment, action: MediaViewerHostAction?
+    ) -> MediaViewerHostItem? {
+        guard let action,
+            MediaLibraryPresentation.isOpenable(MediaLibraryPresentation.tileKind(for: attachment))
+        else { return nil }
+        return MediaViewerHostItem(action: action, attachment: attachment) {}
     }
 
     /// The picture a long press lifts off the grid: the same file at the tier the viewer opens at,

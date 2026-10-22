@@ -2646,6 +2646,47 @@ extension TripScreenRenderTests {
             #expect(!CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window))
         }
     }
+
+    /// The owner looked for Use as Cover on a picture's long press inside the trip (MEMNG-902):
+    /// the tile's menu carries the viewer's row, and its row, performed as the open menu performs
+    /// it, writes the trip's cover and the hero draws it.
+    @Test("a trip tile's long press offers Use as Cover, and it makes that picture the hero's")
+    func longPressUseAsCoverReachesTheHero() async {
+        let wire = TripWire()
+        let stores = stores()
+        let record = await filed(
+            stores, wire, "Portugal 2026", tag: "portugal2026", excluding: ["p4"])
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let drawn = await screen.until { TripProbe.tiles(in: screen.window).count == 4 }
+            #expect(drawn, "the trip was not drawn: \(TripProbe.tiles(in: screen.window))")
+            let first = await screen.until {
+                CollectionsHost.identified(TripView.coverIdentifier("p0"), in: screen.window)
+            }
+            #expect(first, "control: the hero does not start on the first member")
+            // The menu is asked again until a tile drawn a moment ago answers for it.
+            var rows: [UIAction] = []
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline, rows.isEmpty {
+                rows = LibraryMenuProbe.tileRows("p2", in: screen.window)
+                if rows.isEmpty { await screen.settle(turns: 5) }
+            }
+            let titles = rows.map(\.title)
+            // The control: it is the tile's own menu that was read, its shared row there.
+            #expect(
+                titles.contains(MediaTileAction.showMemo(uid: "").title),
+                "p2's long-press menu: \(titles); \(LibraryMenuProbe.describe(screen.window))")
+            let cover = rows.first { $0.title == TripView.useAsCoverButton }
+            #expect(cover != nil, "p2's long press offers no Use as Cover: \(titles)")
+            cover?.performWithSender(nil, target: nil)
+            let shown = await screen.until(seconds: 10) {
+                CollectionsHost.identified(TripView.coverIdentifier("p2"), in: screen.window)
+            }
+            #expect(shown, "the hero does not draw the chosen p2")
+        }
+        let row = wire.transport.trips.rows.first { $0.uid == record.uid }
+        #expect(row?.cover == "p2", "the server's cover: \(row?.cover ?? "none")")
+        #expect(wire.transport.trips.calls(TripRows.patch).count == 1)
+    }
 }
 
 // MARK: - Select mode's Remove from trip (MEMNG-722)

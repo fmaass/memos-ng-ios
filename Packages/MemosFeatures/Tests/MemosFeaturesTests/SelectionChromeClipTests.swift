@@ -202,6 +202,52 @@ extension MediaImageLoaderTests {
         }
     }
 
+    @Test(
+        "clip 902: a trip's and a tag's tile long-pressed to Use as Cover; the hero follows",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipCoverLongPress() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .collections, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, TripRows.list, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver opens Portugal, long-presses a tile that is not the cover and chooses
+            // Use as Cover, then goes Back.
+            #expect(await ClipStage.scene("902a-trip-cover-longpress"))
+            let trip = transport.trips.rows.first { $0.title == "Portugal" }?.cover
+            #expect(
+                trip != nil && trip != "portugal2026-0",
+                "the trip's record still names \(trip ?? "no cover")")
+            #expect(transport.trips.calls(TripRows.patch).count == 1)
+            await ClipStage.settle(window, seconds: 1)
+            // The same on the #garden tag: the household's chosen cover is written.
+            #expect(await ClipStage.scene("902b-tag-cover-longpress"))
+            let tag = transport.chosenCover("tag/garden")
+            #expect(
+                tag?.hasPrefix("garden-") == true, "the tag's chosen cover is \(tag ?? "none")")
+        }
+    }
+
+    @Test(
+        "clip 902: a Library tile's long press offers no Use as Cover",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipLibraryNoCover() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver long-presses a tile, finds Share and no Use as Cover, and closes the menu.
+            #expect(await ClipStage.scene("902c-library-no-cover"))
+            #expect(transport.trips.writeCalls.isEmpty)
+            #expect(transport.served(ClipServer.setCover) == 0)
+        }
+    }
+
     /// The real tabs over `transport`, signed in, in a key window over the whole screen.
     private func clipHost(opening tab: MainTab, _ transport: ClipServer) async -> UIWindow {
         let session = SessionStore(
@@ -374,7 +420,11 @@ private actor ClipPaint: MediaTransport {
         -> (Data, URLResponse)
     {
         let url = request.url ?? URL(string: "https://memos.example.invalid/")!
-        let pick = url.path.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
+        // Keyed on the picture, never its tier (`/api/attachments/<uid>/<tier>`): a hero, a card
+        // and a lifted preview draw another tier than the grid's tile, and MEMNG-902's clip shows
+        // the hero taking the long-pressed tile's picture, so every tier paints it alike.
+        let picture = url.deletingLastPathComponent().path
+        let pick = picture.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
         let response = HTTPURLResponse(
             url: url, statusCode: 200, httpVersion: "HTTP/1.1",
             headerFields: ["Content-Type": "image/png"])!
@@ -439,9 +489,13 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
     nonisolated static let buckets = "attachment_buckets_api_attachments_buckets_get"
     nonisolated static let memos = "list_memos_api_memos_get"
     nonisolated static let markers = "list_markers_api_map_markers_get"
+    nonisolated static let listCovers = "list_collection_covers_api_collection_covers_get"
+    nonisolated static let setCover = "set_collection_cover_api_collection_covers__kind___key__put"
 
     private nonisolated let lock = NSLock()
     private nonisolated(unsafe) var operations: [String] = []
+    /// The household's chosen covers, `<kind>/<key>` to a picture (MEMNG-902's clip).
+    private nonisolated(unsafe) var covers: [String: String] = [:]
     nonisolated let trips = TripRows()
 
     nonisolated init() {
@@ -461,6 +515,10 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
 
     nonisolated func served(_ operation: String) -> Int {
         lock.withLock { operations.filter { $0 == operation }.count }
+    }
+
+    nonisolated func chosenCover(_ key: String) -> String? {
+        lock.withLock { covers[key] }
     }
 
     nonisolated func send(
@@ -501,6 +559,24 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
             return Self.json(#"{"items":[],"nextCursor":null,"totalCount":null}"#)
         case Self.markers:
             return Self.json(#"{"markers":[]}"#)
+        case Self.listCovers:
+            let rows = lock.withLock { covers }.sorted { $0.key < $1.key }.map { entry in
+                let parts = entry.key.split(separator: "/", maxSplits: 1).map(String.init)
+                return Self.cover(parts[0], parts[1], entry.value)
+            }
+            return Self.json("[\(rows.joined(separator: ","))]")
+        case Self.setCover:
+            // `/api/collection-covers/<kind>/<key>`, the picture in the body.
+            let parts = (URLComponents(string: path)?.path ?? path).split(separator: "/")
+                .map(String.init)
+            guard parts.count == 4, let body else {
+                return (HTTPResponse(status: .badRequest), nil)
+            }
+            let data = try await Data(collecting: body, upTo: 1 << 16)
+            let fields = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let uid = fields?["attachmentUid"] as? String ?? ""
+            lock.withLock { covers["\(parts[2])/\(parts[3])"] = uid }
+            return Self.json(Self.cover(parts[2], parts[3], uid))
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
@@ -551,6 +627,10 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
             "downloadUrl":"/api/attachments/\(uid)/download",\
             "printUrl":"/api/attachments/\(uid)/print"}
             """
+    }
+
+    private nonisolated static func cover(_ kind: String, _ key: String, _ uid: String) -> String {
+        #"{"kind":"\#(kind)","key":"\#(key)","attachmentUid":"\#(uid)"}"#
     }
 
     private nonisolated static func bucket(_ key: String, count: Int, cover: String) -> String {

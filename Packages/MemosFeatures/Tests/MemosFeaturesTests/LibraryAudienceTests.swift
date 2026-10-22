@@ -146,6 +146,40 @@ enum LibraryMenuProbe {
         return false
     }
 
+    /// The rows of the long-press menu on the grid tile drawing `uid` (MEMNG-902), asked of every
+    /// interaction whose view holds the tile's centre, at that centre: one interaction can answer
+    /// for a whole hosting view by location. Empty when no tile draws `uid`.
+    static func tileRows(_ uid: String, in window: UIWindow) -> [UIAction] {
+        guard let frame = tileFrame(uid, in: window) else { return [] }
+        let centre = CGPoint(x: frame.midX, y: frame.midY)
+        for holder in holders(in: window) where holder.interaction != nil {
+            let point = holder.view.convert(centre, from: window)
+            guard holder.view.bounds.contains(point),
+                let menu = menu(of: holder, at: point)
+            else { continue }
+            let rows = leaves(menu).compactMap { $0 as? UIAction }
+            if !rows.isEmpty { return rows }
+        }
+        return []
+    }
+
+    /// Where the tile identified as `uid`'s is, in the window's coordinates.
+    private static func tileFrame(_ uid: String, in window: UIWindow) -> CGRect? {
+        let identifier = LibraryGrid.tileIdentifier(uid)
+        var stack: [Any] = [window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.responds(to: Selector(("accessibilityIdentifier"))),
+                object.value(forKey: "accessibilityIdentifier") as? String == identifier
+            {
+                return window.convert(object.accessibilityFrame, from: nil)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
     /// What holds a menu on screen, for a failure's message: each holder's kind, its button
     /// menu, its interaction's configuration and the rows either gave.
     static func describe(_ window: UIWindow) -> String {
@@ -196,11 +230,16 @@ enum LibraryMenuProbe {
     /// The configuration the holder's interaction would open, asked where the header's Filter
     /// button is drawn whenever that point is inside it: one interaction can answer for a whole
     /// hosting view by location.
-    private static func configuration(of holder: Holder) -> UIContextMenuConfiguration? {
+    /// `at` asks at that point instead (`tileRows`).
+    private static func configuration(
+        of holder: Holder, at asked: CGPoint? = nil
+    ) -> UIContextMenuConfiguration? {
         guard let interaction = holder.interaction else { return nil }
         let view = holder.view
         var point = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
-        if let window = view.window, let filter = filterFrame(in: window) {
+        if let asked {
+            point = asked
+        } else if let window = view.window, let filter = filterFrame(in: window) {
             let inside = view.convert(CGPoint(x: filter.midX, y: filter.midY), from: window)
             if view.bounds.contains(inside) { point = inside }
         }
@@ -208,7 +247,7 @@ enum LibraryMenuProbe {
             interaction, configurationForMenuAtLocation: point)
     }
 
-    private static func menu(of holder: Holder) -> UIMenu? {
+    private static func menu(of holder: Holder, at asked: CGPoint? = nil) -> UIMenu? {
         typealias Provider = @convention(block) ([UIMenuElement]) -> UIMenu?
         let button = holder.view as? UIButton
         if let menu = button?.menu, !leaves(menu).isEmpty { return menu }
@@ -216,7 +255,7 @@ enum LibraryMenuProbe {
         // sends it on the tap that opens the menu.
         button?.sendActions(for: .menuActionTriggered)
         if let menu = button?.menu, !leaves(menu).isEmpty { return menu }
-        guard let configuration = configuration(of: holder) else { return nil }
+        guard let configuration = configuration(of: holder, at: asked) else { return nil }
         if let interaction = holder.interaction, let button {
             // Or as the menu is displayed: told, read, then told it ended.
             interaction.delegate?.contextMenuInteraction?(

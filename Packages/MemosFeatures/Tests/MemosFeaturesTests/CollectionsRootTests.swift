@@ -1649,6 +1649,28 @@ extension CollectionsRootRenderTests {
                 "the Library's viewer offers a trip's Use as Cover")
         }
     }
+
+    /// The Library is no collection: its tiles' long press never carries a collection's row
+    /// (MEMNG-902), on a menu that is otherwise there.
+    @Test("a Library tile's long press offers no Use as Cover")
+    func theLibrarysTileMenuHasNoCoverAction() async {
+        let transport = CollectionsTransport()
+        let session = signedOutSession(transport)
+        await session.enteredForeground()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
+        #expect(session.state.user?.subject == "fabian", "precondition: signed in")
+        let tabs = MainTabView(opening: .library).environment(session)
+        await CollectionsHost.with(tabs) { screen in
+            let tiles = await screen.until { !TripProbe.tiles(in: screen.window).isEmpty }
+            #expect(tiles, "the Library drew no tile")
+            let uid = TripProbe.tiles(in: screen.window).first ?? ""
+            let titles = LibraryMenuProbe.tileRows(uid, in: screen.window).map(\.title)
+            #expect(!titles.isEmpty, "control: \(uid)'s long-press menu was not read")
+            #expect(
+                !titles.contains(TripView.useAsCoverButton),
+                "the Library's tile offers a collection's Use as Cover: \(titles)")
+        }
+    }
 }
 
 /// The root over the server's trips (MEMNG-754): its list, its failure, and Create's one write.

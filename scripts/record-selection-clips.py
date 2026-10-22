@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860, MEMNG-861) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860, MEMNG-861, MEMNG-902) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -47,6 +47,9 @@ SCENES = [
     "861a-filmstrip-tap",
     "861b-filmstrip-scrub",
     "861c-filmstrip-hide",
+    "902a-trip-cover-longpress",
+    "902b-tag-cover-longpress",
+    "902c-library-no-cover",
 ]
 ENV = dict(os.environ, PATH="/opt/homebrew/bin:" + os.environ.get("PATH", "/usr/bin:/bin"))
 
@@ -72,7 +75,17 @@ class Driver:
 
     def elements(self):
         """Every accessibility element on screen; each describe is kept for the README's evidence."""
-        text = self.idb("ui", "describe-all", "--json")
+        # A fresh device's system banner ("Ready for Apple Intelligence") makes describe-all fail
+        # with "No translation object" until it slides away by itself: asked again, never touched.
+        for attempt in range(10):
+            try:
+                text = self.idb("ui", "describe-all", "--json")
+                break
+            except RuntimeError as error:
+                if "No translation object" not in str(error) or attempt == 9:
+                    raise
+                log("describe-all: no translation object, asked again in 1 s")
+                time.sleep(1)
         self.step += 1
         with open(os.path.join(self.out, "ax", "%s-%02d.json" % (self.scene, self.step)), "w") as f:
             f.write(text)
@@ -471,6 +484,125 @@ class Driver:
         self.find("Info")   # the bar is back with the strip, or the scene stops here
         self.tap("Close")
         time.sleep(2.5)
+
+    # --- MEMNG-902: Use as Cover on a tile's long press ------------------------------------------
+    def grid_tiles(self):
+        """The grid's picture tiles wholly on screen, top to bottom, left to right."""
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        return tiles
+
+    def hero_cover(self):
+        """The uid the collection's hero draws, from its identifier (`trip-cover-<uid>`, or
+        `collection-carried-cover-<uid>` while the card's thumbnail stands in), or None."""
+        for e in self.elements():
+            ident = e.get("AXUniqueId") or ""
+            for prefix in ("trip-cover-", "collection-carried-cover-"):
+                if ident.startswith(prefix):
+                    return ident[len(prefix):]
+        return None
+
+    def long_press(self, element, why):
+        x, y = self.centre(element)
+        log("long press %s at %.0f,%.0f" % (why, x, y))
+        self.idb("ui", "tap", "%.0f" % x, "%.0f" % y, "--duration", "1.5")
+
+    def menu_labels(self):
+        return [e.get("AXLabel") for e in self.elements() if e.get("AXLabel")]
+
+    def cover_by_long_press(self):
+        """Long-presses a tile that is not the hero's picture, chooses Use as Cover, and requires
+        the hero to draw that picture. A tag's grid is cut by day, one wide tile a day, so the
+        second picture may sit under the bar: a short scroll brings it up, and a scroll back to
+        the top shows the hero once the cover is chosen."""
+        time.sleep(1)
+        before = self.hero_cover()
+        scrolled = False
+        for _ in range(2):
+            tiles = [
+                e for e in self.grid_tiles()
+                if (e.get("AXUniqueId") or "").startswith("library-tile:")
+                and e.get("AXUniqueId") != "library-tile:%s" % before
+                and 200 <= self.centre(e)[1] <= 700
+            ]
+            if tiles:
+                break
+            self.swipe(200, 650, 200, 400, 0.8)
+            scrolled = True
+            time.sleep(2)
+        if not tiles:
+            raise RuntimeError("no tile other than the hero's %r on screen" % before)
+        tile = tiles[0]
+        chosen = tile["AXUniqueId"].split(":", 1)[1]
+        time.sleep(1.5)
+        self.long_press(tile, "tile %s" % chosen)
+        time.sleep(2.5)
+        self.find("Use as Cover")
+        log("long-press menu: %r" % self.menu_labels())
+        time.sleep(1.5)
+        self.tap("Use as Cover")
+        time.sleep(3)
+        if scrolled:
+            self.swipe(200, 300, 200, 700, 0.8)
+            time.sleep(2.5)
+        after = self.hero_cover()
+        log("hero cover %r -> %r (chosen %r)" % (before, after, chosen))
+        if after != chosen:
+            raise RuntimeError("the hero draws %r, not the chosen %r" % (after, chosen))
+        time.sleep(2)
+
+    def scene_902a(self):
+        # One test holds the two collection scenes: this one opens Portugal, 902b the #garden tag.
+        time.sleep(2)
+        self.tap("Portugal")
+        time.sleep(3.5)
+        self.cover_by_long_press()
+        # iOS 26.5 lists no Back in describe-all (see find_in_bar): where iOS draws it.
+        self.tap_at(32, 80, "Back by place")
+        time.sleep(3)
+
+    def scene_902b(self):
+        time.sleep(1.5)
+        row = self.find("#garden")
+        if self.centre(row)[1] > 700:
+            self.swipe(200, 700, 200, 380, 0.6)
+            time.sleep(1.5)
+        self.tap("#garden")
+        time.sleep(3.5)
+        self.cover_by_long_press()
+        # iOS 26.5 lists no Back in describe-all (see find_in_bar): where iOS draws it.
+        self.tap_at(32, 80, "Back by place")
+        time.sleep(3)
+
+    def scene_902c(self):
+        # The Library's tile: its long-press menu holds Share and no Use as Cover.
+        time.sleep(2)
+        tiles = self.grid_tiles()
+        if len(tiles) < 2:
+            raise RuntimeError("fewer than two tiles on screen: %d" % len(tiles))
+        tile = tiles[1]
+        self.long_press(tile, "tile %r" % tile.get("AXLabel"))
+        time.sleep(2.5)
+        self.find("Share")
+        labels = self.menu_labels()
+        log("long-press menu: %r" % labels)
+        if "Use as Cover" in labels:
+            raise RuntimeError("the Library's tile offers Use as Cover: %r" % labels)
+        time.sleep(3)
+        # A touch on the dimmed screen away from the lifted tile and its menu closes the menu.
+        y = 820 if self.centre(tile)[1] < 437 else 140
+        self.tap_at(201, y, "outside the menu")
+        time.sleep(2)
+        try:
+            self.find("Save Original", attempts=1)
+        except RuntimeError:
+            time.sleep(1)
+            return
+        raise RuntimeError("the long-press menu is still open after a touch outside it")
 
     def fold(self):
         """A short drag down that stays inside the trip's few points of travel: a longer one
