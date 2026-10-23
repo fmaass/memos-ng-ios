@@ -37,6 +37,40 @@ private actor DelayedEntry: WholeAnswerHandling {
     func adoptionReplayed() async { await engine.adoptionReplayed() }
 }
 
+/// `DelayedEntry` that also writes down, in the order they reach it, what the delegate hands the
+/// engine — so a test can say an end was told only once the answer replayed before it had landed.
+private actor RecordingDelayedEntry: WholeAnswerHandling {
+    enum Event: Equatable, Sendable {
+        case answerArrived, answerLanded, replayed, unreadableEnded
+    }
+
+    private let engine: OutboxEngine
+    private let gate: TestGate
+    private(set) var events: [Event] = []
+
+    init(_ engine: OutboxEngine, gate: TestGate) {
+        self.engine = engine
+        self.gate = gate
+    }
+
+    func handle(_ answer: WholeAnswer) async {
+        events.append(.answerArrived)
+        await gate.pass()
+        await engine.handle(answer)
+        events.append(.answerLanded)
+    }
+
+    func unreadableTaskEnded() async {
+        events.append(.unreadableEnded)
+        await engine.unreadableTaskEnded()
+    }
+
+    func adoptionReplayed() async {
+        events.append(.replayed)
+        await engine.adoptionReplayed()
+    }
+}
+
 /// The engine behind a counter: a task's end reaches the engine from the session's callback on a
 /// task of its own, and this says when the engine has taken it. Only then can the engine's own
 /// `untilQuiescent` speak for the pass that end asked for — before, it may not have been asked.
@@ -3673,9 +3707,18 @@ struct WholePilotChecklistTests {
     /// Line 18: a task nobody can read ends while adoption is replaying a buffered success. The
     /// file that success confirmed is never handed off again; the uncarried one is resumed.
     ///
-    /// A regression test only: it is not proven to reach that window. It stayed green with the
-    /// adoption fence removed (mutations L18 and L18b), so what protects the line is still open
-    /// (MEMNG-674).
+    /// Three things keep that file, each enough on its own; the end-only witness this replaced
+    /// stayed green with all three removed, because no pass ever ran inside the window (MEMNG-674).
+    /// Two are witnessed here, each red on a compiling build with it alone removed:
+    /// - the delegate holds the end back until the replay is over (`complete`, mid-replay): the
+    ///   entry's record shows the end told after the replayed answer landed. The clean side is
+    ///   deterministic; the catch is not, since without the hold the end's own task could still
+    ///   reach the entry after `.replayed` — it was caught in 2 of 2 mutant runs;
+    /// - a pass while adoption still holds an answer plans nothing (`passWhole`'s
+    ///   `holdsUnappliedAnswers` guard): the end is handed to the engine INSIDE the window here,
+    ///   as it would arrive without the first, and no task may be created before the replay lands.
+    /// The third, a buffered answer's file counting as carried (`carriedFiles`), is masked by that
+    /// guard in this window and is NOT independently witnessed here.
     @Test("line 18: an unreadable task ending mid-adoption never resends a buffered success's file")
     func unreadableEndDuringAdoptionKeepsTheBufferedFile() async throws {
         let dead = UUID()
@@ -3711,18 +3754,33 @@ struct WholePilotChecklistTests {
             )
         )
         let entry = TestGate()
-        let attaching = Task { await rig.delegate.attach(DelayedEntry(rig.engine, gate: entry)) }
+        let recorder = RecordingDelayedEntry(rig.engine, gate: entry)
+        let attaching = Task { await rig.delegate.attach(recorder) }
         try await bounded("the replay reaching the entry") { await entry.waitUntilParked() }
         // The replay holds the video's success; the unreadable task ends now. Whether that end
-        // waits for the replay is decided inside `complete`, synchronously: nothing to wait for.
+        // waits for the replay is decided inside `complete`, synchronously.
         rig.session.forget(7)
         rig.delegate.complete(
             taskIdentifier: 7, taskDescription: "not|a|whole|task", statusCode: nil,
             errorDescription: "cancelled"
         )
+        // Still inside the window, the engine is told what the delegate holds back — as it would
+        // be without that hold — and the pass it asks for runs to the end before the replay goes
+        // on. Every file is uncarried by the listing now; only the guard keeps the pass from them.
+        await rig.engine.unreadableTaskEnded()
+        try await settled(rig.engine)
+        #expect(
+            rig.session.createdTasks.isEmpty,
+            "a pass planned while adoption still held the video's answer"
+        )
         await entry.open()
         // The attach returns once the replay AND the end it held back have reached the engine.
         try await bounded("the adoption") { await attaching.value }
+        let told = await recorder.events
+        #expect(
+            told == [.answerArrived, .answerLanded, .replayed, .unreadableEnded],
+            "the delegate told the end before the replayed answer had landed"
+        )
         try await settled(rig.engine)
         #expect(rig.attempts(of: rig.picture.id) == [1])
 
