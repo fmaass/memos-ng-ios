@@ -1,0 +1,39 @@
+# The gate's own machinery: a run whose change set touches a path listed here runs every suite under
+# tests/gate; a run that touches none of them runs only tests/gate/fastpath-classify-test.sh, which
+# runs on every run, and logs one `MAC_GATE_SELFTEST skipped:` line naming this file (MEMNG-892).
+# bin/mac-gate.sh reads it in gate_selftest_scope and nothing else decides it.
+#
+# One glob per line, matched against the whole repository-relative path; `*` crosses `/`, so
+# `scripts/*` is every file under scripts/ (and never docs/scripts/...). Blank lines and lines
+# whose first non-blank character is `#` are ignored, and so is a `#` after a blank and everything
+# behind it. A config that cannot be read, or lists nothing, runs every suite.
+#
+# Enumerated from the tree on 2026-10-23: the gate, the scripts it runs, the suites and their
+# fixtures, and what those suites exercise beside them. Add a path when a suite starts testing it.
+
+# The gate itself, the project generation step it runs, and the release scripts whose suites are
+# named in it (bump-build-test.sh, testflight-cut-test.sh).
+bin/mac-gate.sh
+bin/generate.sh
+bin/bump-build.sh
+bin/testflight-cut.sh
+bin/testflight-cut-remote.sh
+
+# Every helper and rule the gate runs or hands to the build host, the vendored admission and
+# mount-guard helpers with their SOURCE records, the build-image mount (merkur/, mars/), the cut's
+# release/ scripts, and sync-openapi.sh (sync-openapi-tag-test.sh).
+scripts/*
+
+# The suites and their fixtures. Not tests/gate/testcount-baseline.tsv: that is the app's test
+# count, which a feature branch moves, and no suite reads the tracked copy.
+tests/gate/*-test.sh
+tests/gate/fixtures/*
+
+# The TestFlight cut's lane, read by testflight-cut-test.sh.
+fastlane/*
+
+# The lint configuration local-lint-test.sh runs the lint with.
+.swift-format
+
+# This file: a change to what the gate treats as its own is a change to the gate.
+config/gate-paths.txt

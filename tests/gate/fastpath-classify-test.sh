@@ -10,8 +10,12 @@
 # path could have shipped an unbuilt change (a rename out of a source file, a symlink wearing a
 # .md name, an edit sitting unstaged in the tree).
 #
+# Part 2 holds the decision of which of the gate's other suites a run owes (config/gate-paths.txt,
+# MEMNG-892), as whole gate runs that reach the selftest step on stubs and stop at the fast path.
+#
 # Run it directly (`tests/gate/fastpath-classify-test.sh`) or let the gate run it: it is the
-# gate's first step, on every run, fast path or not.
+# gate's first step, on every run, fast path or not. MAC_GATE_SCRIPT points it at another copy of
+# the gate (used to prove it red).
 #
 # Exit: 0 = every case classified as expected; 1 = at least one did not (the failures are named).
 
@@ -19,7 +23,7 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
-GATE="$repo_root/bin/mac-gate.sh"
+GATE="${MAC_GATE_SCRIPT:-$repo_root/bin/mac-gate.sh}"
 [ -x "$GATE" ] || { echo "FAIL: $GATE is not an executable file"; exit 1; }
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/gate-fastpath-XXXXXX")" || { echo "FAIL: cannot make a temp dir"; exit 1; }
@@ -228,6 +232,308 @@ git -C "$w" commit --quiet -am "docs"
 git -C "$w" update-index --skip-worktree Sources/App.swift
 printf 'let six = 6\n' >> "$w/Sources/App.swift"
 check "an index entry marked skip-worktree" full "$w"
+
+# --- part 2: which of the gate's own suites a run owes (MEMNG-892) ---------------------------------
+# The gate's suites check the gate's machinery, so a run owes them when its change set touches that
+# machinery: a path config/gate-paths.txt lists. A run that touches none of them skips them and
+# says so on one line naming that file; this suite (the classifier's) is the exception and runs on
+# every run, so a change to the decision can never talk the gate out of the suite that checks it —
+# which is why the decision's cases live HERE and not in a suite the decision could skip.
+#
+# Each case is a whole gate run, not --classify-only, because the claim is about the selftest step
+# itself: what it ran, what it logged and what the summary says. The change sets are documentation,
+# so every run that classifies takes the fast path and none of them needs a build host; ssh and
+# rsync are stubs that refuse, so a run that went further than that fails instead of reaching out.
+# The fixture's suites are stubs that say they ran.
+
+unset MAC_GATE_ESTATE_LOCK MAC_GATE_ESTATE_LOCKS MAC_GATE_ESTATE_LOCK_STAMPS MAC_GATE_SIMULATOR
+export MAC_GATE_RUNS_LEDGER="$tmp/gate-runs.tsv"
+
+scope_stub_bin="$tmp/scope-stub-bin"
+mkdir -p "$scope_stub_bin"
+printf '#!/bin/sh\necho "stub ssh: no build host in this suite" >&2\nexit 255\n' > "$scope_stub_bin/ssh"
+printf '#!/bin/sh\necho "stub rsync: no build host in this suite" >&2\nexit 255\n' > "$scope_stub_bin/rsync"
+chmod +x "$scope_stub_bin/ssh" "$scope_stub_bin/rsync"
+
+SCOPE_NAMED="$(sed -n 's/^for selftest_name in \(.*\); do$/\1/p' "$GATE")"
+SCOPE_CONFIG_REL="config/gate-paths.txt"
+SCOPE_SKIP_LINE="MAC_GATE_SELFTEST skipped: no path listed in $SCOPE_CONFIG_REL changed"
+
+# A repository the whole gate can run in up to its fast path: the named suites (and one unnamed one)
+# as stubs, the helpers the steps before the fast path call, and a config listing the machinery.
+# $2 = "noconfig" leaves the config out; "emptyconfig" writes one that lists nothing; $3 = a named
+# suite to leave out of main.
+scope_repo() {
+  local name="$1" config="${2:-}" omit="${3:-}" work="$tmp/$1" origin="$tmp/$1.git" stub
+  git init --quiet --bare "$origin" || return 1
+  git init --quiet -b main "$work" || return 1
+  git -C "$work" config user.email gate-test@example.invalid
+  git -C "$work" config user.name "gate test"
+  git -C "$work" config commit.gpgsign false
+  git -C "$work" config core.hooksPath "$tmp/no-hooks"
+  mkdir -p "$work/docs/scripts" "$work/Sources" "$work/tests/gate" "$work/scripts" "$work/config"
+  printf 'a guide\n' > "$work/docs/guide.md"
+  printf 'notes\n' > "$work/docs/scripts/notes.md"
+  printf 'the scripts\n' > "$work/scripts/README.md"
+  printf 'let app = 1\n' > "$work/Sources/App.swift"
+  printf '.gate-artifacts/\n' > "$work/.gitignore"
+  {
+    printf 'targets:\n'
+    printf '  MemosNG:\n'
+    printf '    settings:\n'
+    printf '      MARKETING_VERSION: "9.9.9"\n'
+    printf '      CURRENT_PROJECT_VERSION: "999"\n'
+  } > "$work/project.yml"
+  for stub in $SCOPE_NAMED extra-scope-test.sh; do
+    [ "$stub" != "$omit" ] || continue
+    if [ "$stub" = fastpath-classify-test.sh ]; then
+      printf '#!/bin/sh\necho "%s stub ran"\nexit "${SCOPE_CLASSIFIER_RC:-0}"\n' "$stub" > "$work/tests/gate/$stub"
+    else
+      printf '#!/bin/sh\necho "%s stub ran"\nexit 0\n' "$stub" > "$work/tests/gate/$stub"
+    fi
+    chmod +x "$work/tests/gate/$stub"
+  done
+  printf 'gate_lane_is_unlocked() { return 0; }\n' > "$work/scripts/reap-gate-lanes.sh"
+  cp "$repo_root/scripts/gate-admission.sh" "$work/scripts/gate-admission.sh" || return 1
+  cp "$repo_root/scripts/release-version-rule.sh" "$work/scripts/release-version-rule.sh" || return 1
+  cp "$repo_root/scripts/gate-mount-guard.sh" "$work/scripts/gate-mount-guard.sh" || return 1
+  case "$config" in
+    noconfig) : ;;
+    emptyconfig) printf '# lists nothing\n\n' > "$work/$SCOPE_CONFIG_REL" ;;
+    *)
+      # A commented-out docs/* is not a pattern, so a change under docs/ must still skip; and the
+      # scripts/* line carries padding and a trailing comment, either of which, kept, would make
+      # it a pattern that matches nothing.
+      {
+        printf '# the gate machinery\n'
+        printf '# docs/*\n'
+        printf 'bin/mac-gate.sh\n'
+        printf '  scripts/*  # the helpers\n'
+        printf 'tests/gate/*-test.sh\n'
+        printf '%s\n' "$SCOPE_CONFIG_REL"
+      } > "$work/$SCOPE_CONFIG_REL" ;;
+  esac
+  git -C "$work" add -A >/dev/null || return 1
+  git -C "$work" commit --quiet -m "baseline" || return 1
+  git -C "$work" remote add origin "$origin"
+  git -C "$work" push --quiet origin main || return 1
+  printf '%s' "$work"
+}
+
+# One whole gate run in $1. OUT, RC and LOGTEXT (the run log, read back) are what a case reads.
+scope_run() {
+  local work="$1"
+  local -a env_args=(-u MAC_GATE_BRANCH "PATH=$scope_stub_bin:${SCOPE_GIT_STUB:+$SCOPE_GIT_STUB:}$PATH"
+    MAC_GATE_HOST=stub-host "MAC_GATE_ARTIFACTS=$work/.gate-artifacts"
+    "SCOPE_CLASSIFIER_RC=${SCOPE_CLASSIFIER_RC:-0}")
+  OUT="$(cd "$work" && env "${env_args[@]}" "$GATE" 2>&1)"
+  RC=$?
+  local log_path
+  log_path="$(printf '%s\n' "$OUT" | sed -n 's/^run log     : //p' | tail -1)"
+  LOGTEXT=""
+  [ -n "$log_path" ] && [ -r "$log_path" ] && LOGTEXT="$(cat "$log_path")"
+}
+SCOPE_GIT_STUB=""
+SCOPE_CLASSIFIER_RC=0
+
+scope_has() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
+scope_ok() { cases=$((cases + 1)); echo "ok   $1"; }
+scope_bad() {
+  cases=$((cases + 1)); fails=$((fails + 1)); echo "FAIL $1"
+  printf '%s\n' "$OUT" | sed 's/^/     | /'
+}
+
+if [ "$(printf '%s\n' $SCOPE_NAMED | wc -l | tr -d ' ')" -ge 2 ] && printf ' %s ' $SCOPE_NAMED | grep -q ' fastpath-classify-test\.sh '; then
+  scope_ok "scope: the gate's named suite list was read and names this suite (control)"
+else
+  cases=$((cases + 1)); fails=$((fails + 1)); echo "FAIL scope: no named suite list could be read from $GATE: [$SCOPE_NAMED]"
+fi
+
+# (a) Nothing listed changed: the run skips every suite but this one, logs the skip with the
+# config's path, and the summary says skip rather than a 0 that reads as "they passed". The change
+# set holds docs/scripts/notes.md, which a pattern that is not anchored at the root (scripts/*
+# matched anywhere) would take for a gate path, and the config holds `# docs/*` as a comment.
+w="$(scope_repo scope-skip)" || { echo "FAIL: cannot build the scope-skip fixture"; exit 1; }
+git -C "$w" checkout --quiet -b fix/scope-skip
+printf 'more guide\n' >> "$w/docs/guide.md"
+printf 'more notes\n' >> "$w/docs/scripts/notes.md"
+git -C "$w" commit --quiet -am "docs"
+scope_run "$w"
+if [ "$RC" -eq 0 ] && scope_has "$SCOPE_SKIP_LINE" \
+   && printf '%s\n' "$LOGTEXT" | grep -qF -- "$SCOPE_SKIP_LINE" \
+   && scope_has "fastpath-classify-test.sh stub ran" \
+   && ! scope_has "mount-guard-test.sh stub ran" && ! scope_has "extra-scope-test.sh stub ran" \
+   && printf '%s\n' "$OUT" | grep -Eq '^mac-gate SUMMARY: selftest=skip classify=0 .*\| exit=0$' \
+   && grep -q '^selftest: skip' "$w/.gate-artifacts/classification.txt" 2>/dev/null; then
+  scope_ok "scope: a change set touching no listed path skips the suites, logs '$SCOPE_SKIP_LINE', runs the classifier's, and the summary says selftest=skip"
+else
+  scope_bad "scope: a change set touching no listed path did not skip as specified (exit $RC)"
+fi
+
+# (b) A listed path changed (scripts/README.md, under `  scripts/*  # the helpers` — the padding and
+# the comment are not the pattern):
+# every suite runs, and the line names the path and the pattern that owed them.
+w="$(scope_repo scope-run)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-run
+printf 'more\n' >> "$w/scripts/README.md"
+git -C "$w" commit --quiet -am "a note beside the gate's scripts"
+scope_run "$w"
+if [ "$RC" -eq 0 ] && scope_has "MAC_GATE_SELFTEST run: scripts/README.md matches scripts/* in $SCOPE_CONFIG_REL" \
+   && ! scope_has "MAC_GATE_SELFTEST skipped" \
+   && scope_has "fastpath-classify-test.sh stub ran" && scope_has "mount-guard-test.sh stub ran" \
+   && scope_has "extra-scope-test.sh stub ran" \
+   && printf '%s\n' "$OUT" | grep -Eq '^mac-gate SUMMARY: selftest=0 classify=0 .*\| exit=0$'; then
+  scope_ok "scope: a change set touching a listed path runs every suite and names the path that owed them"
+else
+  scope_bad "scope: a change set touching a listed path did not run the suites as specified (exit $RC)"
+fi
+
+# (c) The listed path is untracked, in the working tree: it is copied to the build host like any
+# committed change, so it owes the suites too.
+w="$(scope_repo scope-untracked)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-untracked
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+printf 'new\n' > "$w/scripts/NEW.md"
+scope_run "$w"
+if scope_has "MAC_GATE_SELFTEST run: scripts/NEW.md matches scripts/* in $SCOPE_CONFIG_REL" \
+   && scope_has "mount-guard-test.sh stub ran"; then
+  scope_ok "scope: an untracked file under a listed path runs the suites"
+else
+  scope_bad "scope: an untracked file under a listed path did not run the suites (exit $RC)"
+fi
+
+# (d) main is not a change set, so nothing can be shown untouched: the safe side, every suite. The
+# run then owes the full gate, which the refusing ssh stub ends; only the selftest step is read.
+w="$(scope_repo scope-main)" || exit 1
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs on main"
+scope_run "$w"
+if scope_has "MAC_GATE_SELFTEST run: the branch is main" && scope_has "mount-guard-test.sh stub ran" \
+   && ! scope_has "MAC_GATE_SELFTEST skipped"; then
+  scope_ok "scope: a run on main runs every suite"
+else
+  scope_bad "scope: a run on main did not run every suite (exit $RC)"
+fi
+
+# (e) No config, and a config that lists nothing: neither can show that nothing listed changed.
+w="$(scope_repo scope-noconfig noconfig)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-noconfig
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+scope_run "$w"
+if [ "$RC" -eq 0 ] && scope_has "MAC_GATE_SELFTEST run: $SCOPE_CONFIG_REL cannot be read" \
+   && scope_has "mount-guard-test.sh stub ran"; then
+  scope_ok "scope: a missing config runs every suite"
+else
+  scope_bad "scope: a missing config did not run every suite (exit $RC)"
+fi
+w="$(scope_repo scope-emptyconfig emptyconfig)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-emptyconfig
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+scope_run "$w"
+if [ "$RC" -eq 0 ] && scope_has "MAC_GATE_SELFTEST run: $SCOPE_CONFIG_REL lists no path" \
+   && scope_has "mount-guard-test.sh stub ran"; then
+  scope_ok "scope: a config that lists nothing runs every suite"
+else
+  scope_bad "scope: a config that lists nothing did not run every suite (exit $RC)"
+fi
+
+# (f) An enumeration that fails is not one that found nothing: a git whose diff refuses must not
+# turn into a skip.
+w="$(scope_repo scope-gitfails)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-gitfails
+printf 'more\n' >> "$w/scripts/README.md"
+git -C "$w" commit --quiet -am "a gate-path change the stub will hide"
+SCOPE_GIT_STUB="$tmp/stub-bin"
+scope_run "$w"
+SCOPE_GIT_STUB=""
+if scope_has "MAC_GATE_SELFTEST run: the change set could not be enumerated" \
+   && scope_has "mount-guard-test.sh stub ran" && ! scope_has "MAC_GATE_SELFTEST skipped"; then
+  scope_ok "scope: a git that fails to enumerate runs every suite"
+else
+  scope_bad "scope: a git that fails to enumerate did not run every suite (exit $RC)"
+fi
+
+# (g) The skip never hides this suite's own verdict: the classifier's suite failing in a run that
+# skips the rest fails the step and the run.
+w="$(scope_repo scope-classifier-red)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-classifier-red
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+SCOPE_CLASSIFIER_RC=1
+scope_run "$w"
+SCOPE_CLASSIFIER_RC=0
+if [ "$RC" -eq 1 ] && scope_has "$SCOPE_SKIP_LINE" && scope_has "fastpath-classify-test.sh stub ran" \
+   && printf '%s\n' "$OUT" | grep -Eq '^mac-gate SUMMARY: selftest=1 .*\| exit=1$'; then
+  scope_ok "scope: the classifier's suite failing in a skipping run fails the run (selftest=1)"
+else
+  scope_bad "scope: the classifier's suite failing in a skipping run did not fail it (exit $RC)"
+fi
+
+# (h) A named suite that is missing is a failure on every run, skipping or not: the integrity check
+# is not the suites' to skip. Here main never had mutants-test.sh, so the change set (docs) does
+# not touch it.
+w="$(scope_repo scope-missing-named "" mutants-test.sh)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-missing-named
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "docs"
+scope_run "$w"
+if [ "$RC" -ne 0 ] && scope_has "mutants-test.sh is missing or not executable" && scope_has "$SCOPE_SKIP_LINE"; then
+  scope_ok "scope: a missing named suite fails a skipping run"
+else
+  scope_bad "scope: a missing named suite did not fail a skipping run (exit $RC)"
+fi
+
+# (j) A stale origin/main must not hide a gate change. The local origin/main is A; upstream main has
+# moved to B, which changed scripts/README.md; the branch is based on B and puts that file back to
+# A's text. Measured as a tree diff from A, the file never changed; measured against the real main
+# B, the branch changes gate machinery. Both B's commit and the revert are in A..HEAD and both name
+# the file, so the decision reads the paths every commit in that range names, not only the tree.
+w="$(scope_repo scope-stale-base)" || exit 1
+stale_a="$(git -C "$w" rev-parse HEAD)"
+printf 'upstream edit\n' >> "$w/scripts/README.md"
+git -C "$w" commit --quiet -am "upstream: a gate-path change on main (B)"
+git -C "$w" push --quiet origin main || exit 1
+git -C "$w" update-ref refs/remotes/origin/main "$stale_a"
+git -C "$w" checkout --quiet -b fix/scope-stale-base
+git -C "$w" show "$stale_a:scripts/README.md" > "$w/scripts/README.md"
+printf 'more guide\n' >> "$w/docs/guide.md"
+git -C "$w" commit --quiet -am "put the script back to A's text, and a docs change"
+scope_run "$w"
+if scope_has "MAC_GATE_SELFTEST run: scripts/README.md matches scripts/* in $SCOPE_CONFIG_REL" \
+   && scope_has "mount-guard-test.sh stub ran" && ! scope_has "MAC_GATE_SELFTEST skipped"; then
+  scope_ok "scope: a branch reverting an upstream gate change, measured from a stale origin/main, runs the suites"
+else
+  scope_bad "scope: a branch reverting an upstream gate change, measured from a stale origin/main, did not run the suites (exit $RC)"
+fi
+
+# (i) The config is listed in itself: a change to it is a change to what the gate treats as its
+# own, and runs the suites.
+w="$(scope_repo scope-config-edit)" || exit 1
+git -C "$w" checkout --quiet -b fix/scope-config-edit
+printf 'docs/*\n' >> "$w/$SCOPE_CONFIG_REL"
+git -C "$w" commit --quiet -am "list docs too"
+scope_run "$w"
+if scope_has "MAC_GATE_SELFTEST run: $SCOPE_CONFIG_REL matches $SCOPE_CONFIG_REL in $SCOPE_CONFIG_REL" \
+   && scope_has "mount-guard-test.sh stub ran"; then
+  scope_ok "scope: a change to the config itself runs the suites"
+else
+  scope_bad "scope: a change to the config itself did not run the suites (exit $RC)"
+fi
+
+# The repository's own config is read the way the gate reads it, and lists the gate itself and
+# this suite: a config that had stopped naming them would let a change to the decision skip
+# everything but this suite.
+real_cfg="$repo_root/$SCOPE_CONFIG_REL"
+if [ -r "$real_cfg" ] \
+   && grep -qx 'bin/mac-gate.sh' "$real_cfg" && grep -qx "$SCOPE_CONFIG_REL" "$real_cfg" \
+   && grep -Eqx 'tests/gate/\*(-test\.sh)?' "$real_cfg"; then
+  scope_ok "scope: $SCOPE_CONFIG_REL lists bin/mac-gate.sh, itself and the gate's suites"
+else
+  cases=$((cases + 1)); fails=$((fails + 1)); echo "FAIL scope: $real_cfg is missing or does not list bin/mac-gate.sh, itself and tests/gate's suites"
+fi
 
 # --- verdict --------------------------------------------------------------------------------------
 # The positive control on the suite: a run where every case came back `full` would pass a

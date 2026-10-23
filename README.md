@@ -48,9 +48,10 @@ tree holds, reports `PASS (fast path: docs-only)` naming every changed path, and
 the build host. Everything else meets the full gate, and files git ignores are outside the
 classification by design: they never reach main, and a full gate builds whatever is on disk
 anyway. `bin/mac-gate.sh --classify-only` prints that
-classification without needing a build host, and the gate's own test suites under `tests/gate/`
-run on every gate — the classifier's, the quick mode's, and the one that judges the warnings
-canary.
+classification without needing a build host. The classifier's own suite runs on every gate; the
+gate's other suites under `tests/gate/` — the quick mode's, the one that judges the warnings
+canary, and the rest — run when a change set touches a path `config/gate-paths.txt` lists, and a
+run that skips them says so in its log and as `selftest=skip` in its summary.
 
 While iterating, `bin/mac-gate.sh --quick [--bundle <name>|--only-testing <id>]` lints, then
 compiles for testing on the same lane and runs the named bundle or suite there, reusing its

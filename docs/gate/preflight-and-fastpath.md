@@ -33,6 +33,25 @@ helper against fake tools, and the real image where it is present) and
 process holds it); both are named selftests. The second step is the classifier test
 (`tests/gate/fastpath-classify-test.sh`), which checks the gate's own docs-only classifier against
 throwaway repositories it builds itself — it is the gate's integrity check and runs on every gate.
+The gate's other suites under `tests/gate/` check the gate's own machinery, so a run owes them only
+when its change set touches it (MEMNG-892): `config/gate-paths.txt` lists that machinery, one glob
+per line matched against the whole repository-relative path (`*` crosses `/`; `#` starts a comment),
+and `gate_selftest_scope` in `bin/mac-gate.sh` reads only that file. It enumerates the change set on
+its own — the branch's diff from the `origin/main` already on disk, every path any commit in that
+range names (so a stale `origin/main` only enlarges the set: a branch that reverts a newer main's
+gate change still names the script), the working tree's edits and the untracked files — rather than
+borrowing the classifier's, and the classifier's suite,
+which also holds the decision's cases, is never skipped; so a change to either cannot talk the gate
+out of the suite that checks it. A run that touches no listed path logs one line,
+`MAC_GATE_SELFTEST skipped: no path listed in config/gate-paths.txt changed — …`, and its summary
+reads `selftest=skip`; a run that touches one logs `MAC_GATE_SELFTEST run: <path> matches <glob> in
+config/gate-paths.txt` for every such path and runs them all. Every way of not knowing runs them
+too, each with its reason on the `run:` line: `main` or `master`, no merge-base, a git command that
+fails, an assume-unchanged or skip-worktree entry, a path git had to quote, and a config that cannot
+be read or lists nothing. The named suites must exist and be executable on every run, skipping or
+not, and `classification.txt` carries the decision on its `selftest:` line. A docs-only change set
+normally lists no gate path, so its fast path runs the classifier's suite alone; the quick mode
+takes the same decision as the full gate.
 Then the change set is classified: what this branch changed against `origin/main` (merge-base,
 renames not followed, so a rename is judged by both of its names) plus everything staged, edited or
 untracked in the working tree. When every one of those paths is documentation or repository

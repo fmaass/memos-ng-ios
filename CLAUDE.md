@@ -42,7 +42,8 @@ the file that governs the topic. Each holds its lines moved verbatim from this s
 - `docs/gate/testcount-baseline.md` — the per-bundle test-count check, its baseline and candidate
   copyback, the summary line and the returned artifacts.
 - `docs/gate/preflight-and-fastpath.md` — the local lint before the estate lock (MEMNG-807), the
-  classifier selftest and the docs-only fast path.
+  classifier selftest, which other selftests a run owes (`config/gate-paths.txt`, MEMNG-892) and
+  the docs-only fast path.
 - `docs/gate/quick-mode-and-mutants.md` — `--quick`, `--iterations` and the `--mutants` realness
   loop (MEMNG-825) with its fence.
 - `docs/gate/lane-retention.md` — per-branch lanes, the lane lock (exit 3) and the reap and pressure sweeps.

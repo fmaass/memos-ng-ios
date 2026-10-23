@@ -70,7 +70,7 @@
 # warnings canary, the pin check, the entitlement, dependency-rule, share-link, text-selection,
 # refusal-sites, openapi-coverage and release-notes rules, the
 # shipping-bundle read-back and the per-bundle test count. What it keeps is everything that makes
-# a run safe to start: the selftests, the release-version check, the classification, this branch's
+# a run safe to start: the selftests it owes (config/gate-paths.txt), the release-version check, the classification, this branch's
 # lane lock, the run admission, the simulator slot and the private simulator — and the lint, which costs seconds and which
 # the full gate would fail on anyway. It prints one line of its own,
 # MAC_GATE_QUICK: lint=<rc> build=<rc> tests=<rc> locallint=<rc|-> | exit=<rc>, which is deliberately NOT the gate's
@@ -1007,6 +1007,102 @@ gate_classify() {
   return 0
 }
 
+# --- which of the gate's own suites this run owes (MEMNG-892) ------------------------------------
+# The suites under tests/gate check the gate's machinery, not the app, so a run owes them when its
+# change set touches that machinery: a path config/gate-paths.txt lists, one glob per line, matched
+# against the whole repository-relative path (a `*` there crosses `/`, so `scripts/*` is every file
+# under scripts/ and never docs/scripts/x). This file decides it and nothing else does.
+#
+# The change set is enumerated HERE, on its own, and not borrowed from gate_classify: the classifier
+# is what the one suite that always runs (fastpath-classify-test.sh) checks, so a change to it that
+# misread the change set could otherwise talk this decision into skipping. The three sources are
+# the classifier's — the branch's commits on top of origin/main, the working tree's edits, and the
+# untracked files — read from the origin/main already on disk (the classify step fetches later),
+# plus every path a commit in base..HEAD names, which is what makes a stale ref only enlarge it. Every way of NOT knowing ends on the safe side and
+# runs the suites: main or master (not a change set), no merge-base, a git that fails, an index
+# entry git was told to stop looking at, a path git had to quote, and a config that cannot be read
+# or lists nothing.
+GATE_PATHS_CONFIG="config/gate-paths.txt"
+SELFTEST_SCOPE=run
+SELFTEST_SCOPE_WHY=""
+gate_selftest_scope() {
+  SELFTEST_SCOPE=run
+  SELFTEST_SCOPE_WHY=""
+  local config="$repo_root/$GATE_PATHS_CONFIG" line patterns=""
+  if [ ! -f "$config" ] || [ ! -r "$config" ]; then
+    SELFTEST_SCOPE_WHY="$GATE_PATHS_CONFIG cannot be read"
+    return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    # A comment may also follow a pattern, after a blank: kept as part of the pattern it would
+    # never match anything, and a pattern that silently matches nothing is a skip nobody asked for.
+    line="${line%%[[:space:]]#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    patterns="$patterns$line"$'\n'
+  done < "$config"
+  if [ -z "$patterns" ]; then
+    SELFTEST_SCOPE_WHY="$GATE_PATHS_CONFIG lists no path"
+    return 0
+  fi
+  case "$branch" in
+    main|master)
+      SELFTEST_SCOPE_WHY="the branch is $branch, which is not a change set measured against origin/main"
+      return 0 ;;
+  esac
+  local base branch_paths commit_paths tree_paths untracked_paths index_tags
+  base="$(git merge-base origin/main HEAD 2>/dev/null 9>&- 7>&-)" || base=""
+  if [ -z "$base" ]; then
+    SELFTEST_SCOPE_WHY="the merge-base with origin/main cannot be resolved"
+    return 0
+  fi
+  # The tree diff alone is not enough under a stale origin/main: a branch based on a newer main that
+  # puts a gate script back to the stale base's text shows no change from that base, yet changes the
+  # gate against the real main. Every path any commit in base..HEAD names (merges against each
+  # parent) is added to it, so the upstream change and the revert both count, and a stale ref really
+  # does only make the set larger.
+  branch_paths="$(git diff --name-only --no-renames "$base...HEAD" 2>/dev/null 9>&- 7>&-)" \
+    && commit_paths="$(git log -m --format= --name-only --no-renames "$base..HEAD" 2>/dev/null 9>&- 7>&-)" \
+    && tree_paths="$(git diff --name-only --no-renames HEAD 2>/dev/null 9>&- 7>&-)" \
+    && untracked_paths="$(git ls-files --others --exclude-standard 2>/dev/null 9>&- 7>&-)" \
+    && index_tags="$(git ls-files -v 2>/dev/null 9>&- 7>&-)" || {
+    SELFTEST_SCOPE_WHY="the change set could not be enumerated (a git command failed)"
+    return 0
+  }
+  if printf '%s\n' "$index_tags" | grep -qE '^[a-zS] '; then
+    SELFTEST_SCOPE_WHY="the index carries assume-unchanged or skip-worktree entries, so the change set cannot be read whole"
+    return 0
+  fi
+  local paths path pattern touched=""
+  paths="$(printf '%s\n%s\n%s\n%s\n' "$branch_paths" "$commit_paths" "$tree_paths" "$untracked_paths" | sed '/^$/d' | sort -u)"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      '"'*)
+        SELFTEST_SCOPE_WHY="the change set holds a path git could not print literally ($path)"
+        return 0 ;;
+    esac
+    while IFS= read -r pattern; do
+      [ -n "$pattern" ] || continue
+      # Unquoted on purpose: the pattern is a glob. `case` never expands it against the disk.
+      # shellcheck disable=SC2254
+      case "$path" in
+        $pattern)
+          touched="$touched$path matches $pattern in $GATE_PATHS_CONFIG"$'\n'
+          break ;;
+      esac
+    done <<< "$patterns"
+  done <<< "$paths"
+  if [ -n "$touched" ]; then
+    SELFTEST_SCOPE_WHY="${touched%$'\n'}"
+    return 0
+  fi
+  SELFTEST_SCOPE=skip
+  SELFTEST_SCOPE_WHY="no path listed in $GATE_PATHS_CONFIG changed"
+  return 0
+}
+
 # --- this run's own log ---------------------------------------------------------------------------
 # The gate keeps its whole output itself, at a path no other run can have produced: the artifacts
 # directory, the branch, and this run's token. A caller may redirect stdout wherever it likes and
@@ -1417,9 +1513,24 @@ fi
 # --- the gate's own integrity check --------------------------------------------------------------
 # The classifier decides whether anything gets built at all, which makes it the one part of this
 # gate that no build can check. Its suite runs HERE, on every run, fast path or not: a fast path
-# taken by a classifier nobody checked is a gate that passes what it never read.
+# taken by a classifier nobody checked is a gate that passes what it never read. It also holds the
+# cases for the decision below, which is why it is the one suite that decision can never skip.
+#
+# The other suites check the gate's machinery, and a run owes them only when its change set touches
+# that machinery (gate_selftest_scope, config/gate-paths.txt; MEMNG-892, ARCH-1382 D3): a timing
+# check of the gate that fails on a feature branch fails a run for code it did not change. A skip
+# is one line naming the config and `selftest=skip` in the summary, never a 0 that reads as "they
+# passed"; a run that owes them logs each path that owed them.
 say "--- step: selftest ---"
 selftest_rc=0
+gate_selftest_scope
+if [ "$SELFTEST_SCOPE" = skip ]; then
+  say "MAC_GATE_SELFTEST skipped: $SELFTEST_SCOPE_WHY — only tests/gate/fastpath-classify-test.sh runs, as on every run"
+else
+  while IFS= read -r selftest_why; do
+    say "MAC_GATE_SELFTEST run: $selftest_why"
+  done <<< "$SELFTEST_SCOPE_WHY"
+fi
 # NAMED, not counted. A suite that is deleted or loses its execute bit takes its whole subject with
 # it, and a step that runs "whatever is in tests/gate" would report selftest=0 for an empty
 # directory. These fourteen must be there (the local lint's two among them: a lint that stopped
@@ -1432,24 +1543,33 @@ selftest_rc=0
 # (the one script that writes the pair and its notes section, MEMNG-831).
 for selftest_name in fastpath-classify-test.sh warnings-canary-test.sh testcount-test.sh admission-test.sh mainbar-freeze-rule-test.sh mount-guard-test.sh mount-refusal-path-test.sh testflight-cut-test.sh release-notes-rule-test.sh local-lint-test.sh local-lint-refusal-path-test.sh host-routing-test.sh mutants-test.sh bump-build-test.sh; do
   selftest_script="$repo_root/tests/gate/$selftest_name"
-  if [ -x "$selftest_script" ]; then
-    "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
-    [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
-  else
+  # The integrity check holds on every run, skipping or not: a named suite that is gone is a
+  # failure whatever this run owes.
+  if [ ! -x "$selftest_script" ]; then
     say "the gate's own test $selftest_script is missing or not executable"
     selftest_rc=1
+  elif [ "$SELFTEST_SCOPE" = run ] || [ "$selftest_name" = fastpath-classify-test.sh ]; then
+    "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
+    [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
   fi
 done
 # And anything else that ships beside them, so a new suite is never silently ignored.
-for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
-  case "${selftest_script##*/}" in
-    fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh|host-routing-test.sh|mutants-test.sh) continue ;;
-  esac
-  [ -x "$selftest_script" ] || continue
-  "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
-  [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
-done
-record selftest "$selftest_rc"
+if [ "$SELFTEST_SCOPE" = run ]; then
+  for selftest_script in "$repo_root"/tests/gate/*-test.sh; do
+    case "${selftest_script##*/}" in
+      fastpath-classify-test.sh|warnings-canary-test.sh|testcount-test.sh|admission-test.sh|mainbar-freeze-rule-test.sh|mount-guard-test.sh|mount-refusal-path-test.sh|testflight-cut-test.sh|release-notes-rule-test.sh|local-lint-test.sh|local-lint-refusal-path-test.sh|host-routing-test.sh|mutants-test.sh|bump-build-test.sh) continue ;;
+    esac
+    [ -x "$selftest_script" ] || continue
+    "$selftest_script" 2>&1 9>&- 7>&- | tee -a "$log" 9>&- 7>&-
+    [ "${PIPESTATUS[0]}" -eq 0 ] || selftest_rc="${PIPESTATUS[0]}"
+  done
+fi
+if [ "$SELFTEST_SCOPE" = skip ] && [ "$selftest_rc" -eq 0 ]; then
+  # Not through record: `skip` is not an exit code, and it never fails a run.
+  STEP_NAMES+=(selftest); STEP_RCS+=(skip)
+else
+  record selftest "$selftest_rc"
+fi
 [ "$first_fail" -eq 0 ] || end_run
 
 # Selftest only: tests/gate/private-copy-test.sh stops a run here, edits the tree it was started
@@ -1489,6 +1609,7 @@ gate_classify
   printf 'base    : %s (merge-base with origin/main)\n' "$CLASSIFY_BASE"
   printf 'verdict : %s\n' "$CLASSIFY_VERDICT"
   printf 'reason  : %s\n' "$CLASSIFY_REASON"
+  printf 'selftest: %s — %s\n' "$SELFTEST_SCOPE" "$(printf '%s' "$SELFTEST_SCOPE_WHY" | tr '\n' ';')"
   printf 'changed paths:\n'
   if [ -n "$CLASSIFY_PATHS" ]; then
     printf '%s\n' "$CLASSIFY_PATHS" | sed 's/^/  /'

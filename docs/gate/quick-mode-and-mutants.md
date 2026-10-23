@@ -3,7 +3,9 @@
 Moved verbatim from CLAUDE.md § The gate is the only build authority on 2026-10-16.
 
 Iteration uses the quick mode and the merge verdict is the full gate: `bin/mac-gate.sh --quick
-[--bundle <name>|--only-testing <id>]` runs the selftests, the release-version check, the
+[--bundle <name>|--only-testing <id>]` runs the selftests the change set owes (all of them when it
+touches a path `config/gate-paths.txt` lists, else the classifier's alone — see
+`docs/gate/preflight-and-fastpath.md`), the release-version check, the
 classification, the same lane lock and run admission, then rsyncs and — reusing the lane's
 DerivedData — lints, generates, compiles for testing on the generic destination and runs the named
 bundle or suite on a private device of its own inside the host slot (`bin/mac-gate.sh:2380`, `:2394`) (every bundle with `--quick` alone), skipping the package rebuilds, the canary, the
