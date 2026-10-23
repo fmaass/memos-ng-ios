@@ -57,6 +57,7 @@ nonisolated final class TripRows: @unchecked Sendable {
     private var failing: Set<String> = []
     private var held: Set<String> = []
     private var heldWhere: [String: @Sendable (String) -> Bool] = [:]
+    private var lagging: [String: Duration] = [:]
     private var log: [Call] = []
     private var served: [String] = []
     private var writes = 0
@@ -134,6 +135,14 @@ nonisolated final class TripRows: @unchecked Sendable {
         lock.withLock { heldWhere[operation] = matches }
     }
 
+    /// From here on `operation`, once counted as answered, waits `lag` more before its answer
+    /// leaves. It holds open what lies between the server answering and the app having heard
+    /// it — the client's decoding and the hop back to the store — so a case that waits on
+    /// `answered` cannot mistake the first for the second (MEMNG-887).
+    func lag(_ operation: String, by lag: Duration) {
+        lock.withLock { lagging[operation] = lag }
+    }
+
     /// Answers a collection route, or nil for any other operation.
     func answer(
         _ request: HTTPRequest, body: HTTPBody?, operationID: String, listing: Listing
@@ -154,6 +163,9 @@ nonisolated final class TripRows: @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(20))
         }
         lock.withLock { served.append(operationID) }
+        if let lag = lock.withLock({ lagging[operationID] }) {
+            try await Task.sleep(for: lag)
+        }
         if lock.withLock({ failing.contains(operationID) }) {
             return (HTTPResponse(status: .internalServerError), nil)
         }

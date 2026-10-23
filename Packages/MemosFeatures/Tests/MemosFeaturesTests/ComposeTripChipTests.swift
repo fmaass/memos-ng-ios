@@ -813,6 +813,26 @@ struct ComposeColdLaunchTripTests {
         return await screen.until(seconds: 10) { screen.element(labelled: "Post") == nil }
     }
 
+    /// Opens New memo until a sheet carries `chip`, for at most ten seconds; the sheet that does
+    /// is left open.
+    ///
+    /// The server having answered is not the app having heard it: the list is counted `answered`
+    /// as it leaves the server, then decoded and handed back to the store a hop later. A sheet
+    /// keeps the offer it was opened with, so one opened in between is rightly offered nothing,
+    /// and only a NEW sheet can show what the store holds now. What is waited for is that: a
+    /// sheet with the chip. A chip that is never offered still fails the case, at the deadline
+    /// (MEMNG-887).
+    private static func reopenUntil(_ chip: String, on screen: PressProbe.Screen) async -> Bool {
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            guard await openNewMemo(on: screen) else { return false }
+            await screen.settle()
+            if screen.says(chip) { return true }
+            guard await cancelSheet(on: screen) else { return false }
+        }
+        return false
+    }
+
     /// The app as it launches: the real tab view over a signed-in session, opening on the
     /// Timeline, its New memo the real sheet. Nothing in the case reads the trips itself, so the
     /// list is asked for by the app's own launch read (`MainTabView`), and the chip comes from
@@ -822,6 +842,9 @@ struct ComposeColdLaunchTripTests {
         let transport = CollectionsTransport()
         Self.seedToday("Lisbon now", tag: "lisbonnow", on: transport.trips)
         transport.trips.hold(TripRows.list)
+        // Between the list leaving the server and the store holding it, held open for a second:
+        // the window the case once lost about one run in ten, now open on every run (MEMNG-887).
+        transport.trips.lag(TripRows.list, by: .seconds(1))
         let session = CollectionsWire.signedOutSession(transport)
         await session.enteredForeground()
         await session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_trips")
@@ -841,10 +864,8 @@ struct ComposeColdLaunchTripTests {
             transport.trips.release(TripRows.list)
             let listed = await screen.until { transport.trips.answered(TripRows.list) >= 1 }
             #expect(listed, "the held list never answered")
-            let reopened = await Self.openNewMemo(on: screen)
-            #expect(reopened, "New memo opened no second sheet")
-            let shown = await screen.until { screen.says(chip) }
-            #expect(shown, "the newly opened sheet has no chip")
+            let shown = await Self.reopenUntil(chip, on: screen)
+            #expect(shown, "no sheet opened after the list answered has the chip")
             _ = await Self.cancelSheet(on: screen)
         }
     }
