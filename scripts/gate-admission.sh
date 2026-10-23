@@ -406,8 +406,10 @@ gate_slot_claim() { # PROJECT BRANCH TOKEN SHARED [SHARED_UDID]
   return 0
 }
 # Names a device before it exists, so a recoverer finds it by name even if its UDID is never written.
+# The run's record of itself beside the slot, run.<token>, follows: see gate_device_recover.
 gate_slot_note_device() { # NAME
-  gate_slot_update device "$1"
+  gate_slot_update device "$1" || return 1
+  gate_run_record_write
 }
 gate_slot_note_udid() { # UDID NAME
   gate_slot_update udid "$1" || return 1
@@ -462,23 +464,8 @@ gate_reap_release() { # TOKEN
   gate_rename_dir "$root/reap" "$aside" && rm -rf "$aside"
 }
 gate_slot_recover() { # JUDGED_TOKEN MY_TOKEN
-  local root="$GATE_SLOT_ROOT" judged="$1" me="$2" claim verdict lstart pgid
-  claim="$root/claim.$me.reap"
-  rm -rf "$claim"
-  mkdir "$claim" 2>/dev/null || return 1
-  lstart="$(gate_read_lstart "$$")" && pgid="$(gate_read_pgid "$$")" || { rm -rf "$claim"; return 1; }
-  printf 'token=%s\nhost=%s\npid=%s\nlstart=%s\npgid=%s\nsince=%s\n' \
-    "$me" "$(hostname -s)" "$$" "$lstart" "$pgid" "$(gate_now)" > "$claim/owner" || { rm -rf "$claim"; return 1; }
-  if ! gate_rename_dir "$claim" "$root/reap"; then
-    rm -rf "$claim"
-    verdict="$(gate_judge "$root/reap/owner")"
-    case "$verdict" in
-      stale) gate_log "token=$me REAP-DEAD $(gate_owner_describe "$root/reap/owner") — recovery stays blocked; once its pid is confirmed gone: ssh <build host> rm -rf $root/reap" ;;
-      unmeasured) gate_log "token=$me the reap mutex's holder could not be judged: $(gate_owner_describe "$root/reap/owner")" ;;
-      *) gate_log "token=$me REAP-STUCK $(gate_owner_describe "$root/reap/owner") ($verdict) — recovery waits for it" ;;
-    esac
-    return 1
-  fi
+  local root="$GATE_SLOT_ROOT" judged="$1" me="$2"
+  gate_reap_claim "$me" || return 1
   gate_hook after-reap-claim
   if [ "$(gate_owner_get "$root/sim/owner" token)" != "$judged" ]; then
     gate_log "token=$me recovery backed off: the slot no longer names $judged"
@@ -504,6 +491,154 @@ gate_slot_recover() { # JUDGED_TOKEN MY_TOKEN
   gate_reap_release "$me"
   return 0
 }
+# Takes the reap mutex for MY_TOKEN: 0 held, 1 not (who holds it is logged). It has no expiry.
+gate_reap_claim() { # MY_TOKEN
+  local root="$GATE_SLOT_ROOT" me="$1" claim verdict lstart pgid
+  claim="$root/claim.$me.reap"
+  rm -rf "$claim"
+  mkdir "$claim" 2>/dev/null || return 1
+  lstart="$(gate_read_lstart "$$")" && pgid="$(gate_read_pgid "$$")" || { rm -rf "$claim"; return 1; }
+  printf 'token=%s\nhost=%s\npid=%s\nlstart=%s\npgid=%s\nsince=%s\n' \
+    "$me" "$(hostname -s)" "$$" "$lstart" "$pgid" "$(gate_now)" > "$claim/owner" || { rm -rf "$claim"; return 1; }
+  if ! gate_rename_dir "$claim" "$root/reap"; then
+    rm -rf "$claim"
+    verdict="$(gate_judge "$root/reap/owner")"
+    case "$verdict" in
+      stale) gate_log "token=$me REAP-DEAD $(gate_owner_describe "$root/reap/owner") — recovery stays blocked; once its pid is confirmed gone: ssh <build host> rm -rf $root/reap" ;;
+      unmeasured) gate_log "token=$me the reap mutex's holder could not be judged: $(gate_owner_describe "$root/reap/owner")" ;;
+      *) gate_log "token=$me REAP-STUCK $(gate_owner_describe "$root/reap/owner") ($verdict) — recovery waits for it" ;;
+    esac
+    return 1
+  fi
+  return 0
+}
+
+# --- holder-less devices: the run's record of itself, kept past its slot ---------------------------------------
+# A run cut off with its build host can leave its device Booted after the slot record is gone, and every
+# later run then waits on it as an unowned gate device (2026-10-19: one such device held its lane's next
+# runs for 2460 s and more). Nothing on the host ties a device's name to a live process — the run token
+# the name ends in is a variable of the caller's shell, in no process's arguments — so the run writes
+# run.<token>, a copy of its own slot record (pid, start time, process group, host, device names), when
+# it names its device, and KEEPS it past its release: a release that read its device as gone while it
+# was not still leaves the record that can judge it. A device is recovered only through that record,
+# judged by gate_judge exactly as a holder is, and only when ALL of these hold: its name is
+# gate-*-<token> carrying the record's own token (the name shape of the gates that write run tokens; a
+# mac-gate-iphone-*/mac-gate-ipad-* device never is), the record is not a shared hold's, its run is
+# stale (pid gone or reused, no process of its group), and — read again under the reap mutex — the
+# record is still stale, no slot record names the device by name or UDID, and that UDID is still listed
+# Booted under that name. Then that one UDID is shut down, deleted and confirmed gone by re-listing; one
+# that will not go logs DEVICE-STUCK and stays. No record, an unreadable one, or a run that cannot be
+# judged is unmeasured, never stale: the device is left alone and the wait keeps its term.
+gate_run_record_write() {
+  local root="$GATE_SLOT_ROOT" tmp
+  [ "$GATE_SLOT_HELD" = 1 ] || return 1
+  tmp="$root/runrec.tmp.$GATE_SLOT_TOKEN"
+  cp "$root/sim/owner" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  [ "$(gate_owner_get "$tmp" token)" = "$GATE_SLOT_TOKEN" ] || { rm -f "$tmp"; return 1; }
+  gate_replace_file "$tmp" "$root/run.$GATE_SLOT_TOKEN" || { rm -f "$tmp"; return 1; }
+}
+# The one record that answers for NAME: run.<token> whose token NAME ends in as gate-*-<token>, and
+# which names NAME itself. Prints its path; 1 when there is none, or more than one.
+gate_run_record_for() { # NAME
+  local name="$1" f tok found=""
+  for f in "$GATE_SLOT_ROOT"/run.*; do
+    [ -f "$f" ] || continue
+    tok="${f##*/run.}"
+    [ -n "$tok" ] || continue
+    case "$name" in gate-*-"$tok") ;; *) continue ;; esac
+    [ "$(gate_owner_get "$f" token)" = "$tok" ] || continue
+    gate_owner_all "$f" device | grep -Fxq -- "$name" || continue
+    [ -z "$found" ] || return 1
+    found="$f"
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+# Copies NAME's run record to SNAPSHOT and prints stale | live | orphan | unmeasured | shared for it.
+gate_device_judge() { # NAME SNAPSHOT
+  local rec
+  rm -f "$2"
+  rec="$(gate_run_record_for "$1")" || { echo unmeasured; return; }
+  cp "$rec" "$2" 2>/dev/null || { echo unmeasured; return; }
+  [ "$(gate_owner_get "$2" shared)" = 0 ] || { echo shared; return; }
+  gate_judge "$2"
+}
+# Recovers one Booted gate device that no slot record names. 0 when it is gone (deleted here, or found
+# gone under the reap mutex), 1 when it stays. Never claims sim.
+gate_device_recover() { # UDID NAME MY_TOKEN
+  local udid="$1" name="$2" me="$3" root="$GATE_SLOT_ROOT" snap verdict run list row attempt=1
+  snap="$root/devsnap.$me"
+  verdict="$(gate_device_judge "$name" "$snap")"
+  run="$(gate_owner_get "$snap" token)"
+  rm -f "$snap"
+  [ "$verdict" = stale ] || return 1
+  gate_hook after-device-judge
+  gate_reap_claim "$me" || return 1
+  # Everything again, where the effect is: the record, the slot, the device.
+  verdict="$(gate_device_judge "$name" "$snap")"
+  if [ "$verdict" != stale ] || [ "$(gate_owner_get "$snap" token)" != "$run" ]; then
+    rm -f "$snap"
+    gate_log "token=$me holder-less recovery backed off: the run record of $name reads $verdict under the reap mutex"
+    gate_reap_release "$me"; return 1
+  fi
+  rm -f "$snap"
+  if [ -e "$root/sim" ] && { [ ! -r "$root/sim/owner" ] \
+       || gate_owner_all "$root/sim/owner" device | grep -Fxq -- "$name" \
+       || gate_owner_all "$root/sim/owner" udid | grep -Fxq -- "$udid"; }; then
+    gate_log "token=$me holder-less recovery backed off: the slot names $name ($udid) now, or cannot be read"
+    gate_reap_release "$me"; return 1
+  fi
+  if ! list="$(gate_read_devices)"; then
+    gate_log "token=$me holder-less recovery backed off: the device list could not be read"
+    gate_reap_release "$me"; return 1
+  fi
+  row="$(printf '%s\n' "$list" | awk -F '\t' -v u="$udid" '$1 == u { print $2 "|" $3; exit }')"
+  if [ -z "$row" ]; then
+    gate_log "token=$me holder-less device $udid ($name) is gone already"
+    gate_reap_release "$me"; return 0
+  fi
+  if [ "$row" != "Booted|$name" ]; then
+    gate_log "token=$me holder-less recovery backed off: $udid now reads '$row'"
+    gate_reap_release "$me"; return 1
+  fi
+  gate_log "token=$me HOLDERLESS-DEVICE udid=$udid name=$name run=$run — no slot record names it and its run is gone (pid and process group): deleting this one device under the reap mutex"
+  while :; do
+    $GATE_SIMCTL shutdown "$udid" >/dev/null 2>&1
+    $GATE_SIMCTL delete "$udid" >/dev/null 2>&1
+    if ! list="$(gate_read_devices)"; then
+      gate_log "token=$me holder-less device $udid: its deletion could not be confirmed (the device list could not be read)"
+      gate_reap_release "$me"; return 1
+    fi
+    if [ -z "$(printf '%s\n' "$list" | awk -F '\t' -v u="$udid" '$1 == u { print $1 }')" ]; then
+      gate_log "token=$me device-deletion-confirmed udid=$udid name=$name (holder-less, run $run)"
+      gate_reap_release "$me"; return 0
+    fi
+    [ "$attempt" -lt 3 ] || break
+    attempt=$((attempt + 1))
+    "$GATE_SLEEP" 3
+  done
+  gate_log "token=$me DEVICE-STUCK udid=$udid name=$name (a holder-less device that will not delete; once nothing of run $run is alive: xcrun simctl delete $udid)"
+  gate_reap_release "$me"
+  return 1
+}
+# Drops the record of a run judged stale that has no device left in LIST, a measured listing. A record
+# whose run is alive, cannot be judged, or still has a device of its names listed (in any state) stays.
+gate_run_records_sweep() { # DEVICE_LIST
+  local f name left
+  for f in "$GATE_SLOT_ROOT"/run.*; do
+    [ -f "$f" ] || continue
+    left=0
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if printf '%s\n' "$1" | awk -F '\t' -v n="$name" '$3 == n { f = 1 } END { exit !f }'; then left=1; break; fi
+    done <<GATE_RUN_NAMES_EOF
+$(gate_owner_all "$f" device)
+GATE_RUN_NAMES_EOF
+    [ "$left" -eq 0 ] || continue
+    [ "$(gate_judge "$f" </dev/null)" = stale ] || continue
+    rm -f "$f"
+  done
+}
 
 # --- the simulator admission ---------------------------------------------------------------------
 # Waits for every condition and a free slot, then claims it. SHARED_UDID is the shared device's UDID
@@ -517,7 +652,7 @@ gate_slot_wait_claim() { # PROJECT BRANCH TOKEN SHARED SHARED_UDID
 gate_slot_wait_claim_polls() {
   local project="$1" branch="$2" token="$3" shared="$4" shared_udid="${5:-}"
   local root="$GATE_SLOT_ROOT" waited=0 unmeasured_run=0 terms unmeasured space_only
-  local free swap mem load devices holder_file verdict holder_names holder_udids line udid state name pat
+  local free swap mem load devices holder_file verdict holder_names holder_udids line udid state name pat holderless recovered
   GATE_SLOT_WAITED=0
   mkdir -p "$root" 2>/dev/null || { gate_log "token=$token cannot create $root"; return 13; }
   while :; do
@@ -565,6 +700,7 @@ gate_slot_wait_claim_polls() {
       space_only=0
       unmeasured="$unmeasured holder"
     fi
+    holderless=""
     if devices="$(gate_read_devices)"; then
       while IFS='	' read -r udid state name; do
         [ "$state" = Booted ] || continue
@@ -581,13 +717,27 @@ $name
 "*) continue ;; esac
         for pat in $GATE_DEVICE_PATTERNS; do
           case "$name" in
-            $pat) terms="$terms unowned-gate-device=$name($udid)"; space_only=0; break ;;
+            $pat) terms="$terms unowned-gate-device=$name($udid)"; space_only=0
+                  holderless="$holderless$udid	$name
+"; break ;;
           esac
         done
       done <<GATE_DEV_EOF
 $devices
 GATE_DEV_EOF
+      gate_run_records_sweep "$devices"
     else unmeasured="$unmeasured devices"; fi
+    # A Booted gate device no slot record names is recovered only through its run's record.
+    if [ -n "$holderless" ]; then
+      recovered=0
+      while IFS='	' read -r udid name; do
+        [ -n "$udid" ] || continue
+        gate_device_recover "$udid" "$name" "$token" </dev/null && recovered=1
+      done <<GATE_HOLDERLESS_EOF
+$holderless
+GATE_HOLDERLESS_EOF
+      [ "$recovered" -eq 0 ] || continue
+    fi
     if [ -n "$unmeasured" ]; then
       unmeasured_run=$((unmeasured_run + 1))
       gate_log "token=$token unmeasured:$unmeasured (poll $unmeasured_run of $GATE_UNMEASURED_MAX)"

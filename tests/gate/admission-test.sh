@@ -570,6 +570,204 @@ if [ "$rc" -eq 11 ] && [ "$(slot_token)" = tokDS ] && printf '%s' "$out" | grep 
   ok "a dead shared holder whose record names no device is never recovered"
 else bad "identity-less shared recovery: rc $rc (want 11), slot '$(slot_token)'"; show "$out"; fi
 
+# --- holder-less gate devices (MEMNG-880) ---------------------------------------------------------------------
+# A run cut off with its build host can leave its device Booted while no slot record names it. The run
+# leaves a record of itself beside the slot, run.<token>, written when it names its device and kept past
+# its release; a device is recovered only through that record, judged as strictly as a holder.
+H1=670b0364f41928f2; H2=9f2796c808a999ad; H3=4c1d2e3f5a6b7c8d
+# Plants the record a run leaves: TOKEN PID LSTART PGID DEVICE_NAME [SHARED [HOST]]
+plant_run() {
+  {
+    printf 'project=other-project\nbranch=fix/old\ntoken=%s\nhost=%s\n' "$1" "${7:-$HOSTNAME_S}"
+    printf 'pid=%s\nlstart=%s\npgid=%s\nshared=%s\nstate=held\nclaimed=2026-10-19T19:40:00Z\n' "$2" "$3" "$4" "${6:-0}"
+    printf 'device=%s\n' "$5"
+  } > "$GATE_SLOT_ROOT/run.$1"
+}
+untouched_case() { # NAME UDID — the device stays, the wait keeps its term, the ceiling refuses (11)
+  out="$(GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+  if [ "$rc" -eq 11 ] && has_device "$2" && [ "$(dev_state "$2")" = Booted ] \
+     && printf '%s' "$out" | grep -q "unowned-gate-device=.*($2)" && ! printf '%s' "$out" | grep -q 'HOLDERLESS-DEVICE' \
+     && [ ! -e "$GATE_SLOT_ROOT/reap" ]; then
+    ok "$1"
+  else bad "$1: rc $rc, device $(has_device "$2" && dev_state "$2" || echo deleted)"; show "$out"; fi
+}
+
+# The incident, through the run's own code: the run names and creates its device, then dies with no trap
+# (its build host cut off); the slot record is gone, the device stays Booted.
+healthy
+own_group_run "$tmp/cut" hold "$H1"
+wait_for "$tmp/cut.ready"
+cut_udid="$(gate_owner_get "$GATE_SLOT_ROOT/sim/owner" udid)"
+kill -KILL -- "-$RUN_PID" 2>/dev/null; bounded_wait "$RUN_PID"
+rm -rf "${GATE_SLOT_ROOT:?}/sim"; printf 'token=x\n' > "$GATE_SLOT_ROOT/snapshot.$H1"
+out="$(gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(sleeps)" -eq 0 ] && [ "$(slot_token)" = tokS ] && [ -n "$cut_udid" ] && ! has_device "$cut_udid" \
+   && printf '%s' "$out" | grep -q "HOLDERLESS-DEVICE udid=$cut_udid name=gate-fix-branch-$H1" \
+   && printf '%s' "$out" | grep -q "token=tokS device-deletion-confirmed udid=$cut_udid" \
+   && [ ! -e "$GATE_SLOT_ROOT/reap" ] && [ ! -e "$GATE_SLOT_ROOT/run.$H1" ]; then
+  ok "a Booted gate device of a run cut off without a trap, named by no slot record: its one udid deleted under the reap mutex, HOLDERLESS-DEVICE logged, admitted at once"
+else bad "holder-less device of a cut-off run: rc $rc, $(sleeps) sleeps, udid '$cut_udid' $(has_device "$cut_udid" && echo kept || echo deleted), record $([ -e "$GATE_SLOT_ROOT/run.$H1" ] && echo kept || echo gone)"; show "$out"; fi
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "Thu Jan  1 00:00:00 2026" "$p" "gate-fix-old-$H1"
+add_device "$U1" "gate-fix-old-$H1" Booted; add_device "$U2" "gate-fix-old-$H1" Shutdown; add_device "$U3" "gate-fix-other-$H2" Booted
+p2="$(dead_pid)"; plant_run "$H2" "$p2" "x" "$p2" "gate-fix-other-$H2"
+out="$(gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && ! has_device "$U1" && ! has_device "$U3" && has_device "$U2" && [ "$(dev_state "$U2")" = Shutdown ]; then
+  ok "only the Booted udid of a dead run is deleted: a shut-down device of the same name is not touched (one udid per recovery)"
+else bad "one udid: rc $rc, devices '$(ls "$SIM" | tr '\n' ' ')'"; show "$out"; fi
+
+healthy
+live_group; plant_run "$H1" "$LIVE" "$(lstart_of "$LIVE")" "$LIVE" "gate-fix-live-$H1"; add_device "$U1" "gate-fix-live-$H1" Booted
+untouched_case "a holder-less device of a LIVE run is never deleted (its record's pid lives)" "$U1"
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+live_group; plant_run "$H1" "$(dead_pid)" "Thu Jan  1 00:00:00 2026" "$LIVE" "gate-fix-orph-$H1"; add_device "$U1" "gate-fix-orph-$H1" Booted
+untouched_case "a holder-less device whose run's pid is gone but whose process group lives is never deleted" "$U1"
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-far-$H1" 0 some-other-mac; add_device "$U1" "gate-fix-far-$H1" Booted
+untouched_case "a holder-less device whose run record names another host is never deleted (its pids cannot be asked about here)" "$U1"
+
+healthy
+add_device "$U1" "gate-fix-norec-$H1" Booted
+untouched_case "a holder-less device with no run record is left alone: its liveness is unmeasured, not stale" "$U1"
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "" "$p" "gate-fix-nolstart-$H1"; add_device "$U1" "gate-fix-nolstart-$H1" Booted
+untouched_case "a run record that cannot be judged (no start time) is unmeasured: the device is left alone" "$U1"
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-sh-$H1" 1; add_device "$U1" "gate-fix-sh-$H1" Booted
+untouched_case "a dead run's record that marks its device shared never deletes that device" "$U1"
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-mine-$H1"; add_device "$U1" "gate-fix-mine-$H1" Booted
+out="$(gate_slot_wait_claim proj fix/s tokS 1 "$U1" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && has_device "$U1" && [ "$(dev_state "$U1")" = Booted ] && ! printf '%s' "$out" | grep -q 'HOLDERLESS-DEVICE'; then
+  ok "the waiter's own shared device is never recovered, even when a dead run's record names it"
+else bad "own shared device: rc $rc, device $(has_device "$U1" && dev_state "$U1" || echo deleted)"; show "$out"; fi
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "mac-gate-ipad-77"; add_device "$U1" "mac-gate-ipad-77" Booted
+untouched_case "another project's device (mac-gate-ipad-*) is never deleted, even with a dead run record naming it" "$U1"
+healthy
+p="$(dead_pid)"; plant_run 77 "$p" "x" "$p" "mac-gate-ipad-77"; add_device "$U1" "mac-gate-ipad-77" Booted
+untouched_case "another project's device whose name ends in its record's token is never deleted (not gate-*-<token>)" "$U1"
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-x-$H2"; add_device "$U1" "gate-fix-x-$H2" Booted
+untouched_case "a record naming a device that carries ANOTHER run's token never deletes it" "$U1"
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-a-$H1"; add_device "$U1" "gate-fix-b-$H1" Booted; add_device "$U2" "gate-fix-a-$H1" Shutdown
+untouched_case "a device carrying a dead run's token under a name its record never wrote is not deleted" "$U1"
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-held-$H1"
+live_group; plant tokL "$LIVE" "$(lstart_of "$LIVE")" "$LIVE" "gate-fix-held-$H1"; add_device "$U1" "gate-fix-held-$H1" Booted
+out="$(GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 11 ] && has_device "$U1" && [ "$(slot_token)" = tokL ] && ! printf '%s' "$out" | grep -q 'HOLDERLESS-DEVICE'; then
+  ok "a device the slot's live holder names is the holder's, never a holder-less recovery's"
+else bad "held device: rc $rc, device $(has_device "$U1" && echo kept || echo deleted)"; show "$out"; fi
+kill -KILL "$LIVE" 2>/dev/null
+
+# Under the reap mutex everything is read again: a run record that reads live there, or a slot that names
+# the device there, stops the delete; a device another recoverer already deleted is not an error.
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-rj-$H1"; add_device "$U1" "gate-fix-rj-$H1" Booted
+live_group
+cat > "$tmp/rj-hook" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = after-device-judge ] || exit 0
+printf 'token=$H1\nhost=$HOSTNAME_S\npid=$LIVE\nlstart=$(lstart_of "$LIVE")\npgid=$LIVE\nshared=0\ndevice=gate-fix-rj-$H1\n' > "$GATE_SLOT_ROOT/run.$H1"
+EOF
+chmod +x "$tmp/rj-hook"
+out="$(GATE_TEST_HOOK="$tmp/rj-hook" GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 11 ] && has_device "$U1" && [ ! -e "$GATE_SLOT_ROOT/reap" ] && printf '%s' "$out" | grep -q 'holder-less recovery backed off'; then
+  ok "a run record re-judged live under the reap mutex stops the delete (the judgment is taken again where the effect is)"
+else bad "re-judge under reap: rc $rc, device $(has_device "$U1" && echo kept || echo deleted)"; show "$out"; fi
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-sl-$H1"; add_device "$U1" "gate-fix-sl-$H1" Booted
+live_group
+cat > "$tmp/sl-hook" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = after-device-judge ] || exit 0
+mkdir -p "$GATE_SLOT_ROOT/sim"
+printf 'token=tokL\nhost=$HOSTNAME_S\npid=$LIVE\nlstart=$(lstart_of "$LIVE")\npgid=$LIVE\nshared=0\nstate=held\nudid=$U1\n' > "$GATE_SLOT_ROOT/sim/owner"
+EOF
+chmod +x "$tmp/sl-hook"
+out="$(GATE_TEST_HOOK="$tmp/sl-hook" GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 11 ] && has_device "$U1" && [ "$(slot_token)" = tokL ] && printf '%s' "$out" | grep -q 'holder-less recovery backed off'; then
+  ok "a slot record that names the device by the time the reap mutex is held stops the delete"
+else bad "slot names device under reap: rc $rc, device $(has_device "$U1" && echo kept || echo deleted)"; show "$out"; fi
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-gone-$H1"; add_device "$U1" "gate-fix-gone-$H1" Booted
+cat > "$tmp/gone-hook" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = after-device-judge ] || exit 0
+rm -f "${SIM:?}/${U1:?}"
+EOF
+chmod +x "$tmp/gone-hook"
+out="$(GATE_TEST_HOOK="$tmp/gone-hook" gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(slot_token)" = tokS ] && [ ! -e "$GATE_SLOT_ROOT/reap" ] \
+   && ! printf '%s' "$out" | grep -q "DEVICE-STUCK"; then
+  ok "two recoverers on one holder-less device: the second finds it gone under the reap mutex, deletes nothing, and is admitted"
+else bad "second recoverer: rc $rc, reap $([ -e "$GATE_SLOT_ROOT/reap" ] && echo held || echo free)"; show "$out"; fi
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-rs-$H1"; add_device "$U1" "gate-fix-rs-$H1" Booted
+live_group; mkdir -p "$GATE_SLOT_ROOT/reap"
+printf 'token=tokZ\nhost=%s\npid=%s\nlstart=%s\npgid=%s\n' "$HOSTNAME_S" "$LIVE" "$(lstart_of "$LIVE")" "$LIVE" > "$GATE_SLOT_ROOT/reap/owner"
+out="$(GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 11 ] && has_device "$U1" && [ "$(gate_owner_get "$GATE_SLOT_ROOT/reap/owner" token)" = tokZ ] \
+   && printf '%s' "$out" | grep -q 'REAP-STUCK'; then
+  ok "a holder-less recovery waits while another recoverer holds the reap mutex (REAP-STUCK), deleting nothing"
+else bad "reap held: rc $rc, device $(has_device "$U1" && echo kept || echo deleted)"; show "$out"; fi
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-stk-$H1"; add_device "$U1" "gate-fix-stk-$H1" Booted; : > "$SIM/undeletable-$U1"; : > "$SIM/stuck-$U1"
+out="$(GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 11 ] && has_device "$U1" && [ ! -e "$GATE_SLOT_ROOT/reap" ] && [ -e "$GATE_SLOT_ROOT/run.$H1" ] \
+   && printf '%s' "$out" | grep -q "DEVICE-STUCK udid=$U1"; then
+  ok "a holder-less device that will not delete logs DEVICE-STUCK, keeps its run record, releases the reap mutex and keeps the wait"
+else bad "stuck holder-less device: rc $rc, reap $([ -e "$GATE_SLOT_ROOT/reap" ] && echo held || echo free)"; show "$out"; fi
+
+# The records: written by the run when it names its device, kept past its own release, and swept by a
+# later admission only once their run is judged stale AND no device of theirs is listed.
+healthy
+own_group_run "$tmp/rec" release "$H3"
+bounded_wait "$RUN_PID"
+if [ "$(cat "$tmp/rec.rc" 2>/dev/null)" = 0 ] && [ "$(gate_owner_get "$GATE_SLOT_ROOT/run.$H3" token)" = "$H3" ] \
+   && [ "$(gate_owner_get "$GATE_SLOT_ROOT/run.$H3" device)" = "gate-fix-branch-$H3" ] \
+   && [ "$(gate_owner_get "$GATE_SLOT_ROOT/run.$H3" pid)" = "$RUN_PID" ] \
+   && [ -n "$(gate_owner_get "$GATE_SLOT_ROOT/run.$H3" lstart)" ] && [ -n "$(gate_owner_get "$GATE_SLOT_ROOT/run.$H3" pgid)" ]; then
+  ok "a run that names its device leaves run.<token> (token, device, pid, start time, group) and keeps it past its own release"
+else bad "run record: release '$(cat "$tmp/rec.rc" 2>/dev/null)', record '$(cat "$GATE_SLOT_ROOT/run.$H3" 2>/dev/null | tr '\n' ' ')'"; show "$(cat "$tmp/rec.log")"; fi
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-a-$H1"
+live_group; plant_run "$H2" "$LIVE" "$(lstart_of "$LIVE")" "$LIVE" "gate-fix-b-$H2"
+q="$(dead_pid)"; plant_run "$H3" "$q" "x" "$q" "gate-fix-c-$H3"; add_device "$U1" "gate-fix-c-$H3" Shutdown
+out="$(gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ ! -e "$GATE_SLOT_ROOT/run.$H1" ] && [ -e "$GATE_SLOT_ROOT/run.$H2" ] && [ -e "$GATE_SLOT_ROOT/run.$H3" ]; then
+  ok "admission sweeps a dead run's record with no device left, and keeps a live run's and one whose device still exists"
+else bad "record sweep: rc $rc, records '$(ls "$GATE_SLOT_ROOT" | grep '^run\.' | tr '\n' ' ')'"; show "$out"; fi
+kill -KILL "$LIVE" 2>/dev/null
+
+healthy
+p="$(dead_pid)"; plant_run "$H1" "$p" "x" "$p" "gate-fix-a-$H1"; : > "$F/simctl-fail"
+out="$(GATE_CEILING_S=120 gate_slot_wait_claim proj fix/s tokS 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 13 ] && [ -e "$GATE_SLOT_ROOT/run.$H1" ]; then
+  ok "an unmeasured device listing sweeps no record (a device the reader cannot see is not a device that is gone)"
+else bad "sweep on unmeasured: rc $rc, record $([ -e "$GATE_SLOT_ROOT/run.$H1" ] && echo kept || echo gone)"; show "$out"; fi
+
 # --- the run admission (controller side) -------------------------------------------------------------------
 reader_value=""; reader_rc=0
 fake_run_reader() { printf '%s\n' "$(cat "$tmp/avail")"; return "$(cat "$tmp/avail-rc")"; }
