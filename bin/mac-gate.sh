@@ -3435,15 +3435,28 @@ for bundle in wanted:
         rc = 1
 sys.exit(rc)
 PY
-  local count_rc=$? compare_rc verdict baseline
+  local count_rc=$? compare_rc verdict baseline verdict_out nl=$'\n'
   verdict="$GATE_TARGET/scripts/testcount-verdict.sh"
   baseline="$GATE_TARGET/tests/gate/testcount-baseline.tsv"
   # Running at all is a floor, not a count: a bundle that lost cases still runs something. The
   # counts just written are judged against the tracked baseline, and both halves are reported
   # before either one decides the step, so a failing count never hides what the comparison said.
   if [ -x "$verdict" ]; then
-    "$verdict" .gate-artifacts/testcount-baseline.tsv "$baseline"
+    # Both of the verdict's streams, taken together and printed on this step's stdout: its input
+    # refusals are written on stderr, which reaches the controller on a separate ssh channel in no
+    # order against this step's own lines. And a verdict that exits non-zero without a line that
+    # starts `TESTCOUNT FAIL:` — killed, or silent, as three full gates were (MEMNG-742) — gets one
+    # here, so a failing step always names a reason.
+    verdict_out="$("$verdict" .gate-artifacts/testcount-baseline.tsv "$baseline" 2>&1)"
     compare_rc=$?
+    [ -z "$verdict_out" ] || printf '%s\n' "$verdict_out"
+    if [ "$compare_rc" -ne 0 ]; then
+      case "$nl$verdict_out" in
+        *"${nl}TESTCOUNT FAIL:"*) ;;
+        *) echo "TESTCOUNT FAIL: $verdict exited $compare_rc without naming a reason, so the counts were"
+           echo "                not shown to be at or above $baseline" ;;
+      esac
+    fi
   else
     echo "TESTCOUNT FAIL: $verdict is missing or not executable, so the per-bundle counts were"
     echo "                never compared with the tracked baseline and this step proves nothing"

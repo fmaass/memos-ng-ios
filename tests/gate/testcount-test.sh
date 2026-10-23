@@ -465,7 +465,9 @@ step="$tmp/s_testcount.sh"
 awk '/^s_testcount\(\) [{]/ { f = 1 } f { print } f && /^[}]/ { exit }' "$GATE" > "$step"
 if [ -s "$step" ] && grep -q 'GATE_TEST_BUNDLES' "$step"; then
   ok "the gate's testcount step was read out of $GATE (control)"
-  verdict_call="$(grep -n '^[[:space:]]*"\$verdict"' "$step" | head -n1 | cut -d: -f1)"
+  # The call itself, wherever on its line it sits (the step captures its output since MEMNG-742),
+  # and never a comment that names it.
+  verdict_call="$(awk '!/^[[:space:]]*#/ && /"\$verdict" \.gate-artifacts\/testcount-baseline\.tsv/ { print NR; exit }' "$step")"
   candidate_write="$(grep -n 'testcount-baseline.tsv", "w"' "$step" | head -n1 | cut -d: -f1)"
   if grep -q 'scripts/testcount-verdict.sh' "$step" && [ -n "$verdict_call" ]; then
     ok "the gate's testcount step invokes the baseline comparison"
@@ -769,6 +771,145 @@ if [ "$n_copy" -eq 1 ] && [ "$n_owner" -eq 1 ] && [ "$n_record" -eq 1 ] && [ -n 
 else
   bad "the copyback is not one block both modes reach (rsync $n_copy, owner $n_owner, record $n_record, remote ${remote_ret:-none}, early exit: ${early_exit:-none})"
 fi
+
+# --- (h) every refusal names its reason, on the stream the step's own lines take --------------------
+# Three full gates (2026-10-09, -10-11, -10-17) ended `MAC_GATE_STEP testcount 2` with nothing at all
+# between the counter's `Executed N tests` lines and the step line — no reason, not even the
+# verdict's `TESTCOUNT ok` — and an unchanged rerun passed. A step that fails without saying why is
+# a failure nobody can act on. So the comparison half of the step is read out of the gate as text —
+# everything in s_testcount after the counter's heredoc — and run here against a real verdict fed
+# each input it refuses, and against stand-in verdicts that refuse the way no input can make the real
+# one refuse: silently, on stderr alone, killed, or naming a reason only in the middle of a line.
+# Every one of them must leave a line STARTING `TESTCOUNT FAIL:` on the step's stdout, and the step
+# must still return the verdict's own exit code. Stdout, not "somewhere in the log": the build host's
+# stderr reaches the controller on a separate ssh channel, in no order against the step's own lines,
+# so a reason that travels there can land under some other step, or after the summary.
+frag="$tmp/compare-step.sh"
+{
+  echo 'set -uo pipefail'
+  echo 'compare_step() {'
+  echo '  true # the counter half passed; what follows is the step text after its heredoc'
+  awk '/^s_testcount\(\) [{]/ { f = 1 } f && p { print } f && /^PY$/ { p = 1 } f && /^[}]/ { exit }' "$GATE"
+} > "$frag"
+
+# $1 = a name, $2 = the verdict to install ('-' installs none), $3 = observed counts file ('-' none),
+# $4 = baseline file ('-' none). OUT is the step's stdout, ERR its stderr, RC its exit code.
+compare_case() {
+  local d="$tmp/compare/$1"
+  rm -rf "${d:?}"; mkdir -p "$d/run/.gate-artifacts" "$d/target/scripts" "$d/target/tests/gate"
+  [ "$2" = - ] || { cp "$2" "$d/target/scripts/testcount-verdict.sh"; chmod +x "$d/target/scripts/testcount-verdict.sh"; }
+  [ "$3" = - ] || cp "$3" "$d/run/.gate-artifacts/testcount-baseline.tsv"
+  [ "$4" = - ] || cp "$4" "$d/target/tests/gate/testcount-baseline.tsv"
+  OUT="$(cd "$d/run" && GATE_TARGET="$d/target" bash -c '. "$1" && compare_step' compare "$frag" 2>"$d/stderr")"
+  RC=$?
+  ERR="$(cat "$d/stderr")"
+}
+# How many lines of OUT start with the reason prefix. Counted with a loop over the text, not a
+# `printf | grep -q` pipeline, whose early exit would hand pipefail a SIGPIPE status instead.
+fail_lines() {
+  local line n=0
+  while IFS= read -r line; do
+    case "$line" in 'TESTCOUNT FAIL:'*) n=$((n + 1)) ;; esac
+  done <<< "$OUT"
+  printf '%s' "$n"
+}
+# $1 = a name, $2 = the exit code the step must return, $3 = (optional) words of the verdict's own
+# reason that must be on that stdout too — not only the step's fallback line
+expect_reason() {
+  local own=1 own_said=""
+  case "$OUT" in *"${3:-}"*) ;; *) own=0 ;; esac
+  [ -z "${3:-}" ] || own_said=", own reason [$3] on stdout: $own"
+  if [ "$RC" -eq "$2" ] && [ "$(fail_lines)" -ge 1 ] && [ "$own" -eq 1 ]; then
+    ok "$1: the step exits $RC and its stdout names the reason"
+  else
+    bad "$1: the step exited $RC (wanted $2) with $(fail_lines) TESTCOUNT FAIL: line(s) on its stdout$own_said"
+    show; printf '%s\n' "$ERR" | sed 's/^/   2>| /'
+  fi
+}
+
+if [ -s "$frag" ] && grep -q 'scripts/testcount-verdict.sh' "$frag" && grep -q 'return "\$compare_rc"' "$frag"; then
+  ok "the comparison half of s_testcount was read out of $GATE (control)"
+else
+  bad "the comparison half of s_testcount could not be read out of $GATE — the cases below judge nothing"
+fi
+
+good_obs="$(baseline h-obs MemosAPITests 3 MemosCoreTests 5)"
+good_base="$(baseline h-base MemosAPITests 3 MemosCoreTests 5)"
+bad_dir="$tmp/h-bad"; mkdir -p "$bad_dir"
+printf 'MemosAPITests\t3\nMemosCoreTests\t5\0\n'      > "$bad_dir/nul.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests\t5\001\n'    > "$bad_dir/ctrl.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests\t5'          > "$bad_dir/no-lf.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests\t5\r\n'      > "$bad_dir/cr.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests 5\n'         > "$bad_dir/shape.tsv"
+printf 'MemosAPITests\t3\nMemos CoreTests\t5\n'       > "$bad_dir/space.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests\tfive\n'     > "$bad_dir/word.tsv"
+printf 'MemosAPITests\t3\nMemosCoreTests\t1234567890\n' > "$bad_dir/long.tsv"
+: > "$bad_dir/empty.tsv"
+printf 'MemosAPITests\t3\nMemosAPITests\t3\nMemosCoreTests\t5\n' > "$bad_dir/twice.tsv"
+surplus_base="$(baseline h-surplus MemosAPITests 3 MemosCoreTests 5 MemosOutboxTests 1)"
+below_base="$(baseline h-below MemosAPITests 3 MemosCoreTests 6)"
+short_base="$(baseline h-short MemosAPITests 3)"
+
+# The real verdict, through every exit it has. Each one reaches `exit 2` (or `exit 1`) by a different
+# line, and the validate() refusals print from inside a command substitution, on stderr.
+compare_case pass "$VERDICT" "$good_obs" "$good_base"
+case "$OUT" in *'TESTCOUNT ok:'*) pass_said=1 ;; *) pass_said=0 ;; esac
+if [ "$RC" -eq 0 ] && [ "$(fail_lines)" -eq 0 ] && [ "$pass_said" -eq 1 ]; then
+  ok "a run at its baseline passes the step with TESTCOUNT ok and no reason line (control)"
+else
+  bad "a run at its baseline did not pass cleanly (exit $RC, $(fail_lines) TESTCOUNT FAIL: line(s))"; show
+fi
+compare_case obs-missing "$VERDICT" - "$good_base";              expect_reason "the run's counts are missing" 2 "is missing or unreadable"
+compare_case base-missing "$VERDICT" "$good_obs" -;              expect_reason "the baseline is missing" 2 "is missing or unreadable"
+compare_case nul "$VERDICT" "$good_obs" "$bad_dir/nul.tsv";       expect_reason "the baseline holds a NUL byte" 2 "holds a NUL byte"
+compare_case ctrl "$VERDICT" "$good_obs" "$bad_dir/ctrl.tsv";     expect_reason "the baseline holds a control byte" 2 "not printable ASCII"
+compare_case no-lf "$VERDICT" "$good_obs" "$bad_dir/no-lf.tsv";   expect_reason "the baseline does not end in LF" 2 "does not end in a newline"
+compare_case cr "$VERDICT" "$good_obs" "$bad_dir/cr.tsv";         expect_reason "a baseline row ends in CR" 2 "carriage return"
+compare_case shape "$VERDICT" "$good_obs" "$bad_dir/shape.tsv";   expect_reason "a baseline row is not <bundle> TAB <count>" 2 "is not <bundle> TAB <count>"
+compare_case space "$VERDICT" "$good_obs" "$bad_dir/space.tsv";   expect_reason "a baseline bundle has a space in it" 2 "with a space in it"
+compare_case word "$VERDICT" "$good_obs" "$bad_dir/word.tsv";     expect_reason "a baseline count is not a number" 2 "which is not a number"
+compare_case long "$VERDICT" "$good_obs" "$bad_dir/long.tsv";     expect_reason "a baseline count is ten digits" 2 "a count of 10 digits"
+compare_case obs-shape "$VERDICT" "$bad_dir/shape.tsv" "$good_base"; expect_reason "a row of the run's counts is malformed" 2 "the observed counts"
+compare_case obs-empty "$VERDICT" "$bad_dir/empty.tsv" "$good_base"; expect_reason "the run's counts are empty" 2 "holds no counts"
+compare_case obs-twice "$VERDICT" "$bad_dir/twice.tsv" "$good_base"; expect_reason "the run's counts name a bundle twice" 2 "names MemosAPITests twice"
+compare_case base-twice "$VERDICT" "$good_obs" "$bad_dir/twice.tsv"; expect_reason "the baseline names a bundle twice" 2 "names MemosAPITests twice"
+compare_case surplus "$VERDICT" "$good_obs" "$surplus_base";      expect_reason "the baseline names a bundle the run did not measure" 2 "which this run did not measure"
+compare_case below "$VERDICT" "$good_obs" "$below_base";          expect_reason "a bundle is below its row" 1 "below the 6 its baseline row records"
+compare_case no-row "$VERDICT" "$good_obs" "$short_base";         expect_reason "a bundle has no row" 1 "has no row in the baseline"
+# The NUL scan that cannot answer: no input makes `grep -c` print nothing, so a grep that does is
+# put first on the PATH the verdict inherits, for that one call; every other grep is passed through.
+real_grep="$(command -v grep)"
+mkdir -p "$tmp/h-path"
+printf '#!/usr/bin/env bash\n[ "${1:-}" = "-c" ] && exit 2\nexec "%s" "$@"\n' "$real_grep" > "$tmp/h-path/grep"
+chmod +x "$tmp/h-path/grep"
+PATH="$tmp/h-path:$PATH" compare_case nul-scan "$VERDICT" "$good_obs" "$good_base"
+expect_reason "the NUL scan cannot answer" 2 "could not be scanned for NUL bytes"
+
+# Verdicts that refuse in ways no input makes the real one refuse.
+stub() { # $1 = a name, $2 = its body; prints the path
+  printf '#!/usr/bin/env bash\n%s\n' "$2" > "$tmp/h-stub-$1.sh"
+  printf '%s' "$tmp/h-stub-$1.sh"
+}
+compare_case silent "$(stub silent 'exit 2')" "$good_obs" "$good_base"
+expect_reason "a verdict that exits 2 printing nothing (the 2026-10-09 shape)" 2 "exited 2 without naming a reason"
+compare_case stderr-only "$(stub stderr-only 'echo "TESTCOUNT FAIL: said on stderr only" >&2; exit 2')" "$good_obs" "$good_base"
+expect_reason "a verdict whose only reason is on stderr" 2 "said on stderr only"
+compare_case killed "$(stub killed 'kill -KILL $$')" "$good_obs" "$good_base"
+expect_reason "a verdict killed before it printed" 137 "exited 137 without naming a reason"
+compare_case mid-line "$(stub mid-line 'echo "note: a TESTCOUNT FAIL: line would go here"; exit 2')" "$good_obs" "$good_base"
+expect_reason "a verdict that names the prefix only in the middle of a line" 2
+compare_case other-rc "$(stub other-rc 'echo "counting..."; exit 3')" "$good_obs" "$good_base"
+expect_reason "a verdict that exits 3 after unrelated output" 3
+# One reason is one line: a verdict that named its reason first is not given a second one.
+compare_case first-line "$(stub first-line 'echo "TESTCOUNT FAIL: the first line"; exit 2')" "$good_obs" "$good_base"
+if [ "$RC" -eq 2 ] && [ "$(fail_lines)" -eq 1 ]; then
+  ok "a verdict that named its reason on its first line gets no second reason line"
+else
+  bad "a verdict that named its reason on its first line: exit $RC, $(fail_lines) TESTCOUNT FAIL: line(s) (wanted 2 and 1)"; show
+fi
+# A verdict the step cannot run is the step's own refusal, and keeps exit 1.
+compare_case no-verdict - "$good_obs" "$good_base"
+expect_reason "no verdict script at all" 1
 
 # --- verdict ----------------------------------------------------------------------------------------
 if [ "$counter_control" -ne 1 ]; then

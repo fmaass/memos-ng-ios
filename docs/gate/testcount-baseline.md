@@ -12,6 +12,11 @@ neither short of one nor naming one more, so a run whose bundle list differs fro
 baseline fails at testcount, and that is intended: the full gate's verdict is only valid over the
 default bundle list, and adding or removing a bundle re-records the baseline in the same change. A
 baseline that is absent, unreadable or malformed fails too — a count nobody recorded is not a zero.
+A failing step always names its reason in the run log (MEMNG-742): the step takes both of the
+verdict's streams together and prints them on its own stdout, in order with the step line (the
+build host's stderr would otherwise reach the log on a separate ssh channel, in no order), and a
+verdict that exits non-zero without a line starting `TESTCOUNT FAIL:` — killed, or silent — gets
+one from the step naming its exit code; the step still returns the verdict's own exit code.
 What the comparison catches is the loss of a test that RAN: it does not catch the deletion of a
 test that was skipped, nor a reduction that stays inside headroom accumulated since the baseline
 was last recorded — and because the baseline is re-recorded from a branch's final tree before it
