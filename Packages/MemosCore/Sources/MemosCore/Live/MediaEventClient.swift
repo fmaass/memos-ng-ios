@@ -133,6 +133,14 @@ public final class MediaEventClient: Sendable {
     /// The path the events route is mounted at (memos-ng `app/routers/assets.py:822-823`).
     public static let path = "api/events"
 
+    /// The longest reconnection time a stream's `retry:` may ask for, in seconds. The hint is
+    /// honoured above the backoff's cap — a server asking for a minute is stating a fact about
+    /// itself — but not without limit: the field is any digit string, and since the hint outlives
+    /// the connection that sent it, one `retry: 86400000` would park a foregrounded channel for a
+    /// day and every reconnect after it too. `Retry-After` is bounded by the cap for the same
+    /// reason; the stream's own hint gets a ceiling of its own so a minute still means a minute.
+    public static let longestServerRetry: TimeInterval = 300
+
     /// Read fresh per connection, and THROWING on purpose: `nil` means nobody is signed in, a
     /// thrown error means storage would not answer, and only the first of those is terminal.
     private let credentials: @Sendable () async throws -> MediaEventCredentials?
@@ -405,8 +413,11 @@ public final class MediaEventClient: Sendable {
                 let frames = parser.consume(chunk)
                 lastEventID = parser.lastEventID
                 // The reconnection time belongs to the stream, not to this connection's parser:
-                // a connection that sends no `retry:` leaves the last one standing.
-                if let hint = parser.reconnectionTime { serverRetryHint = hint }
+                // a connection that sends no `retry:` leaves the last one standing. Bounded where
+                // it is kept, so every wait that reads it is bounded too.
+                if let hint = parser.reconnectionTime {
+                    serverRetryHint = min(hint, Self.longestServerRetry)
+                }
                 if Task.isCancelled { return result(.cancelled) }
                 // The second gate: whatever this connection was opened for, it is not this
                 // device's business any more once the account has moved. An early exit only —

@@ -133,6 +133,31 @@ struct MediaEventClientTests {
         #expect(await transport.connectCount == 3)
     }
 
+    @Test(
+        "a retry the stream asks for is honoured up to a ceiling, and never past it",
+        arguments: [
+            // A day, a value one past the ceiling, and the ceiling itself.
+            ("retry: 86400000\n\n", MediaEventClient.longestServerRetry),
+            ("retry: 300001\n\n", MediaEventClient.longestServerRetry),
+            ("retry: 300000\n\n", 300),
+        ] as [(String, TimeInterval)]
+    )
+    func serverRetryHintIsBounded(body: String, expected: TimeInterval) async {
+        let transport = ScriptedSSETransport([
+            .dropping(after: body),
+            .dropping(after: ": keep-alive\n\n"),
+        ])
+        let sleeper = RecordingSleeper(budget: 2)
+        let client = LiveStub.client(transport: transport, sleeper: sleeper)
+
+        _ = await client.collect()
+
+        // The bound holds for the connection that asked AND for the one after it, which said
+        // nothing and so still carries the stream's hint.
+        #expect(MediaEventClient.longestServerRetry == 300)
+        #expect(await sleeper.waits == [expected, expected])
+    }
+
     @Test("a refused credential stops the channel instead of retrying with it")
     func unauthorizedIsTerminal() async {
         let transport = ScriptedSSETransport([.status(401)])
