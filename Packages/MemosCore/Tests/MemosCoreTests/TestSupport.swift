@@ -106,6 +106,32 @@ struct RenewingOnRefusal: ClientMiddleware {
     }
 }
 
+/// Lands a renewal on a request's way OUT: after everything the store did before it sent, and
+/// before `BearerAuthMiddleware` reads the credential to attach it.
+///
+/// It sits in FRONT of the bearer middleware, so it runs first, inside the same call, with nothing
+/// awaited between it and that read. `PresentedCredential.replace(with:)` is synchronous and
+/// nonisolated, so the renewal is in place when the read happens by construction — not because a
+/// task queued somewhere else happened to get its turn first.
+struct RenewingBeforeSend: ClientMiddleware {
+    typealias Answer = (HTTPResponse, HTTPBody?)
+    /// `@concurrent` for the reason `RenewingOnRefusal` gives.
+    typealias Next = @concurrent @Sendable (HTTPRequest, HTTPBody?, URL) async throws -> Answer
+
+    let renew: @Sendable () -> Void
+
+    nonisolated func intercept(
+        _ request: HTTPRequest,
+        body: HTTPBody?,
+        baseURL: URL,
+        operationID: String,
+        next: Next
+    ) async throws -> Answer {
+        renew()
+        return try await next(request, body, baseURL)
+    }
+}
+
 enum Stub {
     static let baseURL = URL(string: "https://memos.example.invalid")!
 
@@ -145,6 +171,26 @@ enum Stub {
             configuration: ServerConfiguration(baseURL: baseURL),
             credential: token,
             transport: StubTransport(handler: handler, answersHealthItself: !healthFromHandler)
+        )
+    }
+
+    /// The session's own client — the app's middleware chain, unchanged — with a renewal hook in
+    /// front of it that runs on every request's way out, before the credential is read.
+    static func client(
+        token: PresentedCredential,
+        beforeSend renew: @escaping @Sendable () -> Void,
+        handler: @escaping StubTransport.Handler
+    ) -> any APIProtocol {
+        Client(
+            serverURL: baseURL,
+            configuration: APIClientFactory.runtimeConfiguration,
+            transport: StubTransport(handler: handler),
+            middlewares: [
+                RenewingBeforeSend(renew: renew),
+                BearerAuthMiddleware(credential: token),
+                BusyAnswerMiddleware(),
+                ExplicitNullMiddleware(),
+            ]
         )
     }
 

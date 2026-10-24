@@ -2053,11 +2053,19 @@ private final class SignOnOutcome {
 
     /// Bounded: a call that has not ended within the ceiling records an Issue and is given up on,
     /// never awaited — a call that will not return would hang the suite rather than fail it.
-    func settled(sourceLocation: SourceLocation = #_sourceLocation) async -> Bool? {
-        for _ in 0..<2000 {
-            if let signedOn { return signedOn }
+    ///
+    /// The ceiling is a deadline on the monotonic clock, read once more after it passes, rather
+    /// than a count of 1 ms sleeps whose real length is whatever the host's load makes it
+    /// (MEMNG-693).
+    func settled(
+        within patience: Duration = .seconds(10),
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> Bool? {
+        let deadline = ContinuousClock.now + patience
+        while signedOn == nil, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(1))
         }
+        if let signedOn { return signedOn }
         Issue.record("the sign-on call never returned", sourceLocation: sourceLocation)
         return nil
     }

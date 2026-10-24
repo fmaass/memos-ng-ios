@@ -152,8 +152,31 @@ struct UnreachableNoticeSessionTests {
 
     /// Pumps the main actor until a scheduled task has had its turn, or gives up — the bound is
     /// there so that a condition which never comes true is a failure rather than a hung suite.
-    private func settle(until condition: () -> Bool, turns: Int = 400) async {
-        for _ in 0..<turns where !condition() { await Task.yield() }
+    ///
+    /// On a deadline on the monotonic clock rather than a count of main-actor yields: much of what
+    /// these tests wait for is answered off the main actor, where yielding says nothing about
+    /// when it lands, and a count ran out on a loaded host before the answer did (MEMNG-693). The
+    /// caller's expectation afterwards is the final read; a short `patience` is the window for
+    /// something that must NOT happen.
+    private func settle(
+        until condition: () -> Bool, within patience: Duration = .seconds(10)
+    ) async {
+        _ = await arrives(condition, within: patience)
+    }
+
+    /// Waits on the monotonic clock, up to a deadline, and answers with a FINAL read — so a wait
+    /// whose event never came is a failure its caller can require, not a test that carries on as
+    /// if it had (MEMNG-693). A count of yields says nothing about work answered off the main
+    /// actor, and a count of sleeps stretches with the host's load. Given a short `patience` it is
+    /// the window for something that must NOT happen; the caller's expectation is the verdict.
+    private func arrives(
+        _ condition: () -> Bool, within patience: Duration = .seconds(10)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + patience
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return condition()
     }
 
     /// Which of the recorded waits are the notice's own.
@@ -186,7 +209,7 @@ struct UnreachableNoticeSessionTests {
         #expect(session.showsUnreachableNotice == false, "nothing is said inside the window")
         #expect(session.unverifiedSince == clock.now)
 
-        await settle(until: { !self.noticeWaits(sleeper).isEmpty })
+        _ = await arrives { !self.noticeWaits(sleeper).isEmpty }
         guard let wake = noticeWaits(sleeper).first else {
             Issue.record("no wake was armed for the outage, got \(sleeper.waits)")
             return
@@ -195,7 +218,7 @@ struct UnreachableNoticeSessionTests {
 
         clock.advance(2)
         sleeper.release(wake)
-        await settle(until: { session.showsUnreachableNotice })
+        _ = await arrives { session.showsUnreachableNotice }
 
         #expect(session.showsUnreachableNotice, "the outage outlasted the window")
     }
@@ -238,7 +261,7 @@ struct UnreachableNoticeSessionTests {
         // And the wake that was asleep through all of it publishes nothing on its own account.
         clock.advance(60)
         sleeper.release(wake)
-        await settle(until: { session.showsUnreachableNotice }, turns: 40)
+        await settle(until: { session.showsUnreachableNotice }, within: .milliseconds(250))
 
         #expect(session.showsUnreachableNotice == false, "a wake outlived the outage it was for")
     }
@@ -335,7 +358,7 @@ struct UnreachableNoticeSessionTests {
 
         // W1 is let go while outage two is still inside its window. It has nothing to say.
         sleeper.release(first)
-        await settle(until: { session.showsUnreachableNotice }, turns: 40)
+        await settle(until: { session.showsUnreachableNotice }, within: .milliseconds(250))
         #expect(session.showsUnreachableNotice == false, "an old outage's wake spoke for a new one")
 
         // A further failed check inside outage two assigns `.unverified` again and arms nothing:
@@ -346,7 +369,7 @@ struct UnreachableNoticeSessionTests {
             return
         }
         sleeper.release(ladderTwo)
-        await settle(until: { self.noticeWaits(sleeper).count > 2 }, turns: 60)
+        await settle(until: { self.noticeWaits(sleeper).count > 2 }, within: .milliseconds(250))
         #expect(noticeWaits(sleeper).count == 2, "one outage, one wake")
 
         // And the wake that does own it arrives, once.
@@ -396,7 +419,7 @@ struct UnreachableNoticeSessionTests {
     /// The wire is what is read: a tap is a request for an answer, not for a request. Both taps
     /// are told what the one check said.
     @Test("overlapping retries are one question on the wire, and every caller is told")
-    func retriesOverAnInFlightCheckAreOneRequest() async {
+    func retriesOverAnInFlightCheckAreOneRequest() async throws {
         let sleeper = ParkingSleeper()
         /// The whoami itself, held open, so the two later taps arrive while one is unanswered.
         let wire = ParkingSleeper()
@@ -415,19 +438,24 @@ struct UnreachableNoticeSessionTests {
         await session.enteredForeground()
 
         await session.restore()
-        await settle(until: { sleeper.waits.count >= 2 })
+        let parked = await arrives { sleeper.waits.count >= 2 }
+        try #require(parked, "the failed launch armed its waits, got \(sleeper.waits)")
 
         let first = Task { await session.retryNow() }
-        await settle(until: { !wire.waits.isEmpty })
+        let held = await arrives { !wire.waits.isEmpty }
+        try #require(held, "the retry's check went out and is held on the wire")
         guard whoamis.count == 2 else {
             Issue.record("the retry sent no check of its own, whoamis: \(whoamis.count)")
             return
         }
-        let second = Task { await session.retryNow() }
-        let third = Task { await session.retryNow() }
-        // Both taps get their turn on the main actor while the first check is still unanswered:
-        // whatever they do, they do it against a flight in progress.
-        await settle(until: { whoamis.count > 2 }, turns: 60)
+        // Immediate, so both taps have run up to their join-or-send decision on this actor before
+        // this line returns — while the first check is provably still unanswered, rather than
+        // whenever a loaded scheduler gets round to them (MEMNG-693).
+        let second = Task.immediate { await session.retryNow() }
+        let third = Task.immediate { await session.retryNow() }
+        // A window, on the monotonic clock, for a tap that sent its own question to reach the
+        // wire; the expectation after it is the verdict.
+        _ = await arrives({ whoamis.count > 2 }, within: .milliseconds(250))
         #expect(whoamis.count == 2, "a second tap sent its own question")
 
         wire.releaseAll()

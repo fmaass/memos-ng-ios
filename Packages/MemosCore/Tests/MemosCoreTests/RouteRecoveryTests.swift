@@ -160,8 +160,31 @@ struct RouteRecoveryTests {
 
     /// Pumps the main actor until a scheduled task has had its turn, or gives up — a condition
     /// that never comes true is a failure rather than a hung suite.
-    private func settle(until condition: () -> Bool, turns: Int = 400) async {
-        for _ in 0..<turns where !condition() { await Task.yield() }
+    ///
+    /// On a deadline on the monotonic clock rather than a count of main-actor yields: much of what
+    /// these tests wait for is answered off the main actor, where yielding says nothing about
+    /// when it lands, and a count ran out on a loaded host before the answer did (MEMNG-693). The
+    /// caller's expectation afterwards is the final read; a short `patience` is the window for
+    /// something that must NOT happen.
+    private func settle(
+        until condition: () -> Bool, within patience: Duration = .seconds(10)
+    ) async {
+        _ = await arrives(condition, within: patience)
+    }
+
+    /// Waits on the monotonic clock, up to a deadline, and answers with a FINAL read — so a wait
+    /// whose event never came is a failure its caller can require, not a test that carries on as
+    /// if it had (MEMNG-693). A count of yields says nothing about work answered off the main
+    /// actor, and a count of sleeps stretches with the host's load. Given a short `patience` it is
+    /// the window for something that must NOT happen; the caller's expectation is the verdict.
+    private func arrives(
+        _ condition: () -> Bool, within patience: Duration = .seconds(10)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + patience
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return condition()
     }
 
     private func signedIn(
@@ -227,7 +250,7 @@ struct RouteRecoveryTests {
 
         // The rung the ladder was asleep on has nothing left to ask: releasing it asks nothing.
         ladder.releaseAll()
-        await settle(until: { self.whoamis.count > before.whoamis + 1 }, turns: 60)
+        await settle(until: { self.whoamis.count > before.whoamis + 1 }, within: .milliseconds(250))
         #expect(whoamis.count == before.whoamis + 1, "the ladder's sleeper was left to fire")
     }
 
@@ -265,7 +288,7 @@ struct RouteRecoveryTests {
     // MARK: - (c), (d) and (f): a regain that arrives after its own recovery
 
     @Test("a ladder check that confirms before the regain is delivered leaves it a no-op")
-    func aLateRegainAfterTheLadderConfirmed() async {
+    func aLateRegainAfterTheLadderConfirmed() async throws {
         defer {
             ladder.releaseAll()
             notice.releaseAll()
@@ -278,12 +301,16 @@ struct RouteRecoveryTests {
 
         // The rung was issued AFTER the loss was counted, so its confirmation carries that
         // ordinal — and the regain that arrives later closes an outage already recovered from.
-        await settle(until: { !self.ladder.waits.isEmpty })
+        let rung = await arrives { !self.ladder.waits.isEmpty }
+        try #require(rung, "the unconfirmed session armed a ladder rung")
         ladder.release(0)
-        await settle(until: { session.verification == .verified })
+        let confirmed = await arrives { session.verification == .verified }
+        try #require(confirmed, "the ladder's check confirmed before the regain was delivered")
         await reloadsOwed(session, list, seen: &reloaded)
         routes.deliverRegain(closing: ordinal)
-        await settle(until: { session.reachabilityRecoveries > 1 }, turns: 60)
+        // A window for a second recovery that must not come, on the monotonic clock; the
+        // expectation after it is the verdict.
+        _ = await arrives({ session.reachabilityRecoveries > 1 }, within: .milliseconds(250))
         await reloadsOwed(session, list, seen: &reloaded)
 
         #expect(session.reachabilityRecoveries == 1, "the same outage recovered twice")
@@ -307,7 +334,7 @@ struct RouteRecoveryTests {
         await settle(until: { session.verification == .verified })
         await reloadsOwed(session, list, seen: &reloaded)
         routes.deliverRegain(closing: ordinal)
-        await settle(until: { session.reachabilityRecoveries > 1 }, turns: 60)
+        await settle(until: { session.reachabilityRecoveries > 1 }, within: .milliseconds(250))
         await reloadsOwed(session, list, seen: &reloaded)
 
         #expect(session.reachabilityRecoveries == 1, "the same outage recovered twice")
@@ -332,7 +359,7 @@ struct RouteRecoveryTests {
         let second = routes.countLoss()
 
         routes.deliverRegain(closing: first)
-        await settle(until: { session.reachabilityRecoveries > 1 }, turns: 60)
+        await settle(until: { session.reachabilityRecoveries > 1 }, within: .milliseconds(250))
         #expect(
             session.reachabilityRecoveries == 1,
             "the outage that had already recovered recovered again"
@@ -365,7 +392,7 @@ struct RouteRecoveryTests {
 
         paths.report(satisfied: true)
         paths.report(satisfied: true)
-        await settle(until: { session.reachabilityRecoveries > 0 }, turns: 60)
+        await settle(until: { session.reachabilityRecoveries > 0 }, within: .milliseconds(250))
         await reloadsOwed(session, list, seen: &reloaded)
 
         #expect(paths.lossesSeen() == 0, "precondition: the route never went down")
@@ -394,7 +421,7 @@ struct RouteRecoveryTests {
         await reloadsOwed(session, list, seen: &reloaded)
 
         routes.deliverRegain(closing: ordinal)
-        await settle(until: { session.reachabilityRecoveries > 1 }, turns: 60)
+        await settle(until: { session.reachabilityRecoveries > 1 }, within: .milliseconds(250))
         await reloadsOwed(session, list, seen: &reloaded)
 
         #expect(session.reachabilityRecoveries == 1, "one outage, counted twice")

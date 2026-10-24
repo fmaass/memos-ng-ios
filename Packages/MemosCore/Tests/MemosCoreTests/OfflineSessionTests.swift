@@ -199,22 +199,34 @@ struct OfflineSessionTests {
     /// it arrives. The bound only decides how long a signal that never comes takes to FAIL, so a
     /// regression that parks the session reports itself instead of hanging the run; a signal that
     /// comes ends the wait.
-    private func arrives(_ condition: () -> Bool, tries: Int = 500) async -> Bool {
-        for _ in 0..<tries {
-            if condition() { return true }
-            try? await Task.sleep(for: .milliseconds(10))
+    ///
+    /// The bound is a DEADLINE on the monotonic clock, not a count of sleeps: a loaded host
+    /// stretches every sleep, and a count would quietly turn into whatever that adds up to. The
+    /// answer is a FINAL read taken after the deadline, so a caller that requires it fails on a
+    /// timeout rather than carrying on as if the signal had come.
+    ///
+    /// Also the honest shape of a window for something that must NOT happen: given a short
+    /// `patience`, the caller's own expectation on the condition afterwards is the verdict.
+    private func arrives(
+        _ condition: () -> Bool, within patience: Duration = .seconds(10)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + patience
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
         }
         return condition()
     }
 
     /// Whether `task` ends within the same bound, without waiting on it for ever.
-    private func finishes(_ task: Task<Void, Never>, tries: Int = 500) async -> Bool {
+    private func finishes(
+        _ task: Task<Void, Never>, within patience: Duration = .seconds(10)
+    ) async -> Bool {
         let done = LockedValue<Bool>(false)
         Task {
             await task.value
             done.set(true)
         }
-        return await arrives({ done.get() }, tries: tries)
+        return await arrives({ done.get() }, within: patience)
     }
 
     // MARK: - admission
@@ -425,7 +437,10 @@ struct OfflineSessionTests {
         let before = calls.count
         answering.set(true)
         await session.enteredForeground()
-        await settle(until: { calls.count > before + 1 })
+        // The replacement goes out from a task of its own and is answered off the main actor, so
+        // a count of main-actor yields says nothing about when it lands (MEMNG-693): a deadline,
+        // and the final read below is the verdict.
+        _ = await arrives { calls.count > before + 1 }
 
         #expect(session.state.user != nil, "a stale refusal is not this credential's verdict")
         #expect(!credentials.isEmpty)
@@ -462,18 +477,44 @@ struct OfflineSessionTests {
         }
     }
 
+    /// The overlap is MADE, not hoped for (MEMNG-693). Two `async let` restores overlapped only
+    /// when the second child reached the main actor before the first flight had ended; on a loaded
+    /// host it sometimes arrived after, and a restore of a session that is no longer in flight
+    /// rightly asks again. So the first request is held on the wire until the second restore has
+    /// run, synchronously, as far as `validating`'s join-or-replace decision — which is what
+    /// `Task.immediate` buys: it runs on this actor until its first suspension, and the decision
+    /// has no await in front of it.
     @Test("two overlapping launch checks put ONE request on the wire")
-    func concurrentRestoresAreOneRequest() async {
+    func concurrentRestoresAreOneRequest() async throws {
         let calls = Counter()
+        let onTheWire = LockedValue<Bool>(false)
+        let released = LockedValue<Bool>(false)
+        // Whatever this test ends in, every held request is let go.
+        defer { released.set(true) }
         let session = makeSession(credentials: credentials(), file: boundFile()) { _, _, _ in
             calls.increment()
-            await Task.yield()
+            onTheWire.set(true)
+            // Held by polling rather than by a one-waiter gate, so a second request — the failure
+            // this test exists to catch — is held and let go too, never stranded. Bounded, so a
+            // test that stops early cannot leave it spinning.
+            let deadline = ContinuousClock.now + .seconds(10)
+            while !released.get(), ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
             return Stub.json(Stub.user)
         }
 
-        async let first: Void = session.restore()
-        async let second: Void = session.restore()
-        _ = await (first, second)
+        let first = Task.immediate { await session.restore() }
+        let asked = await arrives { onTheWire.get() }
+        try #require(asked, "the first launch check went out and is held")
+        let second = Task.immediate { await session.restore() }
+        // A second restore that replaced the flight instead of joining it has its own request
+        // on the way by now; this window gives it the time to reach the transport.
+        _ = await arrives({ calls.count > 1 }, within: .milliseconds(250))
+        released.set(true)
+        let firstEnded = await finishes(first)
+        let secondEnded = await finishes(second)
+        try #require(firstEnded && secondEnded, "both restores returned")
 
         #expect(calls.count == 1, "the second call joins the first; it does not re-ask")
     }
@@ -581,7 +622,9 @@ struct OfflineSessionTests {
         ) { _, _, _ in throw offline() }
 
         await session.restore()
-        await settle(until: { !sleeper.recorded.isEmpty }, turns: 40)
+        // A window for something that must not happen, on the monotonic clock rather than a count
+        // of yields (MEMNG-693); the expectation after it is the verdict.
+        _ = await arrives({ !sleeper.recorded.isEmpty }, within: .milliseconds(250))
 
         #expect(session.state.user != nil, "the launch still opened the app for the outbox")
         #expect(sleeper.recorded.isEmpty, "and asked for no ladder behind a window nobody has")
@@ -918,7 +961,16 @@ struct OfflineSessionTests {
         account.refuseNextClears(1)
         answering.set(true)
         await session.signIn(serverAddress: storedHost, token: "memos_pat_b")
-        await settle(until: { session.verification == .verified })
+        // Read the instant `signIn` returns: `abandonSignIn` writes the refusal synchronously
+        // before it does, so a nil here is a sign-in that never wrote it, never a read taken too
+        // early (MEMNG-677; the interleaving that did that is forced in the test below).
+        #expect(
+            session.lastError == SessionStore.licenceBlockedSignIn,
+            "the refused switch returned without its sentence"
+        )
+        // The put-back session's replacement check runs in a task of its own and is answered off
+        // the main actor: a deadline on the monotonic clock, then the final reads are the verdict.
+        _ = await arrives { session.verification == .verified }
 
         #expect(session.lastError == SessionStore.licenceBlockedSignIn, "the switch was refused")
         #expect(
@@ -1933,14 +1985,21 @@ struct InvalidationFenceTests {
         let session = SessionStore(
             credentials: vault,
             makeClient: { _, credential in
-                // The renewal, queued on the main actor at the instant the client is built. It runs
-                // at the next suspension, which is the hop into `whoami` — after validation has
-                // read its epoch and before the middleware reads the credential. That window is
-                // the whole of what this test is about, and the premise below asserts it happened.
-                if refusing.get() {
-                    Task { @MainActor in credential.replace(with: "memos_pat_next") }
-                }
-                return Stub.client(token: credential) { request, _, _ in
+                // The renewal lands on the request's way OUT: in a middleware in front of the
+                // bearer one, synchronously, after everything validation did before it sent and
+                // before the credential is read to be attached. That window is the whole of what
+                // this test is about. It used to be a task queued on the main actor and trusted to
+                // run at "the next suspension", which a loaded host does not promise (MEMNG-698);
+                // here it is in place by construction, and the premise below still asserts it.
+                Stub.client(
+                    token: credential,
+                    beforeSend: {
+                        guard refusing.get(), credential.current != "memos_pat_next" else {
+                            return
+                        }
+                        credential.replace(with: "memos_pat_next")
+                    }
+                ) { request, _, _ in
                     seen.set(seen.get() + [request.headerFields[.authorization]])
                     guard refusing.get() else { return Stub.json(Stub.user) }
                     return Stub.empty(.unauthorized)

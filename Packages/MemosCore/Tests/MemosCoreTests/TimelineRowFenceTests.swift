@@ -818,6 +818,12 @@ struct TimelineRowFenceTests {
     {
         let second = first == "a" ? "b" : "a"
         let context = "releasing \(first) first, round \(round)"
+        // Every wait below for something that MUST happen ends the moment it does, so this bound
+        // costs a passing run nothing; it only decides how long a regression takes to fail. Two
+        // seconds was within reach of a loaded simulator (MEMNG-693). The 200 ms windows further
+        // down are a different thing — windows for something that must NOT happen — and keep
+        // their length.
+        let patience: Duration = .seconds(30)
         let store = TimelineStore()
         // One of each per memo: the two memos' requests run at once, and a shared table written
         // from both would lose one of the writes.
@@ -872,7 +878,7 @@ struct TimelineRowFenceTests {
                 readDone[uid]?.set(true)
             }
         }
-        let readsDue = ContinuousClock.now + .seconds(2)
+        let readsDue = ContinuousClock.now + patience
         while !readEntered.values.allSatisfy({ $0.get() }) && ContinuousClock.now < readsDue {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -885,12 +891,12 @@ struct TimelineRowFenceTests {
         await store.edit(uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL)
         await store.edit(uid: "b", content: "new", using: client.handle, baseURL: Stub.baseURL)
         readRelease.set(true)
-        let readsLandDue = ContinuousClock.now + .seconds(2)
+        let readsLandDue = ContinuousClock.now + patience
         while !readDone.values.allSatisfy({ $0.get() }) && ContinuousClock.now < readsLandDue {
             try await Task.sleep(for: .milliseconds(1))
         }
         try #require(readDone.values.allSatisfy { $0.get() }, "both reads landed (\(context))")
-        let payingDue = ContinuousClock.now + .seconds(2)
+        let payingDue = ContinuousClock.now + patience
         while !payingEntered.values.allSatisfy({ $0.get() }) && ContinuousClock.now < payingDue {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -918,7 +924,7 @@ struct TimelineRowFenceTests {
             await store.owedReadsSettled()
             lateSettled.set(true)
         }
-        let lateDue = ContinuousClock.now + .seconds(2)
+        let lateDue = ContinuousClock.now + patience
         while !lateSettled.get() && ContinuousClock.now < lateDue {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -945,7 +951,7 @@ struct TimelineRowFenceTests {
         // One payment lands; the other is still held. A boundary that went back to the table after
         // the one it was awaiting would find it empty and return here, the other still to come.
         payingRelease[first]?.set(true)
-        let answerDue = ContinuousClock.now + .seconds(2)
+        let answerDue = ContinuousClock.now + patience
         while payingAnswered[first]?.get() != true && ContinuousClock.now < answerDue {
             try await Task.sleep(for: .milliseconds(1))
         }
@@ -961,7 +967,7 @@ struct TimelineRowFenceTests {
         )
 
         payingRelease[second]?.set(true)
-        let settleDue = ContinuousClock.now + .seconds(2)
+        let settleDue = ContinuousClock.now + patience
         while !settled.get() && ContinuousClock.now < settleDue {
             try await Task.sleep(for: .milliseconds(1))
         }
