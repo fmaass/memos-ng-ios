@@ -824,7 +824,7 @@ struct WholeLaneEngineTests {
         rig.clock.advance(7 * 3600)
         await rig.engine.drain()
         // The answer's place, given back, asked for a drain of its own that may still be running.
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         let newPicture = try rig.task(for: rig.picture.id, attempt: 1)
         #expect(rig.uploadPosts == 3)
@@ -1042,7 +1042,7 @@ struct WholeLaneEngineTests {
         rig.postStatus.value = 401
         rig.clock.advance(7 * 3600)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         saved = try await rig.reload()
         #expect(saved.state == .held)
         #expect(saved.holdReason == .serverRefused)
@@ -1102,7 +1102,7 @@ struct WholeLaneEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.session.createdTasks.count == 3 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         let successor = try rig.task(for: rig.picture.id, attempt: 1)
         #expect(!successor.request.allowsCellularAccess)
@@ -1263,7 +1263,7 @@ struct WholeLaneEngineTests {
             )
         )
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.session.createdTasks.isEmpty)
         #expect(rig.attemptedUploadPosts == 0)
         #expect(rig.completion.idempotencyKeys.isEmpty)
@@ -1286,7 +1286,7 @@ struct WholeLaneEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.session.createdTasks.count == 3 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         let saved = try await rig.reload()
         let file = try #require(saved.file(rig.picture.id))
@@ -1397,7 +1397,7 @@ struct WholeLaneEngineTests {
         )
         let pictureSent = try await rig.eventually { rig.session.createdTasks.count == 3 }
         #expect(pictureSent)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // The video's old task leaves the list with no callback: only a later look finds it gone.
         rig.session.forget(video.taskIdentifier)
         let postsBefore = rig.attemptedUploadPosts
@@ -1409,7 +1409,7 @@ struct WholeLaneEngineTests {
 
         await rig.engine.drain()
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         let attempts = rig.session.createdTasks.compactMap { created in
             WholeTaskIdentity(taskDescription: created.description)
                 .flatMap { $0.fileID == rig.video.id ? $0.attempt : nil }
@@ -1516,7 +1516,7 @@ struct WholeLaneEngineTests {
         #expect(cancelled.isSuperset(of: [picture.taskIdentifier, video.taskIdentifier]))
         // Both old tasks are still listed, cancelling: no new term may go out beside either.
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attemptedUploadPosts == 2)
 
         rig.delegate.complete(
@@ -1524,7 +1524,7 @@ struct WholeLaneEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attemptedUploadPosts == 3 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         await rig.engine.drain()
         #expect(rig.attemptedUploadPosts == 3)
         #expect(rig.attempts(of: rig.picture.id).count == 2)
@@ -1535,7 +1535,7 @@ struct WholeLaneEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attemptedUploadPosts == 4 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         await rig.engine.drain()
         #expect(rig.attemptedUploadPosts == 4)
         #expect(rig.attempts(of: rig.video.id).count == 2)
@@ -1578,7 +1578,7 @@ struct WholeLaneEngineTests {
         #expect(rig.attemptedUploadPosts == 3)
         await written.open()
         await continuation.value
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         #expect(rig.attemptedUploadPosts == 3)
         #expect(rig.attempts(of: rig.picture.id).count == 2)
@@ -1615,7 +1615,7 @@ struct WholeLaneEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.session.createdTasks.count == 3 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // The picture's old task ends; its successor opens a session and is held at its write.
         await gated.value?.arm(1)
         rig.session.forget(picture.taskIdentifier)
@@ -1634,7 +1634,7 @@ struct WholeLaneEngineTests {
         // The refused write sends nothing; the drain its settlement asks for sends the picture.
         let resent = try await rig.eventually { rig.attempts(of: rig.picture.id).count == 2 }
         #expect(resent)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attempts(of: rig.picture.id).count == 2)
         #expect(rig.attemptedUploadPosts == 5)
         let file = try #require(try await rig.reload().file(rig.picture.id))
@@ -1668,7 +1668,7 @@ struct WholeLaneEngineTests {
 
         await rig.engine.handle(answer)
         #expect(await uploads.churnLeft == 0)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attempts(of: rig.picture.id).count == 2)
         #expect(rig.attemptedUploadPosts == 3)
         let file = try #require(try await rig.reload().file(rig.picture.id))
@@ -1726,7 +1726,7 @@ struct WholeLaneEngineTests {
         failing.value = false
         await written.open()
         await drain.value
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         // The failure landed on the row as the video left it: its deadline stands, and the video's
         // confirmation with it. Nothing else went out for the picture.
@@ -1741,7 +1741,7 @@ struct WholeLaneEngineTests {
         rig.clock.advance(delay)
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.attempts(of: rig.picture.id).count == 2 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attemptedUploadPosts == 4)
         let file = try #require(try await rig.reload().file(rig.picture.id))
         let retried = try rig.task(for: rig.picture.id, attempt: file.uploadAttempt ?? 0)
@@ -1768,7 +1768,7 @@ struct WholeLaneEngineTests {
         rig.delegate.deliver(try rig.answer(video, status: 200, received: 3000))
 
         await rig.delegate.attach(rig.engine)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         #expect(rig.attempts(of: rig.video.id) == [0])
         #expect(rig.attempts(of: rig.picture.id) == [0])
@@ -1794,7 +1794,7 @@ struct WholeLaneEngineTests {
 
         await rig.delegate.attach(rig.engine)
         #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         #expect(rig.attempts(of: rig.video.id) == [0, 1])
         #expect(rig.attempts(of: rig.picture.id) == [0])
@@ -1826,7 +1826,7 @@ struct WholeLaneEngineTests {
             try await rig.reload().file(rig.picture.id)?.isComplete == true
         }
         #expect(applied, "the original success lands")
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attempts(of: rig.picture.id) == [0])
     }
 
@@ -1875,7 +1875,7 @@ struct WholeLaneEngineTests {
         await rig.preferences.set(true)
 
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         let aPosts = rig.http.requests(method: "POST").dropFirst(posted).filter { request in
             let body = request.httpBody.map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -1903,7 +1903,7 @@ struct WholeLaneEngineTests {
         rig.credentials.set(Fixture.credentials(owner: "brenda", token: "pat-b"))
 
         await rig.engine.handle(try rig.answer(picture, status: 200))
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         #expect(
             rig.http.requests(method: "HEAD").isEmpty,
@@ -1932,7 +1932,7 @@ struct WholeLaneEngineTests {
 
         rig.session.forget(picture.taskIdentifier)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(await rig.engine.ended[picture.taskIdentifier] == nil)
 
         // The last answer completes the row and the memo is created: the row is gone.
@@ -1940,7 +1940,7 @@ struct WholeLaneEngineTests {
         #expect(rig.completion.idempotencyKeys.count == 1)
         #expect(await rig.engine.ended[video.taskIdentifier] == rig.job.id)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(await rig.engine.ended.isEmpty)
     }
 }
@@ -2068,7 +2068,7 @@ extension WholeRig {
         await engine.handle(busy)
         session.forget(picture.taskIdentifier)
         await engine.handle(try answer(picture, status: 200, received: 1000))
-        await engine.untilQuiescent()
+        try await settled(engine)
     }
 }
 
@@ -2114,7 +2114,7 @@ struct WholeBudgetEngineTests {
         #expect(try await rig.eventually { sleeper.armed.isEmpty })
         rig.clock.advance(5)
         sleeper.advance(to: rig.clock.now)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.uploadPosts == 2)
         #expect(rig.session.createdTasks.count == 2)
     }
@@ -2134,7 +2134,7 @@ struct WholeBudgetEngineTests {
         rig.clock.advance(3)
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.attempts(of: rig.video.id).count == 2 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.uploadPosts == 3)
         #expect(rig.healthProbes == probes + 1)
         #expect(sleeper.mostArmedAtOnce == 1)
@@ -2154,7 +2154,7 @@ struct WholeBudgetEngineTests {
         rig.clock.advance(3)
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.attempts(of: rig.video.id).count == 2 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.healthProbes == probes + 1)
         #expect(rig.uploadPosts == 3)
     }
@@ -2171,7 +2171,7 @@ struct WholeBudgetEngineTests {
         #expect(sleeper.armed == [start.addingTimeInterval(3)])
         rig.clock.advance(2.1)
         sleeper.advance(to: rig.clock.now)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.uploadPosts == 2)
         rig.clock.advance(0.25)
         sleeper.advance(to: rig.clock.now)
@@ -2209,7 +2209,7 @@ struct WholeBudgetEngineTests {
         defer { rig.cleanUp() }
         let second = try await rig.enqueueSecond()
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.uploadPosts == 0)
         #expect(rig.session.createdTasks.isEmpty)
 
@@ -2240,7 +2240,7 @@ struct WholeBudgetEngineTests {
         await rig.engine.drain()
         let second = try await rig.enqueueSecond()
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.session.createdTasks.count == 2)
         #expect(rig.postsNaming("second.heic") == 0)
 
@@ -2287,7 +2287,7 @@ struct WholeBudgetEngineTests {
         #expect(rig.postsNaming("b2.heic") == 0)
         await parked.open()
         await drain.value
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.postsNaming("b2.heic") == 0)
         #expect(rig.session.createdTasks.count == 2)
     }
@@ -2310,7 +2310,7 @@ struct WholeBudgetEngineTests {
         _ = try await rig.enqueueSecond()
         await rig.preferences.set(true)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // Both old tasks are cancelled and still listed: their successors wait, holding the places.
         let cancelled = Set(rig.session.cancelledIdentifiers)
         #expect(cancelled == [picture.taskIdentifier, video.taskIdentifier])
@@ -2322,7 +2322,7 @@ struct WholeBudgetEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attempts(of: rig.picture.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // The picture's successor took the picture's place: the second capture is still refused.
         #expect(rig.postsNaming("second.heic") == 0)
         #expect(rig.session.createdTasks.count == 3)
@@ -2334,7 +2334,7 @@ struct WholeBudgetEngineTests {
         )
         // The video's successor could not open a session, so its place goes to the second capture.
         #expect(try await rig.eventually { rig.postsNaming("second.heic") == 1 })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.attempts(of: rig.video.id) == [0])
         #expect(rig.session.createdTasks.count == 4)
     }
@@ -2354,7 +2354,7 @@ struct WholeBudgetEngineTests {
         defer { rig.cleanUp() }
         let start = rig.clock.now
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         let row = try await rig.reload()
         #expect(row.file(rig.video.id)?.nextAttemptAt == start.addingTimeInterval(2))
         #expect(row.state != .held)
@@ -2364,7 +2364,7 @@ struct WholeBudgetEngineTests {
         busy.value = false
         rig.session.forget(picture.taskIdentifier)
         await rig.engine.handle(try rig.answer(picture, status: 200, received: 1000))
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.postsNaming("video.mov") == 1)
 
         rig.clock.advance(2)
@@ -2388,13 +2388,13 @@ struct WholeBudgetEngineTests {
             busy.retryAfter = wait
             await rig.engine.handle(busy)
         }
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(sleeper.armed == [start.addingTimeInterval(2)])
 
         rig.clock.advance(2)
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // The video's retry is in flight, its deadline past; the picture's is still ahead.
         #expect(sleeper.armed == [start.addingTimeInterval(5)])
 
@@ -2417,7 +2417,7 @@ struct WholeBudgetEngineTests {
         var busy = try rig.answer(video, status: 429)
         busy.retryAfter = "604800"
         await rig.engine.handle(busy)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         // Read back from the manifest on disk, decoded afresh.
         let due = try #require(try await rig.reload().file(rig.video.id)?.nextAttemptAt)
         #expect(due >= asked)
@@ -2435,7 +2435,7 @@ struct WholeBudgetEngineTests {
         let answeredAt = rig.clock.now
         rig.session.forget(picture.taskIdentifier)
         await rig.engine.handle(try rig.answer(picture, status: 200, received: 400))
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         // Attempt 1 draws half of its 900 s, rounded up to the second a manifest keeps.
         let due = Date(
@@ -2445,7 +2445,7 @@ struct WholeBudgetEngineTests {
         #expect(row.file(rig.picture.id)?.nextAttemptAt == due)
         #expect(row.file(rig.picture.id)?.attemptCount == 1)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.postsNaming("picture.heic") == 1)
         #expect(sleeper.armed == [due])
 
@@ -2479,7 +2479,7 @@ struct WholeBudgetEngineTests {
             )
         }
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(try await rig.reload().file(pictureID)?.isComplete == true)
         // The picture's place went back when its hand-off learned of the task, so the second
         // capture has it; the video still holds the other.
@@ -2511,7 +2511,7 @@ struct WholeBudgetEngineTests {
             )
         }
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(try await rig.reload().file(videoID)?.isComplete == true)
         #expect(try await rig.eventually { rig.postsNaming("second.heic") == 1 })
     }
@@ -2532,7 +2532,7 @@ struct WholeBudgetEngineTests {
         _ = try await rig.enqueueSecond()
         await rig.preferences.set(true)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
 
         // The picture's successor settles as a live task: one reservation converted, one left.
         rig.delegate.complete(
@@ -2540,7 +2540,7 @@ struct WholeBudgetEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attempts(of: rig.picture.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.postsNaming("second.heic") == 0)
 
         let session = rig.session
@@ -2561,7 +2561,7 @@ struct WholeBudgetEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(try await rig.reload().file(videoID)?.isComplete == true)
         // The picture's successor holds one place; the video's, already ended, gave its back.
         #expect(try await rig.eventually { rig.postsNaming("second.heic") == 1 })
@@ -2582,7 +2582,7 @@ struct WholeBudgetEngineTests {
         _ = try await rig.enqueueSecond()
         await rig.preferences.set(true)
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(rig.postsNaming("second.heic") == 0)
 
         let session = rig.session
@@ -2603,7 +2603,7 @@ struct WholeBudgetEngineTests {
             statusCode: nil, errorDescription: "cancelled"
         )
         #expect(try await rig.eventually { rig.attempts(of: rig.picture.id) == [0, 1] })
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(try await rig.reload().file(pictureID)?.isComplete == true)
         // The video's cancelled task still holds one place; the picture's successor gave its back.
         #expect(try await rig.eventually { rig.postsNaming("second.heic") == 1 })
@@ -2852,7 +2852,7 @@ struct WholeResumeTests {
         for round in 1...3 {
             await rig.engine.drain()
             // An answer's place, given back, asks for a drain of its own that may still be running.
-            await rig.engine.untilQuiescent()
+            try await settled(rig.engine)
             #expect(rig.uploadPosts == round)
             let task = try #require(rig.session.createdTasks.last)
             // The transfer drops: the session is kept, and the next attempt asks the server.
@@ -2863,7 +2863,7 @@ struct WholeResumeTests {
         }
         let tasksBefore = rig.session.createdTasks.count
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(heads(rig) == 4)
         #expect(rig.uploadPosts == 3)
         #expect(rig.session.createdTasks.count == tasksBefore)
@@ -3050,7 +3050,7 @@ struct WholeResumeTests {
         )
         defer { rig.cleanUp() }
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         let picture = try rig.task(for: rig.picture.id, attempt: 1)
         let video = try rig.task(for: rig.video.id, attempt: 1)
         #expect(stagedTails(rig).count == 2)
@@ -3128,7 +3128,7 @@ struct WholeResumeTests {
         defer { rig.cleanUp() }
         let start = rig.clock.now
         await rig.engine.drain()
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(heads(rig) == 1)
         #expect(rig.session.createdTasks.isEmpty)
         let row = try await rig.reload()
@@ -3144,7 +3144,7 @@ struct WholeResumeTests {
         await rig.engine.drain()
         let picture = try rig.task(for: rig.picture.id)
         await rig.engine.handle(try rig.answer(picture, status: 200))
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(heads(rig) == 1)
         let row = try await rig.reload()
         #expect(row.state != .held)
@@ -3241,7 +3241,7 @@ struct WholeResumeTests {
         let video = try rig.task(for: rig.video.id)
         await rig.engine.handle(try rig.answer(picture, status: nil))
         rig.session.forget(picture.taskIdentifier)
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         rig.clock.advance(86_400)
         // The picture's resume is held at its write, after its HEAD and its staging.
         await gated.value?.arm(1)
@@ -3255,7 +3255,7 @@ struct WholeResumeTests {
         #expect(heads(rig) == 1)
         await written.open()
         await drain.value
-        await rig.engine.untilQuiescent()
+        try await settled(rig.engine)
         #expect(heads(rig) == 1)
         #expect(rig.attempts(of: rig.picture.id) == [0, 1])
     }
@@ -3436,7 +3436,7 @@ struct WholeBodyLimitTests {
 
         await rig.engine.drain()
         for _ in 0..<200 {
-            await rig.engine.untilQuiescent()
+            try await settled(rig.engine)
             guard let row = await rig.repository.job(rig.job.id) else { break }
             // "Waiting to try again" is a waiting row with a failure counted on the ROW
             // (`PendingMemoPresentation.status`); a hold waits for the person.
