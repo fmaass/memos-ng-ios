@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (64)
+
+- Tapping the date at the top of the picture viewer now opens an Info sheet: when the picture was taken, its memo, where it was taken, the file and the camera.
+- The Where card shows a small map with a pin and the place name, and Open in Places jumps to that spot on the Places map.
+- The File card shows the type, size, dimensions, file name and who added it; the Camera card appears only when the photo carries camera data.
+- The date at the top of the viewer no longer gets cut off.
+- Please open a few pictures, tap the date, check the rows make sense, try Open in Places, and swipe to another picture and open Info again.
+
 ## 2.4.0 (63)
 
 - Use as Cover is now in the long-press menu of a picture inside a trip, tag, month or year, so a cover can be set straight from the grid.
