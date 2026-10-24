@@ -78,36 +78,37 @@ struct LibrarySelectionPresentationTests {
         #expect(LibrarySelectionPresentation.row(at: 0, uid: "a", in: []) == nil)
     }
 
-    /// Select mode's More on the Library: Add to trip alone, with the tagged trips under it. No
-    /// visibility row, and no Public or Just us anywhere under it — visibility belongs to a memo,
-    /// and what select mode chooses is pictures; it went out on the owner's word (2026-10-18).
-    @Test("the Library's select menu is Add to trip alone: no visibility row")
+    /// Select mode's More on the Library: Add alone, which opens the Add to collection sheet
+    /// (MEMNG-855). No visibility row, and no Public or Just us anywhere under it — visibility
+    /// belongs to a memo, and what select mode chooses is pictures; it went out on the owner's
+    /// word (2026-10-18).
+    @Test("the Library's select menu is Add alone: no submenu, no visibility row")
     func selectMenuHasNoVisibilityRow() {
         let day = Date(timeIntervalSince1970: 1_773_000_000)
         let trip = Trip(
             uid: "trip-1", title: "Portugal", tag: "portugal", spanStart: nil, spanEnd: nil,
             cover: nil, memberCount: 2, createdAt: day, updatedAt: day)
-        var added: [String] = []
+        var opened = 0
         // Two chosen pictures on ONE memo of mine, the case the visibility row miscounted.
         let rows = MediaLibraryView.selectRows(memos: ["m1"], free: true, tagged: [trip]) {
-            added.append($0.uid)
+            opened += 1
         }
         func walk(_ rows: [SelectAction]) -> [SelectAction] {
             rows.flatMap { [$0] + walk($0.children) }
         }
-        #expect(rows.map(\.id) == ["add-to-trip"])
-        #expect(rows.first?.disabled == false, "control: Add to trip is live")
-        #expect(rows.first?.children.map(\.id) == ["add-to-trip-1"])
+        #expect(rows.map(\.id) == ["add"])
+        #expect(rows.first?.disabled == false, "control: Add is live")
+        #expect(rows.first?.children.isEmpty == true, "Add is one row, not a submenu")
         let labels = MemoVisibility.allCases.map(\.label)
         let visibility = walk(rows).filter {
             $0.id.hasPrefix("visibility") || $0.title.hasPrefix("Set visibility")
                 || labels.contains($0.title)
         }
         #expect(visibility.isEmpty, "a visibility row: \(visibility.map(\.title))")
-        rows.first?.children.first?.action()
-        #expect(added == ["trip-1"], "control: the trip row adds to its trip")
-        // Nothing of mine chosen: Add to trip stays, drawn disabled.
-        let none = MediaLibraryView.selectRows(memos: [], free: true, tagged: [trip]) { _ in }
-        #expect(none.map(\.id) == ["add-to-trip"] && none.first?.disabled == true)
+        rows.first?.action()
+        #expect(opened == 1, "control: Add opens the sheet")
+        // Nothing of mine chosen: Add stays, drawn disabled.
+        let none = MediaLibraryView.selectRows(memos: [], free: true, tagged: [trip]) {}
+        #expect(none.map(\.id) == ["add"] && none.first?.disabled == true)
     }
 }

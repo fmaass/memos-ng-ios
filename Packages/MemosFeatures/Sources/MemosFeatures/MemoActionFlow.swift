@@ -27,8 +27,6 @@ final class MemoActionFlow {
         self.banner = banner
     }
 
-    static let addRowTitle = "Add to trip"
-
     /// The banner of a finished run: of M asked, N changed (or added), the pictures the outbox
     /// held back, and what stopped the rest.
     static func resultText(_ outcome: MemoActionOutcome) -> String {

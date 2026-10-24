@@ -51,8 +51,10 @@ struct MediaLibraryView: View {
     /// Select mode's Delete (MEMNG-589) and memo actions (MEMNG-788), around the one result
     /// banner they share (`SelectResults`): the toast shows whichever spoke last.
     @State private var results = SelectResults()
+    /// The Add to collection sheet is up (MEMNG-855).
+    @State private var addingToCollection = false
     private var deleting: LibraryDeleteFlow { results.deleting }
-    /// Select mode's memo actions (MEMNG-788): Add to trip and the last run's banner.
+    /// Select mode's memo actions (MEMNG-788): Add (MEMNG-855) and the last run's banner.
     private var acting: MemoActionFlow { results.acting }
     @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     @Environment(TripStore.self) private var trips: TripStore?
@@ -297,6 +299,7 @@ struct MediaLibraryView: View {
                 abandonShare()
                 deleting.abandon()
                 acting.abandon()
+                addingToCollection = false
                 dock?.release(dockClaim)
             }
         }
@@ -550,6 +553,14 @@ struct MediaLibraryView: View {
                 tileLayout: tileLayoutBinding
             )
         }
+        // On the header, which carries no other presentation: two on one view is how one of them
+        // silently stops appearing.
+        .sheet(isPresented: $addingToCollection) {
+            AddToCollectionSheet(
+                sections: AddToCollection.sections(
+                    memos: selectMemos, free: selectFree, tagged: taggedTrips)
+            ) { add(to: $0) }
+        }
     }
 
     /// Choosing a kind resets the paging (`setFilter`) and reads the first page of the kind that
@@ -690,39 +701,37 @@ struct MediaLibraryView: View {
         selection.rows(in: library?.items ?? []).map(MemoActionPicture.init)
     }
 
+    /// The inputs the Add row and its sheet are drawn from: the memos of mine among the chosen
+    /// pictures, whether the actions are free, and the tagged trips.
+    private var selectMemos: [String] { MemoActionPicture.memos(of: chosenPictures) }
+    private var selectFree: Bool {
+        actions != nil
+            && LibrarySelectionPresentation.actionsEnabled(
+                count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning)
+    }
+    private var taggedTrips: [Trip] { (trips?.trips ?? []).filter { $0.tag != nil } }
+
     private var selectRows: [SelectAction] {
-        Self.selectRows(
-            memos: MemoActionPicture.memos(of: chosenPictures),
-            free: actions != nil
-                && LibrarySelectionPresentation.actionsEnabled(
-                    count: selection.count, isSharing: sharing.isSharing, isDeleting: deleteRunning),
-            tagged: (trips?.trips ?? []).filter { $0.tag != nil }
-        ) { addToTrip($0) }
-    }
-
-    /// Select mode's actions menu (MEMNG-788): Add to trip, a submenu of the `tagged` trips, drawn
-    /// disabled while none of the chosen pictures is on a memo of mine (`memos` empty) or the
-    /// menu is not `free`. No visibility row: visibility belongs to a memo, and what select mode
-    /// chooses is pictures. A function of its inputs because a SwiftUI `Menu` in the screen's
-    /// content hands UIKit no rows until a real touch opens it, so no hosted test can read them.
-    static func selectRows(
-        memos: [String], free: Bool, tagged: [Trip], add: @escaping (Trip) -> Void
-    ) -> [SelectAction] {
-        let tripRows = tagged.map { trip in
-            SelectAction(id: "add-to-\(trip.uid)", title: trip.title, systemImage: "suitcase") {
-                add(trip)
-            }
+        Self.selectRows(memos: selectMemos, free: selectFree, tagged: taggedTrips) {
+            addingToCollection = true
         }
-        return [
-            SelectAction(
-                id: "add-to-trip", title: MemoActionFlow.addRowTitle, systemImage: "suitcase",
-                disabled: !free || memos.isEmpty || tagged.isEmpty, children: tripRows)
-        ]
     }
 
-    /// A trip of the submenu: the chosen pictures go to it in one inclusion; no question, it
-    /// changes no visibility and is undone by Remove.
-    private func addToTrip(_ trip: Trip) {
+    /// Select mode's actions menu (MEMNG-788; MEMNG-855): Add alone, which opens the Add to
+    /// collection sheet (`AddToCollection`), drawn disabled while none of the chosen pictures is
+    /// on a memo of mine (`memos` empty), the menu is not `free`, or no trip is `tagged`. No
+    /// visibility row: visibility belongs to a memo, and what select mode chooses is pictures. A
+    /// function of its inputs because a SwiftUI `Menu` in the screen's content hands UIKit no rows
+    /// until a real touch opens it, so no hosted test can read them.
+    static func selectRows(
+        memos: [String], free: Bool, tagged: [Trip], open: @escaping () -> Void
+    ) -> [SelectAction] {
+        [AddToCollection.addRow(memos: memos, free: free, tagged: tagged, open: open)]
+    }
+
+    /// A row of the Add to collection sheet: the chosen pictures go to its collection in one
+    /// inclusion; no question, it changes no visibility and is undone by Remove.
+    private func add(to target: AddToCollection.Target) {
         guard let actions, let handle = session.activeHandle, let baseURL = session.serverBaseURL
         else { return }
         let chosen = chosenPictures
@@ -732,8 +741,8 @@ struct MediaLibraryView: View {
                 current: { [session] in session.activeHandle?.generation },
                 rereads: [{ await refreshAll(issuedUnder: handle.generation) }]
             ) {
-                await actions.add(
-                    attachments: chosen, toTrip: trip, using: handle, baseURL: baseURL)
+                await AddToCollection.send(
+                    target, chosen: chosen, actions: actions, using: handle, baseURL: baseURL)
             }
         }
     }

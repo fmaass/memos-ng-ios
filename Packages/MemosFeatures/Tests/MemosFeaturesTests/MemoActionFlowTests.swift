@@ -12,9 +12,11 @@ import Testing
 struct MemoActionFlowTests {
     private typealias Flow = MemoActionFlow
 
-    @Test("the Add to trip row is named so")
+    @Test("the Add row and its sheet are named so")
     func theWording() {
-        #expect(Flow.addRowTitle == "Add to trip")
+        #expect(AddToCollection.addRowTitle == "Add")
+        #expect(AddToCollection.sheetTitle == "Add to collection")
+        #expect(AddToCollection.tripsHeader == "Trips")
     }
 
     @Test("a finished run says N of M and the grid is read again; a refusal says so, no re-read")
