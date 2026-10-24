@@ -150,31 +150,70 @@ struct ComposeTripChipTests {
 
     @Test("a new memo gets the chip; an edit never does")
     func createOnly() {
-        #expect(ComposeTripChip(mode: .create(restoring: nil), offered: trip).shown == trip)
-        #expect(ComposeTripChip(mode: draft("x"), offered: trip).shown == trip)
-        #expect(ComposeTripChip(mode: edit, offered: trip).shown == nil)
-        #expect(ComposeTripChip(mode: edit, offered: trip).submittedContent("x") == "x")
-        #expect(ComposeTripChip(mode: .create(restoring: nil), offered: nil).shown == nil)
+        let fresh = ComposeView.Mode.create(restoring: nil)
+        #expect(ComposeTripChip(mode: fresh, offered: trip).shown(at: .now) == trip)
+        #expect(ComposeTripChip(mode: draft("x"), offered: trip).shown(at: .now) == trip)
+        #expect(ComposeTripChip(mode: edit, offered: trip).shown(at: .now) == nil)
+        #expect(ComposeTripChip(mode: edit, offered: trip).submittedContent("x", at: .now) == "x")
+        #expect(ComposeTripChip(mode: fresh, offered: nil).shown(at: .now) == nil)
+    }
+
+    // MARK: - The offer's end (MEMNG-765)
+
+    /// The offer `trip` ending at `end` — 14 October 2026, 00:00 in Lisbon, by default.
+    private func ending(_ end: Date = at(14, 0)) -> ComposePinnedTrip {
+        ComposePinnedTrip(title: "Portugal 2026", tag: "portugal2026", endsAt: end)
+    }
+
+    @Test("a sheet opened before the offer ends and posted after it carries no tag and no chip")
+    func endedOfferIsNotPosted() {
+        let end = at(14, 0)
+        let chip = ComposeTripChip(mode: .create(restoring: nil), offered: ending(end))
+        let after = end.addingTimeInterval(60)
+        #expect(chip.shown(at: after) == nil, "the chip outlived the offer")
+        #expect(chip.submittedContent("Lisbon", at: after) == "Lisbon", "the tag outlived it")
+        // Control: a minute before the end, the same chip still shows and still tags.
+        let before = end.addingTimeInterval(-60)
+        #expect(chip.shown(at: before) == ending(end))
+        #expect(chip.submittedContent("Lisbon", at: before) == "Lisbon\n#portugal2026")
+    }
+
+    @Test("the end itself is past the offer; the second before it is inside")
+    func endIsExclusive() {
+        let end = at(14, 0)
+        let chip = ComposeTripChip(mode: .create(restoring: nil), offered: ending(end))
+        #expect(chip.shown(at: end) == nil)
+        #expect(chip.submittedContent("x", at: end) == "x")
+        let last = end.addingTimeInterval(-1)
+        #expect(chip.shown(at: last) != nil)
+        #expect(chip.submittedContent("x", at: last) == "x\n#portugal2026")
+    }
+
+    @Test("an offer built without an end never expires")
+    func offerWithoutEndNeverExpires() {
+        let chip = ComposeTripChip(mode: .create(restoring: nil), offered: trip)
+        #expect(chip.shown(at: .distantFuture) == trip)
+        #expect(chip.submittedContent("x", at: .distantFuture) == "x\n#portugal2026")
     }
 
     @Test("the x takes the chip and the tag off this sheet only")
     func dismissIsPerSheet() {
         var chip = ComposeTripChip(mode: .create(restoring: nil), offered: trip)
-        #expect(chip.submittedContent("Lisbon") == "Lisbon\n#portugal2026")
+        #expect(chip.submittedContent("Lisbon", at: .now) == "Lisbon\n#portugal2026")
         chip.dismiss()
-        #expect(chip.shown == nil)
-        #expect(chip.submittedContent("Lisbon") == "Lisbon")
+        #expect(chip.shown(at: .now) == nil)
+        #expect(chip.submittedContent("Lisbon", at: .now) == "Lisbon")
         let next = ComposeTripChip(mode: .create(restoring: nil), offered: trip)
-        #expect(next.shown == trip, "a new sheet with the same pin lost its chip")
+        #expect(next.shown(at: .now) == trip, "a new sheet with the same pin lost its chip")
     }
 
     @Test("a restored capture that already carries the tag is not tagged twice")
     func restoredDraftIsNotTaggedTwice() {
         let restored = "Lisbon\n#portugal2026"
         let chip = ComposeTripChip(mode: draft(restored), offered: trip)
-        #expect(chip.submittedContent(restored) == restored)
+        #expect(chip.submittedContent(restored, at: .now) == restored)
         #expect(
-            chip.submittedContent("the word portugal2026")
+            chip.submittedContent("the word portugal2026", at: .now)
                 == "the word portugal2026\n#portugal2026")
     }
 
@@ -186,6 +225,26 @@ struct ComposeTripChipTests {
         #expect(!chipShown(ScreenProbe.labels(of: sheet("x", pinnedTrip: nil))))
         let editing = ComposeView(mode: edit, pinnedTrip: trip) { _ in .saved }
         #expect(!chipShown(ScreenProbe.labels(of: editing)), "an edit showed the chip")
+    }
+
+    @Test("the sheet asks the clock: an offer already over shows no chip and Post sends no tag")
+    func endedOfferOnScreen() async {
+        let over = ending(Date(timeIntervalSinceNow: -3600))
+        #expect(!chipShown(ScreenProbe.labels(of: sheet("x", pinnedTrip: over))))
+        let live = ending(Date(timeIntervalSinceNow: 3600))
+        #expect(chipShown(ScreenProbe.labels(of: sheet("x", pinnedTrip: live))), "control")
+        let log = PostLog()
+        let (posted, sent) = await PressProbe.withScreen(
+            sheet("Lisbon at dusk", pinnedTrip: over) { await log.take($0) },
+            height: 852
+        ) { screen in
+            let posted = screen.press("Post")
+            let sent = await screen.until { log.sent.count == 1 }
+            return (posted, sent)
+        }
+        #expect(sent, "the Post was not recorded within 5 s")
+        #expect(posted)
+        #expect(log.sent.map(\.content) == ["Lisbon at dusk"], "an ended offer tagged the post")
     }
 
     @Test("Post sends the tag line; after the x it does not; a new sheet has the chip back")
@@ -460,11 +519,11 @@ struct ComposeTripVisibilityTests {
         pick.chosen = .public
         var chip = ComposeTripChip(mode: .create(restoring: nil), offered: trip)
         let kept = ComposeSubmission(
-            content: chip.submittedContent("Lisbon at dusk"), visibility: pick.selection)
+            content: chip.submittedContent("Lisbon at dusk", at: .now), visibility: pick.selection)
         chip.dismiss()
         pick.tripRemoved()
         let removed = ComposeSubmission(
-            content: chip.submittedContent("Lisbon at dusk"), visibility: pick.selection)
+            content: chip.submittedContent("Lisbon at dusk", at: .now), visibility: pick.selection)
 
         for (submission, content) in [
             (kept, "Lisbon at dusk\n#portugal2026"), (removed, "Lisbon at dusk"),
@@ -745,7 +804,32 @@ struct ComposeTodaysTripTests {
     func offerIsTitleAndTag() {
         let found = ComposePinnedTrip.offered(
             among: [trip("a", tag: "lisbon", from: at(5, 0), to: at(12))], now: now)
-        #expect(found == ComposePinnedTrip(title: "Trip a", tag: "lisbon"))
+        // The span's last day is the 12th, so the offer ends as the 13th begins in Lisbon.
+        #expect(found == ComposePinnedTrip(title: "Trip a", tag: "lisbon", endsAt: at(13, 0)))
+    }
+
+    @Test("the offer ends as the day after the span's last day begins, in the span's own zone")
+    func offerEndsInTheSpansZone() throws {
+        // Auckland is 12–13 hours ahead of Lisbon, UTC and any machine the suite runs on.
+        let zone = "Pacific/Auckland"
+        let span = trip(
+            "a", tag: "kiwi", from: at(5, 0, in: zone), to: at(12, 9, in: zone), zone: zone)
+        let found = try #require(
+            ComposePinnedTrip.offered(among: [span], now: at(12, 20, in: zone)))
+        #expect(found.endsAt == at(13, 0, in: zone))
+        #expect(found.endsAt != at(13, 0), "the end was taken in Lisbon's zone")
+        // The offer opened late on its last day and posted after midnight there carries no tag.
+        let chip = ComposeTripChip(mode: .create(restoring: nil), offered: found)
+        #expect(chip.submittedContent("x", at: at(13, 0, 5, in: zone)) == "x")
+        #expect(chip.submittedContent("x", at: at(12, 23, 55, in: zone)) == "x\n#kiwi")
+    }
+
+    @Test("across a daylight-saving change the end is still the next day's midnight")
+    func offerEndAcrossDaylightSaving() throws {
+        // Lisbon leaves summer time on 25 October 2026: that day is 25 hours long.
+        let span = trip("a", tag: "dst", from: at(20, 0), to: at(25, 10))
+        let found = try #require(ComposePinnedTrip.offered(among: [span], now: at(25, 12)))
+        #expect(found.endsAt == at(26, 0))
     }
 }
 

@@ -317,7 +317,7 @@ public struct ComposeView: View {
     public var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 0) {
-                if let trip = tripChip.shown {
+                if let trip = tripChip.shown(at: Date()) {
                     ComposeTripChipView(trip: trip) {
                         tripChip.dismiss()
                         visibilityPick.tripRemoved()
@@ -708,12 +708,15 @@ public struct ComposeView: View {
         }
         problem = nil
         imports.beginSubmission()
+        // The instant Post was pressed, read before any hop: an offer that has ended since the
+        // sheet opened adds nothing (MEMNG-765).
+        let pressedAt = Date()
         Task {
             defer { imports.endSubmission() }
             let submission = ComposeSubmission(
                 // The pinned trip's tag is added here, to what is SENT, and never to the
                 // editor: a failed post tried again builds this from the same unmodified words.
-                content: tripChip.submittedContent(content),
+                content: tripChip.submittedContent(content, at: pressedAt),
                 visibility: visibilityPick.selection,
                 attachments: imports.attachments,
                 createdAt: resolvedDate,

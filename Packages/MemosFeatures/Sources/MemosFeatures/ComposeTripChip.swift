@@ -6,16 +6,28 @@ import SwiftUI
 /// and the tag the memo is given.
 ///
 /// A VALUE handed into the sheet by whoever presents it, decided once from the store when the
-/// sheet is built. The sheet reads neither a clock nor the store: the trips are read at the
-/// instant the capture is opened, and a test builds the offer it wants instead of a store and a
-/// date.
+/// sheet is built. The sheet never reads the store: the trips are read at the instant the capture
+/// is opened, and a test builds the offer it wants instead of a store and a date.
+///
+/// The offer carries the instant it ends (MEMNG-765), because a sheet can stay open across it: the
+/// sheet compares the clock with that instant when the chip is drawn and when Post is pressed.
 public struct ComposePinnedTrip: Equatable, Sendable {
     public var title: String
     public var tag: String
+    /// The first instant the offer no longer holds — the start of the day after the span's last
+    /// day, in the span's own zone — or nil for an offer that never ends.
+    public var endsAt: Date?
 
-    public init(title: String, tag: String) {
+    public init(title: String, tag: String, endsAt: Date? = nil) {
         self.title = title
         self.tag = tag
+        self.endsAt = endsAt
+    }
+
+    /// Whether the offer still holds at `now`: every instant before its end, and every instant
+    /// at all for an offer without one.
+    public func holds(at now: Date) -> Bool {
+        endsAt.map { now < $0 } ?? true
     }
 
     /// What a new memo opened at `now` is offered: the tagged trip whose span holds today, or
@@ -28,18 +40,19 @@ public struct ComposePinnedTrip: Equatable, Sendable {
     /// Of several, the one begun latest (the more particular trip inside a longer one); equal
     /// starts, the one ending first; equal both, the smaller uid — never the list's order.
     public static func offered(among trips: [Trip], now: Date) -> ComposePinnedTrip? {
-        let holding = trips.compactMap { trip -> (Trip, TripSpan, String)? in
+        let holding = trips.compactMap { trip -> (Trip, TripSpan, String, Date)? in
+            // An end that cannot be computed is no offer, never an offer without an end.
             guard let tag = trip.tag, !tag.isEmpty, let span = trip.tripSpan,
-                holdsToday(span, now: now)
+                holdsToday(span, now: now), let end = offerEnd(of: span)
             else { return nil }
-            return (trip, span, tag)
+            return (trip, span, tag, end)
         }
         let chosen = holding.min { lhs, rhs in
             if lhs.1.start != rhs.1.start { return lhs.1.start > rhs.1.start }
             if lhs.1.end != rhs.1.end { return lhs.1.end < rhs.1.end }
             return lhs.0.uid < rhs.0.uid
         }
-        return chosen.map { ComposePinnedTrip(title: $0.0.title, tag: $0.2) }
+        return chosen.map { ComposePinnedTrip(title: $0.0.title, tag: $0.2, endsAt: $0.3) }
     }
 
     /// The offer over the store's current list — nothing while the list has not answered, and
@@ -55,6 +68,15 @@ public struct ComposePinnedTrip: Equatable, Sendable {
         let today = calendar.startOfDay(for: now)
         return calendar.startOfDay(for: span.start) <= today
             && today <= calendar.startOfDay(for: span.end)
+    }
+
+    /// The instant the offer of `span` ends: the start of the day after its last day, in its
+    /// zone — the first instant `holdsToday` no longer counts. A calendar day, never 86 400
+    /// seconds: the day a zone leaves summer time is 25 hours long.
+    private static func offerEnd(of span: TripSpan) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = span.timeZone
+        return calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: span.end))
     }
 }
 
@@ -80,15 +102,19 @@ struct ComposeTripChip: Equatable {
         }
     }
 
-    /// The trip the chip shows, or nil when there is no chip.
-    var shown: ComposePinnedTrip? { isDismissed ? nil : trip }
+    /// The trip the chip shows at `now`, or nil when there is no chip: none was offered, its ✕
+    /// was pressed, or the offer has ended since the sheet opened.
+    func shown(at now: Date) -> ComposePinnedTrip? {
+        guard !isDismissed, let trip, trip.holds(at: now) else { return nil }
+        return trip
+    }
 
     /// The ✕: no chip and no tag for the rest of this sheet.
     mutating func dismiss() { isDismissed = true }
 
-    /// The content a Post sends for `text`, the editor's words as they stand.
-    func submittedContent(_ text: String) -> String {
-        guard let shown else { return text }
+    /// The content a Post pressed at `now` sends for `text`, the editor's words as they stand.
+    func submittedContent(_ text: String, at now: Date) -> String {
+        guard let shown = shown(at: now) else { return text }
         return appendingPinnedTag(shown.tag, to: text)
     }
 }
