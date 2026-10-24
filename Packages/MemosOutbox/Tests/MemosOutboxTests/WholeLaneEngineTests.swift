@@ -3874,11 +3874,13 @@ struct WholePilotChecklistTests {
 
     /// Line 24: a task finishes while a drain pass holds the listing it plans the row against —
     /// the one `passWhole` takes after it has read the row. Its success is applied meanwhile, and
-    /// the file is given nothing more: no session, no new term.
+    /// the file is given nothing more: no offset HEAD, no session, no task, no new term.
     ///
-    /// A regression test only: it is not proven to reach that window, nor that the pass plans
-    /// again. It stayed green with the pass's replan guard removed (mutations L24 and L24r),
-    /// before and after its rework (MEMNG-675).
+    /// The picture's task is gone from the listing, so the row the pass read — the picture still
+    /// on its session — plans a resume, not an upload: planned from that row, the pass sends the
+    /// resume's offset HEAD for a file already on the server (the HEAD's 404 then asks for a fresh
+    /// session the rebase refuses, so no POST goes out). Only the replan guard keeps that HEAD
+    /// back: with it removed (`==` made `>=`, MEMNG-675) this test fails on the HEAD.
     @Test("line 24: a task finishing while a drain holds its listing gets no second session")
     func finishDuringDrainListing() async throws {
         let rig = try await WholeRig.make(completion: [.retry("later")])
@@ -3903,6 +3905,12 @@ struct WholePilotChecklistTests {
         }
         let pass = gate
         try await bounded("the pass's listing") { await pass.waitUntilParked() }
+        // The row the pass read: the picture still on its session, so a plan from it is a resume.
+        let read = try #require(try await rig.reload().file(rig.picture.id))
+        try #require(
+            read.uploadUID != nil && !read.isComplete,
+            "the premise: the pass read the picture as resumable"
+        )
 
         // A burst: the picture's success, and the video's, while the pass holds its listing.
         let pictureAnswer = try rig.answer(picture, status: 200, received: 1000)
@@ -3920,7 +3928,13 @@ struct WholePilotChecklistTests {
         try await bounded("the drain") { await drain.value }
         try await bounded("quiescence") { await engine.untilQuiescent() }
 
+        #expect(
+            !rig.attempted.value.contains { $0.hasPrefix("HEAD ") },
+            "a stale plan resumed a finished file: its offset HEAD went out"
+        )
+        #expect(rig.session.createdTasks.count == 2, "a finished file was handed a second task")
         #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(rig.attempts(of: rig.video.id) == [0])
         #expect(rig.attemptedUploadPosts == 2, "a finished file was given a second session")
         #expect(try await rig.reload().files.allSatisfy { $0.isComplete })
     }
