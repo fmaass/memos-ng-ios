@@ -165,6 +165,30 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
+        "clip 869: the Info sheet from the date capsule, every row, then a picture with fewer",
+        .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
+    )
+    func clipInfoSheet() async {
+        let transport = ClipServer()
+        await withTransport(ClipPaint(palette: ClipPaint.palette())) {
+            let window = await clipHost(opening: .library, transport)
+            defer { ClipStage.close(window) }
+            #expect(await ClipStage.served(transport, ClipServer.listAttachments, atLeast: 1))
+            await ClipStage.settle(window, seconds: 2)
+            // The driver opens the first picture and taps its date capsule: Taken, Memo, Where,
+            // File and Camera, the sheet pulled up to show them all.
+            #expect(await ClipStage.scene("869a-info-sheet"))
+            #expect(transport.served(ClipServer.record) >= 1, "the sheet read no file record")
+            await ClipStage.settle(window, seconds: 1)
+            // The sheet down, a swipe to the next picture, the capsule again: no Where, no
+            // Camera; then Close.
+            #expect(await ClipStage.scene("869b-info-sheet-sparse"))
+            // The driver cannot see the sheet, so the second file's record is what says it opened.
+            #expect(transport.served(ClipServer.record) >= 2, "the second sheet read no record")
+        }
+    }
+
+    @Test(
         "clip 861: the viewer's filmstrip tapped, scrubbed, and hidden with the chrome",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )
@@ -489,6 +513,10 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
     nonisolated static let buckets = "attachment_buckets_api_attachments_buckets_get"
     nonisolated static let memos = "list_memos_api_memos_get"
     nonisolated static let markers = "list_markers_api_map_markers_get"
+    nonisolated static let record = "attachment_meta_api_attachments__uid__get"
+    nonisolated static let memo = "get_memo_api_memos__uid__get"
+    /// The one Library picture that hangs on a memo and carries a place and a camera (869's clip).
+    nonisolated static let described = "lib-12-3"
     nonisolated static let listCovers = "list_collection_covers_api_collection_covers_get"
     nonisolated static let setCover = "set_collection_cover_api_collection_covers__kind___key__put"
 
@@ -559,6 +587,18 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
             return Self.json(#"{"items":[],"nextCursor":null,"totalCount":null}"#)
         case Self.markers:
             return Self.json(#"{"markers":[]}"#)
+        case Self.record:
+            let uid =
+                (URLComponents(string: path)?.path ?? path).split(separator: "/").last
+                .map(String.init) ?? ""
+            return Self.json(Self.record(uid))
+        case Self.memo:
+            return Self.json(
+                #"{"uid":"memo-lib-12-3","owner":"fabian","mine":true,"#
+                    + #""content":"The tram up to the castle, Lisbon","#
+                    + #""visibility":"PRIVATE","pinned":false,"#
+                    + #""created_at":"2026-09-12T15:00:00Z","updated_at":"2026-09-12T15:00:00Z","#
+                    + #""archived_at":null,"tags":["lisbon"],"attachments":[]}"#)
         case Self.listCovers:
             let rows = lock.withLock { covers }.sorted { $0.key < $1.key }.map { entry in
                 let parts = entry.key.split(separator: "/", maxSplits: 1).map(String.init)
@@ -601,7 +641,8 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
                     item(
                         "lib-\(day)-\(index)",
                         taken: "2026-09-\(String(format: "%02d", day))T\(10 + index):00:00Z",
-                        wide: index.isMultiple(of: 2))
+                        wide: index.isMultiple(of: 2),
+                        memo: "lib-\(day)-\(index)" == described ? "memo-\(described)" : nil)
                 }
             }
         }
@@ -627,6 +668,31 @@ private final class ClipServer: ClientTransport, @unchecked Sendable {
             "downloadUrl":"/api/attachments/\(uid)/download",\
             "printUrl":"/api/attachments/\(uid)/print"}
             """
+    }
+
+    /// A file record: the described picture's carries its place, its camera and its clock; every
+    /// other one carries none of the three.
+    private nonisolated static func record(_ uid: String) -> String {
+        let capture =
+            uid == described
+            ? #""capture_instant":"2026-09-12T12:00:00Z","capture_civil":"2026-09-12T14:00:00","#
+                + #""capture_source":"exif","latitude":38.7139,"longitude":-9.1334,"#
+                + #""locationSource":"exif","camera":{"make":"Apple","model":"iPhone 16 Pro","#
+                + #""lensModel":"iPhone 16 Pro back camera","fNumber":1.78,"#
+                + #""exposureTimeS":0.0167,"focalLengthMm":6.765,"exposureBiasEv":-0.3,"iso":80}"#
+            : #""capture_instant":null,"capture_civil":null,"capture_source":null,"#
+                + #""latitude":null,"longitude":null,"locationSource":null,"camera":null"#
+        return #"{"uid":"\#(uid)","mime":"image/jpeg","size":3145728,"sha256":null,"#
+            + #""status":"ready","width":1200,"height":800,"duration":null,"blurhash":null,"#
+            + #""captured_at":null,"mine":true,"hasPrint":false,"hasLegacyPrint":false,"#
+            + #""hasPoster":false,"renditions":[],"#
+            + #""downloadUrl":"/api/attachments/\#(uid)/download","#
+            + #""printUrl":"/api/attachments/\#(uid)/print","#
+            + #""thumbnailUrl":"/api/attachments/\#(uid)/thumb","#
+            + #""previewUrl":"/api/attachments/\#(uid)/mobile","#
+            + #""webUrl":"/api/attachments/\#(uid)/web","webReady":true,"#
+            + #""posterUrl":"/api/attachments/\#(uid)/poster","filename":"IMG_\#(uid).HEIC","#
+            + #""addedBy":"fabian","tags":[],\#(capture)}"#
     }
 
     private nonisolated static func cover(_ kind: String, _ key: String, _ uid: String) -> String {

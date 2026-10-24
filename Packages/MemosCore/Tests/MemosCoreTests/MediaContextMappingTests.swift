@@ -125,8 +125,8 @@ struct MediaContextStoreTests {
         #expect(store.memo("m1") == nil, "a memo read for the old account repopulated the store")
     }
 
-    @Test("a file record is read once per opening, holds the size and the capture fields")
-    func factsAreReadOncePerOpening() async {
+    @Test("a file record is read once per file until forgotten, with its size and capture fields")
+    func factsAreReadOncePerFile() async {
         let sent = Box<Int>(0)
         let client = Stub.client { _, _, operation in
             #expect(operation == "attachment_meta_api_attachments__uid__get")
@@ -145,9 +145,18 @@ struct MediaContextStoreTests {
 
         store.close(first)
         #expect(store.facts(for: first) == nil, "a closed opening still shows its record")
+        // A later opening of the same file is shown the record held for it (MEMNG-869).
         let second = store.open("p1")
         await store.loadFacts(for: second, using: handle)
-        #expect(sent.value == 2, "a new opening did not read the record again")
+        #expect(sent.value == 1, "a new opening of the same file read the record again")
+        #expect(store.facts(for: second)?.size == 2048, "the held record was not shown")
+        store.close(second)
+
+        // Forgotten — a favorites write touched the file — the next opening reads again.
+        store.forget("p1")
+        let third = store.open("p1")
+        await store.loadFacts(for: third, using: handle)
+        #expect(sent.value == 2, "a forgotten record was not read again")
     }
 
     @Test("a record still in the air when its sheet closes lands nowhere, even after a reopen")

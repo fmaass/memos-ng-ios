@@ -1,3 +1,4 @@
+import MapKit
 import MemosCore
 import SwiftUI
 
@@ -45,6 +46,9 @@ private struct PlacesScreen: View {
     /// The sheet and the two viewers a tap on the map opens (`PlacesPresenting`, shared with a
     /// trip's Map since MEMNG-719).
     @State private var presenting = PlacesPresenting()
+    /// A picture's place asked for from the viewer's Info sheet (MEMNG-869). Optional: a host
+    /// without one has nothing to focus on.
+    @Environment(PlacesFocus.self) private var focus: PlacesFocus?
 
     var body: some View {
         Group {
@@ -87,7 +91,9 @@ private struct PlacesScreen: View {
             // an error card over this map (`SessionReporting`).
             places?.reports(to: session)
             await load()
+            applyFocus()
         }
+        .onChange(of: focus?.pending) { _, _ in applyFocus() }
         .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }
 
@@ -135,6 +141,19 @@ private struct PlacesScreen: View {
     /// Try Again on the error card.
     private var retry: @MainActor () async -> Void {
         { await load() }
+    }
+
+    /// Takes a pending focus and hands it to the map once the markers have been read, so the
+    /// picture's own pin can be the centre; the map holds it until it has had its opening view.
+    private func applyFocus() {
+        guard let places, PlacesPresentation.state(of: places) != .pending,
+            let request = focus?.take()
+        else { return }
+        let center = PlacesFocusRouting.center(for: request, in: places.markers)
+        map.focus(
+            on: MKCoordinateRegion(
+                center: center, latitudinalMeters: PlacesFocusRouting.span,
+                longitudinalMeters: PlacesFocusRouting.span))
     }
 
     private func load() async {

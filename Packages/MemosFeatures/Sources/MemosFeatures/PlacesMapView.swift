@@ -77,6 +77,10 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
     private(set) var hasFitted = false
     /// What the opening view will frame, once there is a pane to frame it in.
     private var pendingRegion: MKCoordinateRegion?
+    /// Where a focus asked for from another screen takes the map (Open in Places, MEMNG-869),
+    /// held until the map has had its opening view so that view cannot frame over it. It is not
+    /// part of what a map's record describes: a replacement map takes it too.
+    private var pendingFocus: MKCoordinateRegion?
     /// The markers a tapped pin is resolved against: a pin is a list of uids, and what those uids
     /// stand for is whatever the last read left in hand.
     var markers: [PlaceMarker] = []
@@ -236,6 +240,19 @@ final class PlacesMapCoordinator: NSObject, MKMapViewDelegate {
             edgePadding: PlacePinGeometry.openingInsets(in: pane),
             animated: false
         )
+        focusIfReady(on: mapView)
+    }
+
+    /// Moves the map to `region` — at once when it has had its opening view, else right after.
+    func focus(on region: MKCoordinateRegion) {
+        pendingFocus = region
+        if let mapView { focusIfReady(on: mapView) }
+    }
+
+    private func focusIfReady(on mapView: MKMapView) {
+        guard hasFitted, let region = pendingFocus else { return }
+        pendingFocus = nil
+        mapView.setRegion(region, animated: false)
     }
 }
 

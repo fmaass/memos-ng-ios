@@ -81,6 +81,7 @@ public final class FavoriteStore {
     private var nextToken = 0
     private var detailGeneration = 0
     private var observers: [@MainActor (FavoriteCommit) async -> Void] = []
+    private var invalidations: [@MainActor (String) -> Void] = []
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
@@ -98,6 +99,14 @@ public final class FavoriteStore {
     /// this one through it (`follow(_:)`).
     public func observe(_ observer: @escaping @MainActor (FavoriteCommit) async -> Void) {
         observers.append(observer)
+    }
+
+    /// Tells `observer`, synchronously, every time a picture's own record may no longer say what
+    /// it said: on a commit, and the moment a write's outcome turns out unknown — whether or not
+    /// the reconciling read that follows lands (MEMNG-869). A store that keeps a picture's record
+    /// forgets it here, so its next read asks the server again.
+    public func observeInvalidations(_ observer: @escaping @MainActor (String) -> Void) {
+        invalidations.append(observer)
     }
 
     // MARK: - Reading
@@ -235,6 +244,7 @@ public final class FavoriteStore {
                 _ = await onUnauthorized(refusal)
                 return
             case .unknown(let error):
+                invalidate(uid)
                 if let failure = StoreFailure.transportFailure(error) {
                     session?.noteTransportFailure(failure, issuedUnder: handle.generation)
                 }
@@ -288,7 +298,12 @@ public final class FavoriteStore {
         let entry = FavoriteCommit(uid: uid, tags: tags, revision: revision)
         committed[uid] = entry
         details[uid]?.tags = tags
+        invalidate(uid)
         for observer in observers { await observer(entry) }
+    }
+
+    private func invalidate(_ uid: String) {
+        for observer in invalidations { observer(uid) }
     }
 
     private func owns(_ uid: String, _ token: Int) -> Bool { flights[uid]?.token == token }

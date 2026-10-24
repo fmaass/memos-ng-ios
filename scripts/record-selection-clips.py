@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860, MEMNG-861, MEMNG-902) on the build host.
+"""Records the WPN-12/13 simulator clips (MEMNG-779, MEMNG-780, MEMNG-781, MEMNG-783, MEMNG-822, MEMNG-860, MEMNG-861, MEMNG-869, MEMNG-902) on the build host.
 
 Companion of `MediaImageLoaderTests/clip*()` in SelectionChromeClipTests.swift, run while
 xcodebuild runs those tests on ONE device this script is told about (it never creates, boots,
@@ -47,6 +47,8 @@ SCENES = [
     "861a-filmstrip-tap",
     "861b-filmstrip-scrub",
     "861c-filmstrip-hide",
+    "869a-info-sheet",
+    "869b-info-sheet-sparse",
     "902a-trip-cover-longpress",
     "902b-tag-cover-longpress",
     "902c-library-no-cover",
@@ -385,6 +387,53 @@ class Driver:
         self.tap_at(201, 440, "the picture, to show the chrome")
         time.sleep(3)
         self.find("Info")   # the bar is back, or the scene stops here
+        self.tap("Close")
+        time.sleep(2.5)
+
+    # --- MEMNG-869: the Info sheet ----------------------------------------------------------------
+    def tap_capsule(self):
+        """The date capsule: in the middle of the top row, level with Close."""
+        close = self.find("Close")
+        _, y = self.centre(close)
+        self.tap_at(201, y, "the date capsule")
+
+    def scene_869a(self):
+        # MEMNG-869: one test holds both Info scenes. This one opens the Library's first picture
+        # (it hangs on a memo, and its record carries a place and a camera) and taps the capsule.
+        time.sleep(2)
+        tiles = [
+            e for e in self.elements()
+            if (e.get("AXLabel") or "").startswith("Photo")
+            and 150 <= e["frame"]["y"] and e["frame"]["y"] + e["frame"]["height"] <= 760
+        ]
+        tiles.sort(key=lambda e: (e["frame"]["y"], e["frame"]["x"]))
+        if not tiles:
+            raise RuntimeError("no tile on screen to open")
+        x, y = self.centre(tiles[0])
+        self.tap_at(x, y, "tile %r" % tiles[0].get("AXLabel"))
+        time.sleep(3)
+        self.tap_capsule()
+        # The sheet is invisible to `idb ui describe-all` (the tree after the tap is the one
+        # before it), so no label can say it is up: it is given its time, and the test asserts
+        # the record the sheet reads instead (`clipInfoSheet`).
+        time.sleep(3.5)
+        # Up to the large detent, so Where, File and Camera are all on screen.
+        self.swipe(201, 520, 201, 120, 0.6)
+        time.sleep(4)
+
+    def scene_869b(self):
+        # The sheet down, the next picture (no place, no camera), its sheet, then Close.
+        time.sleep(1.5)
+        # 869a leaves the sheet at the large detent, where a drag from y=200 only scrolls its
+        # rows: the drag starts on the sheet's own title bar, which pulls the sheet down.
+        self.swipe(201, 95, 201, 860, 0.5)
+        time.sleep(2.5)
+        self.swipe(330, 440, 70, 440, 0.4)
+        time.sleep(2.5)
+        self.tap_capsule()
+        time.sleep(3.5)   # unseen by describe-all, as in 869a; the test counts the second record
+        self.swipe(201, 520, 201, 860, 0.5)
+        time.sleep(2)
         self.tap("Close")
         time.sleep(2.5)
 

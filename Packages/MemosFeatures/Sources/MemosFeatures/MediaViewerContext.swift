@@ -94,6 +94,30 @@ struct MediaViewerChrome: Equatable {
     var shown: Set<Part> { hidden ? [] : Set(Part.allCases) }
 }
 
+/// The viewer's top row: close, the date capsule, ⋯.
+///
+/// The capsule is laid out FIRST (`layoutPriority`): it is offered the row less what the two
+/// sides need at the least, so it gets its own width and never the third of the row an equal
+/// share would give it — the share that cut "12 Sep 2026" to "12 Sep 20…". The side slots then
+/// split what is left evenly, which is what keeps the capsule in the middle.
+struct MediaViewerTopRow<Close: View, Capsule: View, Actions: View>: View {
+    @ViewBuilder let close: Close
+    @ViewBuilder let capsule: Capsule
+    @ViewBuilder let actions: Actions
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            close
+                .frame(maxWidth: .infinity, alignment: .leading)
+            capsule
+                .layoutPriority(1)
+            actions
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, DesignTokens.Space.roomy)
+    }
+}
+
 /// The date of the page on screen, in two lines: the day — Today, Yesterday, a weekday for the
 /// rest of the last week, else a short date — and the time under it.
 struct MediaViewerDateCapsule: View {
@@ -104,19 +128,31 @@ struct MediaViewerDateCapsule: View {
 
     var body: some View {
         let calendar = Calendar.current
+        let day = Self.dayLine(for: date, now: now, calendar: calendar, locale: .current)
+        let time = Self.timeLine(for: date, calendar: calendar, locale: .current)
+        // Each line is ONE line: the row gives the capsule its own width first
+        // (`MediaViewerTopRow`), and the scale factor is only the last resort of a type size too
+        // large for any phone's row — never a wrap and never an ellipsis.
         VStack(spacing: 0) {
-            Text(Self.dayLine(for: date, now: now, calendar: calendar, locale: .current))
+            Text(day)
                 .font(.subheadline.weight(.semibold))
-            Text(Self.timeLine(for: date, calendar: calendar, locale: .current))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(time)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
         }
-        .lineLimit(1)
         .padding(.horizontal, DesignTokens.Space.roomy)
         .frame(minHeight: Self.height)
         .glassEffect(.regular, in: .capsule)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.spoken(day: day, time: time))
     }
+
+    /// What VoiceOver reads for the capsule: the day, then the time.
+    static func spoken(day: String, time: String) -> String { "\(day), \(time)" }
 
     static func dayLine(for date: Date, now: Date, calendar: Calendar, locale: Locale) -> String {
         let from = calendar.startOfDay(for: date)

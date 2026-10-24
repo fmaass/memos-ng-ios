@@ -56,8 +56,10 @@ extension View {
     /// The full-screen viewer a grid's tap opens, re-signed by `refresher` and grown out of the
     /// tile it matches in `zoom`. `source` is the host's: where the viewer's pages come from, read
     /// for the selection that was opened. `transport` is what the viewer fetches its stills through
-    /// — the image layer's own session unless a test is watching it. `action` is the host's one
-    /// extra control on a page, nil everywhere but a trip (`MediaViewerHostAction`). `gone` is
+    /// — the app's one image seam (`MediaImageLoader.transport`) unless a host hands its own; a
+    /// literal shared session here sent the Library's stills past every substitution (MEMNG-882).
+    /// `action` is the host's one extra control on a page, nil everywhere but a trip
+    /// (`MediaViewerHostAction`). `gone` is
     /// the pictures deleted elsewhere, which leave a viewer open over them (`MediaViewerView.gone`).
     /// `delete` is the host's bin, shown on each page that is mine (`MediaViewerSelection`).
     ///
@@ -68,7 +70,7 @@ extension View {
         _ viewing: Binding<MediaViewerSelection?>,
         refresher: (any SignedURLRefreshing)?,
         zoom: Namespace.ID,
-        transport: any MediaTransport = MediaSession.shared,
+        transport: any MediaTransport = MediaImageLoader.transport,
         action: MediaViewerHostAction? = nil,
         gone: Set<String> = [],
         delete: (@MainActor (String) async -> Bool)? = nil,

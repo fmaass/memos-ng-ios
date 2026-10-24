@@ -62,6 +62,11 @@ struct MediaViewerView: View {
     /// The session's favorites, which the bar's heart reads and writes. Optional for the same
     /// reason: a host without one draws the heart inert.
     @Environment(FavoriteStore.self) private var favorites: FavoriteStore?
+    /// Where the Info sheet's Open in Places sends a picture's place (MEMNG-869). Optional: a host
+    /// without one draws no Open in Places.
+    @Environment(PlacesFocus.self) private var placesFocus: PlacesFocus?
+    /// The place names the Info sheet has looked up, one lookup per file while the viewer is up.
+    @State private var places = PlaceNameCache()
     /// The download the menu's slow action starts, and the sheet it ends in.
     @State private var saving = MediaSaveFlow()
     /// The page the pager has settled on — the identity of the page, not an index, because a
@@ -105,7 +110,10 @@ struct MediaViewerView: View {
         delete: (@MainActor (String) async -> Bool)? = nil,
         hostAction: MediaViewerHostAction? = nil,
         gone: Set<MediaPage.ID> = [],
-        transport: any MediaTransport = MediaSession.shared
+        // The app's one image seam (`MediaImageLoader.transport`), as every tile's fetch reads it —
+        // `MediaSession.shared` in the app, a scripted transport where a test substitutes one. A
+        // literal `MediaSession.shared` here sent the viewer's stills past every substitution.
+        transport: any MediaTransport = MediaImageLoader.transport
     ) {
         self.selection = selection
         self.source = source
@@ -238,23 +246,26 @@ struct MediaViewerView: View {
         }
     }
 
-    /// Close on the left, the page's date in the middle, ⋯ on the right. The side slots take the
-    /// same width, so the capsule keeps the middle whichever of them is drawn.
+    /// Close on the left, the page's date in the middle, ⋯ on the right (`MediaViewerTopRow`).
     private var topRow: some View {
         let shown = chrome.shown
-        return HStack(spacing: DesignTokens.Space.snug) {
+        return MediaViewerTopRow {
             MediaViewerCloseButton { dismiss() }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        } capsule: {
             Group {
                 if let date = currentContext?.date {
+                    // The date is the Info sheet's first row, so a tap on it opens the sheet.
                     MediaViewerDateCapsule(date: date)
+                        .contentShape(Capsule())
+                        .onTapGesture { openCurrentInfo() }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { openCurrentInfo() }
                 }
             }
             .opacity(shown.contains(.dateCapsule) ? 1 : 0)
+        } actions: {
             actions
-                .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, DesignTokens.Space.roomy)
         .opacity(shown.contains(.topRow) ? 1 : 0)
         .allowsHitTesting(shown.contains(.topRow))
         .accessibilityHidden(!shown.contains(.topRow))
@@ -283,6 +294,11 @@ struct MediaViewerView: View {
         }
     }
 
+    private func openCurrentInfo() {
+        guard let page = pages.first(where: { $0.id == currentPage }) else { return }
+        openInfo(page)
+    }
+
     private func openInfo(_ page: MediaPage) {
         let store: MediaContextStore
         if let context {
@@ -291,6 +307,7 @@ struct MediaViewerView: View {
             store = MediaContextStore(
                 onUnauthorized: { [session] refusal in await session.handle(refusal) })
             store.reports(to: session)
+            if let favorites { store.follow(favorites) }
         } else {
             store = MediaContextStore()
         }
@@ -309,10 +326,18 @@ struct MediaViewerView: View {
             opening: subject.opening,
             handle: session?.activeHandle,
             baseURL: session?.serverBaseURL,
+            places: places,
             showMemo: { uid in
                 inspecting = nil
                 dismiss()
                 jump?.request(uid)
+            },
+            openInPlaces: placesFocus.map { focus in
+                { (request: PlacesFocus.Request) in
+                    inspecting = nil
+                    dismiss()
+                    focus.request(request)
+                }
             }
         )
     }

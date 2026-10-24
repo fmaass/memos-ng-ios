@@ -88,6 +88,44 @@ struct MediaViewerBarTests {
         }
     }
 
+    @Test("the date capsule keeps its own width in the middle of the top row, at larger type too")
+    func capsuleKeepsItsWidth() throws {
+        // 12 Sep 2025, long enough ago to draw the full abbreviated date.
+        let date = Date(timeIntervalSince1970: 1_757_687_520)
+        let calendar = Calendar.current
+        let day = MediaViewerDateCapsule.dayLine(
+            for: date, now: Date(), calendar: calendar, locale: .current)
+        let time = MediaViewerDateCapsule.timeLine(for: date, calendar: calendar, locale: .current)
+        let label = MediaViewerDateCapsule.spoken(day: day, time: time)
+        let side = MediaViewerBar.circleSide
+        // `PressProbe` finds a node by its label AND the button trait; the capsule is no button,
+        // so the test lends its one element the trait to be found by — nothing else changes.
+        func capsule() -> some View {
+            MediaViewerDateCapsule(date: date).accessibilityAddTraits(.isButton)
+        }
+        for size in [DynamicTypeSize.large, .xxxLarge] {
+            let alone = capsule().fixedSize().environment(\.dynamicTypeSize, size)
+            let wanted = try #require(
+                PressProbe.withElement(labelled: label, in: alone) { $0?.accessibilityFrame },
+                "no capsule alone at \(size)")
+            let row = MediaViewerTopRow {
+                Circle().frame(width: side, height: side)
+            } capsule: {
+                capsule()
+            } actions: {
+                Circle().frame(width: side, height: side)
+            }
+            .environment(\.dynamicTypeSize, size)
+            let drawn = try #require(
+                PressProbe.withElement(labelled: label, in: row) { $0?.accessibilityFrame },
+                "no capsule in the row at \(size)")
+            #expect(
+                drawn.width >= wanted.width - 1,
+                "the row squeezed the capsule to \(drawn.width) of \(wanted.width) at \(size)")
+            #expect(abs(drawn.midX - 393 / 2) <= 1, "capsule off centre (\(drawn.midX)) at \(size)")
+        }
+    }
+
     @Test("Share is off the viewer's menu rows and on the bar")
     func shareMovedToTheBar() {
         let file = picture("a", memoUID: "m7")
@@ -696,5 +734,81 @@ struct MediaViewerBarHeartTests {
             #expect(await shows(screen, "On"))
         }
         #expect(favorites.notice == nil, "a confirmed outcome says nothing")
+    }
+}
+
+extension MediaImageLoaderTests {
+    /// The clip run's warning glyph (MEMNG-860 round 3): the viewer's still went past the image
+    /// seam every tile reads, so a substituted transport never saw it.
+    @Test("the viewer fetches its stills through the app's image seam unless handed a transport")
+    func viewerDefaultsToTheImageSeam() async throws {
+        let scripted = ScriptedTransport(payload: MediaFixture.png(.red))
+        let page = try #require(MediaViewerPresentation.pages(for: [picture("seam")]).first)
+        let selection = MediaViewerSelection(pages: [page], startIndex: 0)
+        await withTransport(scripted) {
+            let viewer = MediaViewerView(selection: selection, source: .fixed([page]))
+            // Identities compared outside the macro: `===` inside `#expect` crashes SILGen
+            // (Swift 6.3.3, a reabstraction thunk for the existential).
+            let handed = ObjectIdentifier(viewer.transport as AnyObject)
+            let substituted = ObjectIdentifier(scripted)
+            #expect(handed == substituted, "the viewer's still bypasses MediaImageLoader.transport")
+        }
+    }
+}
+
+/// A grid's host cut down to the one call under test: `gridViewer` with its own defaults, opened
+/// on `selection` from the first frame.
+private struct GridViewerHarness: View {
+    @State private var viewing: MediaViewerSelection?
+    @Namespace private var zoom
+    let page: MediaPage
+
+    init(selection: MediaViewerSelection, page: MediaPage) {
+        _viewing = State(initialValue: selection)
+        self.page = page
+    }
+
+    var body: some View {
+        Color.clear.gridViewer($viewing, refresher: nil, zoom: zoom) { _ in .fixed([page]) }
+    }
+}
+
+extension MediaImageLoaderTests {
+    /// MEMNG-882: the Library opens its viewer through `gridViewer`, whose own default named the
+    /// shared session, so the clip run's still went to the network (-1003) past the seam the
+    /// viewer itself already reads. Watched on the wire, not by identity: the still has to
+    /// arrive at the substituted transport, at the tier the viewer draws.
+    @Test("a grid's viewer fetches its still through the app's image seam")
+    func gridViewerDefaultsToTheImageSeam() async throws {
+        let scripted = ScriptedTransport(payload: MediaFixture.png(.red))
+        let page = try #require(MediaViewerPresentation.pages(for: [picture("grid-seam")]).first)
+        let selection = MediaViewerSelection(pages: [page], startIndex: 0)
+        await withTransport(scripted) {
+            let frame = CGRect(origin: .zero, size: CGSize(width: 390, height: 844))
+            let window: UIWindow
+            let scenes = UIApplication.shared.connectedScenes
+            if let scene = scenes.first(where: { $0 is UIWindowScene }) as? UIWindowScene {
+                window = UIWindow(windowScene: scene)
+                window.frame = frame
+            } else {
+                window = UIWindow(frame: frame)
+            }
+            window.rootViewController = UIHostingController(
+                rootView: GridViewerHarness(selection: selection, page: page))
+            window.makeKeyAndVisible()
+            var asked: [String] = []
+            for _ in 0..<100 where asked.isEmpty {
+                try? await Task.sleep(for: .milliseconds(50))
+                window.layoutIfNeeded()
+                asked = await scripted.requests.compactMap { $0.url?.path }
+            }
+            window.rootViewController?.dismiss(animated: false)
+            window.isHidden = true
+            #expect(
+                asked.contains("/api/attachments/grid-seam/mobile"),
+                "the grid's viewer fetched past MediaImageLoader.transport: \(asked)")
+            #expect(
+                !asked.contains { $0.hasSuffix("/original") }, "an original was fetched: \(asked)")
+        }
     }
 }

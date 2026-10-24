@@ -24,6 +24,9 @@ struct MainTabView: View {
     @State private var yearJump = LibraryYearJump()
     /// A month asked for from the Collections root, which the Library shows in Months (MEMNG-783).
     @State private var monthJump = LibraryMonthJump()
+    /// A picture's place asked for from the viewer's Info sheet, which Places moves its map to
+    /// (MEMNG-869).
+    @State private var placesFocus = PlacesFocus()
     /// The session's collections and their memberships: one of each for as long as this view
     /// shows a session, built once its identity can be read, moved to a new identity beside the
     /// timeline (`TimelineView`), and read by every tab through the environment.
@@ -155,6 +158,7 @@ struct MainTabView: View {
         .environment(tagJump)
         .environment(yearJump)
         .environment(monthJump)
+        .environment(placesFocus)
         .environment(trips)
         .environment(members)
         .environment(actions)
@@ -176,6 +180,10 @@ struct MainTabView: View {
         // And for a month: the Library shows its days.
         .onChange(of: monthJump.pending) { _, pending in
             selection = LibraryMonthJumpRouting.tab(showing: selection, whenOpening: pending)
+        }
+        // And for a picture's place asked for from the Info sheet: Places moves its map there.
+        .onChange(of: placesFocus.pending) { _, pending in
+            selection = PlacesFocusRouting.tab(showing: selection, whenFocusing: pending)
         }
     }
 
