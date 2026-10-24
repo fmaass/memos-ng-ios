@@ -73,6 +73,13 @@ public final class TripMemberStore {
     let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     var session: (any SessionReporting)?
     private var drained: [String: Drained] = [:]
+    /// The unfiltered drain that failed, per key: the lineage that issued it, its request
+    /// included. Apart from "not read", so the screen does not take a failure for an invalidation
+    /// and ask again by itself; a new drain, a landed one, an invalidation or another lineage ends
+    /// it (MEMNG-846). Kept apart from `filteredFailures`, whose shape it shares, because the drain
+    /// and the grid's filtered read are two lanes of one key: a filtered ask must not end the
+    /// drain's failure, nor a drain the filtered read's.
+    private var drainFailures: [String: Lineage] = [:]
     private var flights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
     private var removedResults: [String: (lineage: Lineage, state: TripRemovedState)] = [:]
     /// The grid's filtered read of a trip (MEMNG-780), one per trip: the query it answered beside
@@ -292,6 +299,21 @@ public final class TripMemberStore {
         return held.complete ? .complete : .truncated
     }
 
+    /// Whether the last drain of `scope`'s members failed under the current lineage and nothing
+    /// has asked again since.
+    public func drainFailed(for scope: CollectionScope) -> Bool {
+        guard let failure = drainFailures[scope.id], let request = Self.request(for: scope),
+            failure.request == request
+        else { return false }
+        return current(failure)
+    }
+
+    /// Whether the screen should read `scope`'s members again by itself: nothing held, nothing on
+    /// the wire, and no failure of the current lineage standing (`drainFailed(for:)`).
+    public func needsDrain(for scope: CollectionScope) -> Bool {
+        state(for: scope) == .notLoaded && !drainFailed(for: scope)
+    }
+
     /// A scope's drained members, oldest taken first, less every picture Delete took. A trip's are
     /// `members(for:)`'s, which also leave out what this app removed from it.
     public func members(for scope: CollectionScope) -> [LibraryRow] {
@@ -403,6 +425,7 @@ public final class TripMemberStore {
             await running.task.value
             return
         }
+        drainFailures[scope.id] = nil
         nextToken += 1
         let token = nextToken
         let task = Task { await self.runAutomaticDrain(lineage, token: token, handle, baseURL) }
@@ -433,6 +456,7 @@ public final class TripMemberStore {
             walked = try await walkAutomatic(
                 lineage.request, query: .unfiltered, handle, baseURL, owned: owned)
         } catch {
+            noteDrainFailure(error, lineage, token: token)
             await report(error, handle: handle, while: owned)
             return
         }
@@ -441,6 +465,7 @@ public final class TripMemberStore {
         landed.revision = trips.revision
         drained[lineage.uid] = Drained(
             lineage: landed, rows: fenced(walked.rows, walked.issued), complete: walked.complete)
+        drainFailures[lineage.uid] = nil
         lastError = nil
     }
 
@@ -554,6 +579,7 @@ public final class TripMemberStore {
             await running.task.value
             return
         }
+        drainFailures[uid] = nil
         nextToken += 1
         let token = nextToken
         let task = Task { await self.runDrain(lineage, token: token, handle, baseURL) }
@@ -588,6 +614,7 @@ public final class TripMemberStore {
                 }
             } while cursor != nil
         } catch {
+            noteDrainFailure(error, lineage, token: token)
             await report(error, handle: handle) {
                 self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token
             }
@@ -596,8 +623,22 @@ public final class TripMemberStore {
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: lineage.uid)
         drained[lineage.uid] = Drained(
             lineage: landed, rows: fenced(rows, issued), complete: complete)
+        drainFailures[lineage.uid] = nil
         contradict(uid: lineage.uid, listed: rows, askedAt: token)
         lastError = nil
+    }
+
+    /// Records the failure of the drain `lineage` issued, taken in this turn before any hop: only
+    /// while that drain still owns its slot and its lineage is the current one, so a failure that
+    /// outlived an invalidation, a new session or a moved revision records nothing. A transport
+    /// failure is recorded as any other — offline, the loop would ask just as often. A refused
+    /// credential is not: the session decides it (`report`), and a superseded one is read again
+    /// under the credential that replaced it. Nor is a cancellation, which nobody answered.
+    private func noteDrainFailure(_ error: any Error, _ lineage: Lineage, token: Int) {
+        guard stillCurrent(lineage), flights[lineage.uid]?.token == token,
+            !StoreFailure.isCancellation(error), StoreFailure.refusal(error) == nil
+        else { return }
+        drainFailures[lineage.uid] = lineage
     }
 
     // MARK: - The grid's filter (MEMNG-780)
@@ -1052,11 +1093,13 @@ public final class TripMemberStore {
 
     // MARK: - Invalidation
 
-    /// Drops what this store holds for trip `uid` (every trip for nil): its members, its Removed
-    /// list and the slots of its reads, whose answers are then refused on arrival.
+    /// Drops what this store holds for trip `uid` (every trip for nil): its members, a failed
+    /// drain's record, its Removed list and the slots of its reads, whose answers are then refused
+    /// on arrival.
     public func invalidate(uid: String?) {
         guard let uid else {
             drained = [:]
+            drainFailures = [:]
             flights = [:]
             removedResults = [:]
             removedFlights = [:]
@@ -1066,6 +1109,7 @@ public final class TripMemberStore {
             return
         }
         drained[uid] = nil
+        drainFailures[uid] = nil
         flights[uid] = nil
         filteredDrains[uid] = nil
         filteredFlights[uid] = nil

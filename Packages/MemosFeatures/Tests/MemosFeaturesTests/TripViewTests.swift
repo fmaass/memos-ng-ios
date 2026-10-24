@@ -796,6 +796,43 @@ struct TripScreenRenderTests {
         }
     }
 
+    /// The screen's own wiring, not a copy of its guard (MEMNG-846): a re-drain keyed on "not
+    /// loaded" alone flips back after every failure and asks the server again, for ever.
+    @Test("a drain that failed is not asked again by the screen by itself")
+    func aFailedDrainIsNotRetriedByItself() async {
+        let wire = TripWire()
+        wire.transport.fail()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        // The failure is held until the screen has DRAWN the drain in flight: a failure answered
+        // between two updates would never show the screen "draining", and a re-drain keyed on
+        // "not loaded" alone would read true, then true, and never start again.
+        wire.transport.hold()
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            defer { wire.transport.release() }
+            let drawn = await screen.until {
+                stores.1.state(for: .trip(record)) == .draining
+                    && TripProbe.spinners(in: screen.window) > 0
+            }
+            #expect(drawn, "precondition: the screen never drew the drain in flight")
+            guard drawn else { return }
+            let during = TripProbe.spinners(in: screen.window)
+            // Counted while the one read is still held: a re-drain that starts the moment the
+            // failure lands, before the store is seen to have failed, is counted too.
+            let reads = wire.transport.listReads.count
+            wire.transport.release()
+            let failed = await screen.until { stores.1.drainFailed(for: .trip(record)) }
+            #expect(failed, "precondition: the drain failed")
+            await screen.settle(turns: 40)
+            _ = await screen.until(seconds: 2) { wire.transport.listReads.count > reads }
+            let after = wire.transport.listReads.count
+            #expect(after == reads, "the screen asked again by itself: \(reads) then \(after)")
+            #expect(stores.1.drainFailed(for: .trip(record)), "the failure no longer stands")
+            let left = TripProbe.spinners(in: screen.window)
+            #expect(left < during, "the loading row seen was not the drain's: \(during), \(left)")
+        }
+    }
+
     @Test("a viewer open over the trip shows the page the trip was read again for")
     func anOpenViewerFollowsTheRedrain() async {
         let wire = TripWire()
@@ -1759,6 +1796,22 @@ enum TripProbe {
             try? await Task.sleep(for: .milliseconds(50))
         }
         return await ready()
+    }
+
+    /// The activity indicators drawn in `window`: a drain in flight shows the grid's loading row
+    /// (`LibraryGrid`'s `loadingMore`), so a count that falls once it ends ties one of them to it.
+    /// Only what is drawn counts: once the row is gone SwiftUI keeps its indicator in the tree,
+    /// hidden and transparent, and a hidden or transparent view hides everything under it.
+    static func spinners(in window: UIWindow) -> Int {
+        var count = 0
+        var stack: [UIView] = [window]
+        while let view = stack.popLast() {
+            guard !view.isHidden, view.alpha > 0 else { continue }
+            let name = String(describing: type(of: view))
+            if view is UIActivityIndicatorView || name.contains("ActivityIndicator") { count += 1 }
+            stack.append(contentsOf: view.subviews)
+        }
+        return count
     }
 
     /// The grid's tiles, top to bottom and then leading to trailing, one node per place.

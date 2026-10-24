@@ -785,9 +785,10 @@ struct TripView: View {
                 await drain()
             }
             // The store let the members go — a change to a trip moved its revision — so they are
-            // read again; the screen keeps showing the last ones meanwhile.
-            .task(id: memberStore.state(for: shown) == .notLoaded) {
-                guard memberStore.state(for: shown) == .notLoaded else { return }
+            // read again; the screen keeps showing the last ones meanwhile. A drain that failed is
+            // not one of those: it is asked again by the drain above, never by itself.
+            .task(id: memberStore.needsDrain(for: shown)) {
+                guard memberStore.needsDrain(for: shown) else { return }
                 await drain()
             }
             // The grid's filter (MEMNG-780): read again when it changes, the account changes or
