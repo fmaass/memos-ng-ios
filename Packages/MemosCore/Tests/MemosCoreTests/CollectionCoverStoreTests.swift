@@ -192,6 +192,66 @@ struct CollectionCoverStoreTests {
         #expect(store.cover(for: Self.garden)?.uid == "new")
     }
 
+    /// A store whose PUT waits for `release` and whose list answers the earlier cover "old",
+    /// held until `listRelease` opens when one is given.
+    static func heldWrite(
+        putEntered: TripLatch, release: TripLatch, listEntered: TripLatch? = nil,
+        listRelease: TripLatch? = nil
+    ) -> any APIProtocol {
+        Stub.client { request, _, operation in
+            if operation == Self.list {
+                listEntered?.open()
+                if let listRelease { await listRelease.wait() }
+                return Self.listing([("tag", "garden", "old")])
+            }
+            if operation == Self.put {
+                putEntered.open()
+                await release.wait()
+                return Self.taken("new")
+            }
+            let uid = request.path?.split(separator: "/").last.map(String.init) ?? ""
+            return CarriedCoverRenewalTests.record(uid, sig: "s")
+        }
+    }
+
+    @Test("a refresh answering while a cover write is out does not undo the choice")
+    func aListDuringAPendingWriteDoesNotUndoIt() async throws {
+        let putEntered = TripLatch()
+        let release = TripLatch()
+        let client = Self.heldWrite(putEntered: putEntered, release: release)
+        let store = CollectionCoverStore()
+        let fresh = try await Self.picture("new")
+        let write = try #require(store.choose(fresh, for: Self.garden, using: client.handle))
+        await putEntered.wait()
+        await store.load(using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.cover(for: Self.garden)?.uid == "new", "the old cover landed over the write")
+        release.open()
+        try await write.value
+        #expect(store.cover(for: Self.garden)?.uid == "new")
+    }
+
+    @Test("a refresh asked while a cover write is out and answering after it does not undo it")
+    func aListOutlivingAPendingWriteDoesNotUndoIt() async throws {
+        let putEntered = TripLatch()
+        let release = TripLatch()
+        let listEntered = TripLatch()
+        let listRelease = TripLatch()
+        let client = Self.heldWrite(
+            putEntered: putEntered, release: release, listEntered: listEntered,
+            listRelease: listRelease)
+        let store = CollectionCoverStore()
+        let fresh = try await Self.picture("new")
+        let write = try #require(store.choose(fresh, for: Self.garden, using: client.handle))
+        await putEntered.wait()
+        let reading = Task { await store.load(using: client.handle, baseURL: Stub.baseURL) }
+        await listEntered.wait()
+        release.open()
+        try await write.value
+        listRelease.open()
+        await reading.value
+        #expect(store.cover(for: Self.garden)?.uid == "new", "the old cover landed over the write")
+    }
+
     @Test("a list that answers after the account changed lands nowhere")
     func anotherAccountsListLandsNowhere() async throws {
         let entered = TripLatch()

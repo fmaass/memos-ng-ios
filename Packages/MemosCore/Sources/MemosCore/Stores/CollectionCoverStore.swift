@@ -132,7 +132,8 @@ public final class CollectionCoverStore {
             return
         }
         chosen = Self.merged(
-            listed: rows, held: chosen, epochsAtIssue: epochs, epochsNow: writeEpochs)
+            listed: rows, held: chosen, epochsAtIssue: epochs, epochsNow: writeEpochs,
+            pending: Set(writes.keys))
         session?.noteTransportSuccess(issuedUnder: handle.generation)
         let now = Date()
         for uid in Set(chosen.values).sorted()
@@ -154,10 +155,12 @@ public final class CollectionCoverStore {
     }
 
     /// What a landing list makes of the chosen covers: the server's, except for a collection
-    /// chosen here after the list was asked — that choice is newer than the answer.
+    /// chosen here after the list was asked — that choice is newer than the answer — and for one
+    /// whose choice is still being written (`pending`): a list asked while the write was out may
+    /// have been read before the write reached the server, so it says nothing about the choice.
     static func merged(
         listed: [Components.Schemas.CollectionCoverOut], held: [Key: String],
-        epochsAtIssue: [Key: Int], epochsNow: [Key: Int]
+        epochsAtIssue: [Key: Int], epochsNow: [Key: Int], pending: Set<Key> = []
     ) -> [Key: String] {
         var next: [Key: String] = [:]
         for row in listed {
@@ -165,7 +168,9 @@ public final class CollectionCoverStore {
             next[Key(kind: kind, key: row.key)] = row.attachmentUid
         }
         for key in Set(next.keys).union(held.keys)
-        where epochsNow[key, default: 0] != epochsAtIssue[key, default: 0] {
+        where pending.contains(key)
+            || epochsNow[key, default: 0] != epochsAtIssue[key, default: 0]
+        {
             next[key] = held[key]
         }
         return next
@@ -199,6 +204,9 @@ public final class CollectionCoverStore {
                 throw await failure(error, issuedUnder: handle)
             }
             guard issued == generation else { throw TripStore.Failure.superseded }
+            // A list asked while the write was out, and answering after it, may still carry the
+            // earlier cover: moving the epoch again keeps that answer off the choice.
+            writeEpochs[key, default: 0] += 1
             session?.noteTransportSuccess(issuedUnder: handle.generation)
         }
     }
