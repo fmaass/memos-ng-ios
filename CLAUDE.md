@@ -195,6 +195,22 @@ After a deliberate dependency change the pins are re-recorded, not hand-edited: 
 what it resolved in `.gate-artifacts/Package.resolved`, so `cp .gate-artifacts/Package.resolved
 Package.resolved` and commit that.
 
+## Autonomy (owner, 2026-10-24)
+
+memos (the memos-ng server and the memos-ng-ios app) is private and household-only, so the owner gave this durable, explicit permission for both repos. It covers no other project. The global "explicit permission" rules (tags, releases, production deploys) are satisfied by this section for memos.
+
+| Action | Who decides | Safety net that still binds |
+|---|---|---|
+| TestFlight cut and upload | autonomous | green full gate, App Store Connect read-back |
+| App Store release | autonomous | the tickets in it are provably done: Delivered with evidence, green full gate |
+| Server production deploy | autonomous on green gates | `/safe-deploy`: rollback image retagged first, digest check, live request on the real surface |
+| Database migration, additive (new tables or columns, add-only backfills) | autonomous | plan gate first, a fresh backup, a rehearsal on populated data, expand/contract |
+| Git tags and GitHub Releases | autonomous | annotated tag, notes through the outgoing-text check (first person, no AI attribution) |
+| Destructive production-data change (delete, drop, rewrite in place) | **the owner** | it cannot be undone |
+| The frozen main bar (ADR-0008) | **the owner** | the owner's own design freeze |
+
+Every other decision follows the owner's standing rule: take the recommended option, record it on the ticket as `Decided <date> … the recommended option; the owner may course-correct later`, and keep delivering. Ask only for the two owner rows above, or when no option is defensible.
+
 ## Outgoing text
 
 Anything that leaves this repo under my name — App Store listing text, release notes, a public
