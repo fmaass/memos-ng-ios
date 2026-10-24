@@ -11,8 +11,10 @@ import UIKit
 /// here is the wiring a case is deliberately not asked to stand up: this view holds a
 /// `ManageTokensStore` and puts it through the whole token flow — a management sign-on in a
 /// browser sheet, and a grant — which is a great deal to run for a question about a screen. The
-/// questions are put to the store and the screen directly instead (the same choice `SettingsView`
-/// gets).
+/// questions are put to the store and the screen directly instead (the same choice `AccountSheet`
+/// makes for its token rows, `DeviceTokenSection` and `ManageTokensRow`). This view is only ever
+/// put up by the account sheet, and a test reaches it there: `AccountSheetRenderTests` opens it
+/// over the sheet and finds its sign-on, without driving the flow.
 ///
 /// The grant lives for exactly as long as this view does. It goes when the sheet is dismissed and
 /// when the app is backgrounded, and it was never written anywhere that could outlive either.

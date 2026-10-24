@@ -867,11 +867,13 @@ struct MediaLibraryView: View {
 
 /// The scrolling grid itself, split from the screen so a test can host it.
 ///
-/// `MediaLibraryView` reads `SessionStore` from the environment, which the test bundle cannot
-/// build — the reason `TimelineView` and `SettingsView` are not hosted in tests either. The grid
-/// is where MEMNG-206 lived: nothing asserted that a store full of files ever became PLACED
-/// tiles, so the width round-trip could break with every unit around it green. Everything the
-/// grid draws arrives as a value; the session, the store and the fetching stay in the screen.
+/// `MediaLibraryView` reads `SessionStore` from the environment. The test bundle does host it
+/// (`MediaLibrarySubjectChangeTests`; `TimelineView` too, in `ComposedRecoveryTests`), but only
+/// over a session signed in through a scripted server, where what the grid is handed is whatever
+/// that server answers.
+/// The grid is where MEMNG-206 lived: nothing asserted that a store full of files ever became
+/// PLACED tiles, so the width round-trip could break with every unit around it green. Everything
+/// the grid draws arrives as a value; the session, the store and the fetching stay in the screen.
 /// What the tag list is read again on: the kind on screen and the account it is read as.
 private struct TagListKey: Equatable {
     let filter: MediaLibraryFilter?

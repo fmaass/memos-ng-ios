@@ -1,13 +1,15 @@
 import MemosCore
 import SwiftUI
 
-/// The device-token row in the Account section: what this phone's credential is called, how long
+/// The device-token row on the account sheet: what this phone's credential is called, how long
 /// it has, when it last spoke, and the two things a device may do to it.
 ///
-/// A view of its own rather than a body inside `SettingsView`, and for the reason `SignOutSection`
-/// is one: that screen reads a `SessionStore` and so cannot be hosted in the Features test bundle,
-/// which would leave a row nothing could draw and a Rename nothing could press. Everything here
-/// arrives as a value or a closure, so the whole row is a thing a test puts on a screen.
+/// A view of its own rather than a body inside `AccountSheet`, and for the reason `SignOutSection`
+/// is one. The sheet reads a `SessionStore`; it is hosted in the Features test bundle, but only
+/// over a session signed in through a scripted server, so every state of this row would have to
+/// be staged as a server's answer before a Rename could be pressed. Everything here arrives as a
+/// value or a closure, so the whole row is a thing a test puts on a screen by itself
+/// (`DeviceTokenSectionTests`).
 ///
 /// Renaming is an inline field rather than an alert, and that is the same decision: an alert's
 /// text field is presented by UIKit outside the view under test, so a row that opened one would

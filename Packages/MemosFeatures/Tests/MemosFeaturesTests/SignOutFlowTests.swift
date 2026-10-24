@@ -171,7 +171,7 @@ struct SignOutConfirmationTests {
         #expect(SignOutFlow.accountHeading(name: "") == "Signed in")
     }
 
-    /// The Settings account row reads `User.name` twice, for the heading and for the avatar's
+    /// The account sheet's head reads `User.name` twice, for the heading and for the avatar's
     /// initials. An account whose display name came back blank is named there by its address,
     /// not left as a bare "Signed in" over a "?" avatar.
     @Test("the account row names an account with a blank display name by its address")

@@ -74,9 +74,11 @@ struct DeviceTokenPresentationTests {
 
 /// The row itself: what it puts on the screen, and what pressing it does.
 ///
-/// Drawn rather than reasoned about, for the reason `SignOutSectionTests` exists: `SettingsView`
-/// cannot be hosted in this bundle (it reads a `SessionStore`, which inlines the API layer Features
-/// does not link), so a row written inline in that body would be a surface no test could see.
+/// Drawn rather than reasoned about, for the reason `SignOutSectionTests` exists. The row's host
+/// today is `AccountSheet`, and that sheet is hosted in this bundle (`AccountSheetRenderTests`),
+/// but only over a `SessionStore` signed in through a scripted server, where the token's states
+/// are whatever that server answers. On its own the row takes every state as a value, so each
+/// one is put on a screen here and pressed.
 @MainActor
 @Suite("The device-token row in Settings")
 struct DeviceTokenSectionTests {

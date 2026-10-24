@@ -204,8 +204,8 @@ private enum SheetProbe {
 /// through the real generated client. It replaces the Settings screen's account and defaults
 /// cards (chrome trim, 2026-10-10), so what that screen was held to, this is.
 ///
-/// The avatar's initials are not read here: the avatar is hidden from the accessibility tree the
-/// probe reads, so they are held by `SignOutFlowTests` over the same `User.name` instead.
+/// The avatar's initials are not in the labels these cases read — the avatar is hidden from the
+/// accessibility tree — so they are read through a witness by `AccountAvatarNameTests` below.
 @MainActor
 @Suite("The account sheet")
 struct AccountSheetRenderTests {
@@ -545,5 +545,74 @@ struct AccountSheetSignOutTests {
             #expect(SheetProbe.alert(over: screen.host)?.depth == 1, "not explained under it")
         }
         #expect(server.revokes == 1)
+    }
+}
+
+/// The account's face, drawn from the account's name at both places the app draws it: the top of
+/// the account sheet and the Timeline's leading toolbar button (MEMNG-697).
+///
+/// The face is hidden from VoiceOver, so no label a probe reads carries its initials, and a site
+/// that stopped handing `User.name` down would draw "?" under every other test here. Each case
+/// hands the screen an `AccountAvatarWitness` and reads back the monogram it drew. The name is one
+/// whose initials are neither "?" nor the address's "F", so a site that dropped it, or fell back
+/// to anything else, draws something else.
+@MainActor
+@Suite("The account's face")
+struct AccountAvatarNameTests {
+    private let name = "Ada Lovelace"
+
+    /// Puts `view` on a screen with `witness` in its environment and turns the run loop until a
+    /// monogram has been drawn — a toolbar item is installed a turn or more after the first
+    /// layout — or two seconds have passed, then once more so a later name is drawn too.
+    private func monograms(
+        drawnBy view: some View, into witness: AccountAvatarWitness
+    ) async -> [String] {
+        let host = UIHostingController(rootView: view.environment(\.accountAvatarWitness, witness))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        for _ in 0..<80 where witness.drawn.isEmpty {
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        host.view.layoutIfNeeded()
+        try? await Task.sleep(for: .milliseconds(100))
+        return witness.drawn
+    }
+
+    /// `AccountSheet` hands the avatar at its head the signed-in account's name.
+    @Test("the account sheet draws the account's initials")
+    func theSheetDrawsTheAccountsInitials() async {
+        let session = await signedIn(over: AccountSheetServer(displayName: name))
+        #expect(session.state.user?.name == name, "precondition: signed in under the name")
+
+        let drawn = await monograms(
+            drawnBy: AccountSheet(signOut: SignOutConversation(), avatar: nil).environment(session),
+            into: AccountAvatarWitness()
+        )
+
+        // The control: the sheet drew a monogram at all, so a miss below is about whose it is.
+        #expect(!drawn.isEmpty, "the account sheet drew no monogram")
+        #expect(drawn.last == "AL", "the sheet's avatar drew \(drawn), not the account's initials")
+    }
+
+    /// The whole road to the toolbar's face: `TimelineView` reads the name off the session,
+    /// `TimelineToolbar` hands it to `AccountToolbarButton`, and the button to the avatar. Hosted
+    /// as the screen rather than the button alone, so a link dropped anywhere on that road fails.
+    @Test("the Timeline's account button draws the account's initials")
+    func theTimelineButtonDrawsTheAccountsInitials() async {
+        let session = await signedIn(over: AccountSheetServer(displayName: name))
+        #expect(session.state.user?.name == name, "precondition: signed in under the name")
+
+        let drawn = await monograms(
+            drawnBy: TimelineView().environment(session), into: AccountAvatarWitness())
+
+        #expect(!drawn.isEmpty, "the Timeline's toolbar drew no monogram")
+        #expect(drawn.last == "AL", "the toolbar's avatar drew \(drawn), not the initials")
     }
 }
