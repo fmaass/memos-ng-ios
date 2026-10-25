@@ -5,6 +5,10 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (66)
+
+- A long trip that shows only part of its photos now says which part: the first photos for an oldest-first trip, the newest for a newest-first one.
+
 ## 2.4.0 (65)
 
 - In the Library's Select mode, the menu now has Add, which opens an Add to collection sheet listing my trips; picking one adds the chosen pictures to it.
