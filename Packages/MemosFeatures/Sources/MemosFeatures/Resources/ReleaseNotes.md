@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (65)
+
+- In the Library's Select mode, the menu now has Add, which opens an Add to collection sheet listing my trips; picking one adds the chosen pictures to it.
+- A trip whose photos fail to load no longer reloads them over and over; pulling to refresh still tries again.
+- A cover I choose for a tag, a month or a year no longer flips back when a refresh lands while it is still being saved.
+- A memo started on a trip's last day no longer gets the trip's tag if I post it after the trip has ended.
+- Please select a few pictures in the Library, tap Add, add them to a trip and check they show up on the trip.
+
 ## 2.4.0 (64)
 
 - Tapping the date at the top of the picture viewer now opens an Info sheet: when the picture was taken, its memo, where it was taken, the file and the camera.
