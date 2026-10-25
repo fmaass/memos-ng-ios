@@ -273,7 +273,8 @@ public final class TripMemberStore {
     }
 
     /// The server's count, the drained rows' taken extrema, and the cover: the chosen one while it
-    /// is a member, else the first member. Nil before a drain has applied.
+    /// is a member, else a trip's oldest drained member and an album's newest (MEMNG-804) — of
+    /// the rows drained, which a capped drain may have cut short. Nil before a drain has applied.
     public func summary(for trip: Trip) -> TripMemberSummary? {
         guard let held = held(trip.uid) else { return nil }
         let rows = members(for: trip)
@@ -283,7 +284,7 @@ public final class TripMemberStore {
             count: trip.memberCount,
             firstTaken: dates.min(),
             lastTaken: dates.max(),
-            cover: chosen ?? rows.first,
+            cover: chosen ?? (trip.kind == .album ? rows.last : rows.first),
             complete: held.complete
         )
     }
@@ -942,7 +943,9 @@ public final class TripMemberStore {
     /// identity drops it with everything else the outgoing session read.
     func noteAcknowledged(_ kind: TripStore.BatchKind, trip uid: String, picture: String) {
         switch kind {
-        case .exclude:
+        // An album's removal is recorded as an exclusion is (MEMNG-804): the record is the app's
+        // own knowledge of what left a collection, whichever route took it out.
+        case .exclude, .removeMember:
             nextToken += 1
             ownExclusions[uid, default: [:]][picture] = nextToken
         case .include:

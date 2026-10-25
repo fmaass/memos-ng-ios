@@ -19,7 +19,12 @@ nonisolated final class TripRows: @unchecked Sendable {
     static let include =
         "include_attachment_api_collections__uid__exclusions__attachment_uid__delete"
 
-    static let routes: Set<String> = [list, create, get, patch, delete, members, exclude, include]
+    /// An album's member DELETE (memos-ng 2.6.0): 204 on an album, 409 on a trip.
+    static let removeMember = "remove_member_api_collections__uid__members__attachment_uid__delete"
+
+    static let routes: Set<String> = [
+        list, create, get, patch, delete, members, exclude, include, removeMember,
+    ]
 
     /// A trip's member listing, asked as the transport's own attachment list is: `tag`,
     /// `spanStart` and `spanEnd` as the row holds them, and the request's own `cursor`, `limit`,
@@ -40,6 +45,9 @@ nonisolated final class TripRows: @unchecked Sendable {
         var stamp = 0
         /// As the server stores it: the sent kind, or `trip` when none was sent.
         var kind = "trip"
+        /// An album's members, as the tag whose listing stands for the pictures somebody added
+        /// to it; what its member DELETE took out is held in `exclusions`.
+        var picked: String?
     }
 
     nonisolated struct Call: Sendable {
@@ -90,7 +98,9 @@ nonisolated final class TripRows: @unchecked Sendable {
 
     /// Every collection route but the reads.
     var writeCalls: [Call] {
-        let written = [Self.create, Self.patch, Self.delete, Self.exclude, Self.include]
+        let written = [
+            Self.create, Self.patch, Self.delete, Self.exclude, Self.include, Self.removeMember,
+        ]
         return calls.filter { written.contains($0.operation) }
     }
 
@@ -98,13 +108,14 @@ nonisolated final class TripRows: @unchecked Sendable {
     @discardableResult
     func seed(
         _ title: String, tag: String? = nil, spanStart: String? = nil, spanEnd: String? = nil,
-        tz: String? = nil, cover: String? = nil, count: Int = 0, kind: String = "trip"
+        tz: String? = nil, cover: String? = nil, count: Int = 0, kind: String = "trip",
+        picked: String? = nil
     ) -> String {
         lock.withLock {
             made += 1
             let row = Row(
                 uid: "trip-\(made)", title: title, tag: tag, spanStart: spanStart, spanEnd: spanEnd,
-                tz: tz, cover: cover, count: count, kind: kind)
+                tz: tz, cover: cover, count: count, kind: kind, picked: picked)
             stored.append(row)
             return row.uid
         }
@@ -235,9 +246,11 @@ nonisolated final class TripRows: @unchecked Sendable {
             // neither has no member. The row's criteria are the server's own; the request's
             // `order` and `type` travel as the app sent them, never supplied here, so a listing
             // that honours them answers what the app asked for.
-            guard row.tag != nil || row.spanStart != nil else { return Self.json("[]") }
+            guard row.tag != nil || row.spanStart != nil || row.picked != nil else {
+                return Self.json("[]")
+            }
             var query: [String: String] = [:]
-            query["tag"] = row.tag
+            query["tag"] = row.tag ?? row.picked
             query["spanStart"] = row.spanStart
             query["spanEnd"] = row.spanEnd
             for name in ["cursor", "limit", "order", "type", "mine", "visibility"] {
@@ -246,13 +259,22 @@ nonisolated final class TripRows: @unchecked Sendable {
             let listed = try await listing(query)
             return try await Self.dropping(Set(row.exclusions), from: listed)
         default:
+            // An album has no exclusions, a trip no member rows: the server's 409 either way.
+            let kind = rows.first { $0.uid == uid }?.kind
+            if kind == "album" && operationID != Self.removeMember
+                || kind == "trip" && operationID == Self.removeMember
+            {
+                return Self.json("{\"detail\":\"conflict\"}", status: .conflict)
+            }
             let ok: Bool = lock.withLock {
                 guard let at = stored.firstIndex(where: { $0.uid == uid }), parts.count > 4 else {
                     return false
                 }
                 let picture = parts[4]
                 stored[at].exclusions.removeAll { $0 == picture }
-                if operationID == Self.exclude { stored[at].exclusions.append(picture) }
+                if operationID == Self.exclude || operationID == Self.removeMember {
+                    stored[at].exclusions.append(picture)
+                }
                 writes += 1
                 stored[at].stamp = writes
                 return true

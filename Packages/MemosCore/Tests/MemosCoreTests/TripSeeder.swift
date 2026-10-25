@@ -36,6 +36,9 @@ final class TripServer: @unchecked Sendable {
     typealias Hold = @Sendable (String, Int) async -> Void
 
     static let deleteAttachment = "delete_attachment_api_attachments__uid__delete"
+    /// An album's member DELETE (memos-ng 2.6.0): 204 whether or not the picture was a member,
+    /// 409 on a trip, which has members by its tag and span and none to delete.
+    static let removeMember = "remove_member_api_collections__uid__members__attachment_uid__delete"
 
     let calls = TripCalls()
     private let lock = NSLock()
@@ -66,7 +69,7 @@ final class TripServer: @unchecked Sendable {
     @discardableResult
     func seed(
         title: String = "Trip", tag: String? = nil, span: TripSpan? = nil, memberCount: Int = 0,
-        pictures: [Int] = []
+        pictures: [Int] = [], kind: String = "trip"
     ) -> String {
         lock.withLock {
             made += 1
@@ -76,7 +79,7 @@ final class TripServer: @unchecked Sendable {
                     uid: uid, title: title, tag: tag,
                     spanStart: span.map { TripWire.stamp($0.start) },
                     spanEnd: span.map { TripWire.stamp($0.end) }, tz: span?.zone,
-                    memberCount: memberCount, pictures: pictures))
+                    memberCount: memberCount, pictures: pictures, kind: kind))
             return uid
         }
     }
@@ -189,9 +192,24 @@ final class TripServer: @unchecked Sendable {
                 guard let at = stored.firstIndex(where: { $0.uid == uid }), parts.count > 4 else {
                     return Stub.detail("Not Found", status: .notFound)
                 }
+                guard stored[at].kind == "trip" else {
+                    return Stub.detail("albumHasNoExclusions", status: .conflict)
+                }
                 let picture = parts[4]
                 stored[at].exclusions.removeAll { $0 == picture }
                 if operation == TripWire.exclude { stored[at].exclusions.append(picture) }
+                return Stub.empty(.noContent)
+            }
+        case Self.removeMember:
+            return lock.withLock {
+                guard let at = stored.firstIndex(where: { $0.uid == uid }), parts.count > 4 else {
+                    return Stub.detail("Not Found", status: .notFound)
+                }
+                guard stored[at].kind == "album" else {
+                    return Stub.detail("notAnAlbum", status: .conflict)
+                }
+                let picture = parts[4]
+                stored[at].pictures.removeAll { TripWire.uid($0) == picture }
                 return Stub.empty(.noContent)
             }
         case Self.deleteAttachment:

@@ -2403,7 +2403,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         let gone = lock.withLock { emptied ? nil : dropped }
         guard let gone else { return 0 }
         let listed: [String] =
-            switch row.tag {
+            switch row.tag ?? row.picked {
             case "portugal2026": (0..<5).map { "p\($0)" }
             case "spain2025": ["s0"]
             default: []
@@ -3983,5 +3983,55 @@ extension TripScreenRenderTests {
             !TripView.viewerOutlived(
                 pair, holding: [], members: [], loaded: true,
                 deleted: [opened.uid, paged.uid]))
+    }
+}
+
+// MARK: - Remove from Album (MEMNG-804)
+
+extension TripScreenRenderTests {
+    /// An album on the trip's screen: select mode's Remove row names the album, and the dialog's
+    /// Remove sends the album's member DELETE — never the exclusion PUT, which the server refuses
+    /// for an album with 409. The request is read from what the transport recorded.
+    @Test("an album's select bar reads Remove from album, and its Remove sends the member DELETE")
+    func anAlbumRemovesByTheMemberDelete() async throws {
+        let wire = TripWire()
+        let stores = stores()
+        let uid = wire.transport.trips.seed("At the sea", kind: "album", picked: "portugal2026")
+        await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        let record = try #require(stores.0.trips.first { $0.uid == uid })
+        #expect(record.kind == .album, "control: the record is no album")
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        let view = trip(stores, wire, record).environment(dock)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(TripProbe.photos(in: screen.window).count == 5, "control: the grid landed")
+            let entered = await pressBar(TripView.selectButton, on: screen) {
+                screen.element(labelled: TripView.closeButton) != nil
+            }
+            #expect(entered, "Select stood no select mode")
+            let photos = TripProbe.photos(in: screen.window)
+            #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
+            let row = TripView.removeRowTitle(1, kind: .album)
+            #expect(row == "Remove 1 picture from album…")
+            let offered = await screen.until {
+                TripMenuProbe.rows(of: SelectChrome.moreLabel, in: screen.window).contains(row)
+            }
+            let rows = TripMenuProbe.rows(of: SelectChrome.moreLabel, in: screen.window)
+            #expect(offered, "the album's actions menu: \(rows)")
+            #expect(!rows.contains(TripView.removeRowTitle(1)), "a trip's row on an album: \(rows)")
+            #expect(TripMenuProbe.perform(row, in: screen.window), "no row \(row)")
+            let asked = await screen.until { TripMenuProbe.alert(over: screen.host) != nil }
+            #expect(asked, "no dialog")
+            #expect(TripMenuProbe.answer(TripView.removeConfirmButton, over: screen.host))
+            _ = await screen.until { !wire.transport.writes.isEmpty }
+            await screen.settle(turns: 6)
+            #expect(
+                wire.transport.writes == ["DELETE \(TripRows.removeMember)"],
+                "the removal wrote \(wire.transport.writes)")
+            #expect(
+                wire.transport.trips.calls(TripRows.removeMember).map(\.path)
+                    == ["/api/collections/\(uid)/members/p0"])
+        }
     }
 }

@@ -242,9 +242,10 @@ struct TripView: View {
     /// The filter menu's name and its row that opens the trip's removed pictures (MEMNG-780).
     static let filterButton = "Filter"
     static let removedRowButton = "Removed from trip"
-    /// Select mode's Remove row and the dialog it asks (MEMNG-780).
-    static func removeRowTitle(_ count: Int) -> String {
-        "Remove \(pictures(count)) from trip…"
+    /// Select mode's Remove row and the dialog it asks (MEMNG-780); on an album, Remove from
+    /// Album (MEMNG-804), which deletes the album's member rows rather than excluding.
+    static func removeRowTitle(_ count: Int, kind: Trip.Kind = .trip) -> String {
+        "Remove \(pictures(count)) from \(kind == .album ? "album" : "trip")…"
     }
     static func removeQuestion(_ count: Int, from title: String) -> String {
         "Remove \(pictures(count)) from \(title)?"
@@ -264,6 +265,9 @@ struct TripView: View {
     static let emptyTitle = "No photos in this trip"
     /// What a journal read with no memo under the trip's tag says.
     static let journalEmptyTitle = "No memos in this trip"
+    /// What an album's Journal says: its pictures are picked one by one, across memos, so no memo
+    /// is read for it (MEMNG-804). The mode stays in the main bar's frozen row (ADR-0008).
+    static let albumJournal = "Albums have no journal"
     /// The hero's cover, read by VoiceOver.
     static let coverLabel = "Cover"
     /// What the delete dialog says under its question.
@@ -559,8 +563,11 @@ struct TripView: View {
     static let journalCardGap = DesignTokens.Space.regular
 
     /// The cover the hero draws: the chosen one while it is among `members`, else the first.
+    /// The chosen cover while it is a member, else a trip's oldest member and an album's newest,
+    /// as `TripMemberStore.summary(for:)` picks the card's.
     static func cover(of trip: Trip, members: [LibraryRow]) -> LibraryRow? {
-        trip.cover.flatMap { cover in members.first { $0.id == cover.id } } ?? members.first
+        trip.cover.flatMap { cover in members.first { $0.id == cover.id } }
+            ?? (trip.kind == .album ? members.last : members.first)
     }
 
     /// The trip this screen was opened on, as it was then; nil for an automatic collection.
@@ -568,6 +575,10 @@ struct TripView: View {
         if case .trip(let trip) = scope { return trip }
         return nil
     }
+
+    /// An album is opened on this screen (MEMNG-804), less the chrome a trip's dates and
+    /// exclusions need: no Trip Dates, no Removed row, no journal read. A kind never changes.
+    private var isAlbum: Bool { openedTrip?.kind == .album }
 
     private var live: Trip? {
         guard let openedTrip else { return nil }
@@ -814,7 +825,7 @@ struct TripView: View {
                     identity: identity, id: scope.id, tag: readScope?.tag, span: readScope?.span,
                     shown: mode == .journal)
             ) {
-                guard mode == .journal else { return }
+                guard mode == .journal, !isAlbum else { return }
                 await loadJournal()
             }
             // Asked here, on the screen that is up: the root under it is off the window, and hears
@@ -955,6 +966,7 @@ struct TripView: View {
     ) -> String? {
         // A trip of dates alone has no journal: nothing is read, and the chip says why. A month or
         // a year has no tag either, and its journal is the memos written in it.
+        if case .trip(let trip) = shown, trip.kind == .album { return Self.albumJournal }
         if case .trip(let trip) = shown, trip.tag == nil { return TripMemberStore.noTagJournal }
         if let note = Self.journalCapNote(state, cap: memberStore.memberCap) { return note }
         let read = state == .complete || state == .truncated
@@ -1262,7 +1274,8 @@ struct TripView: View {
         if scope.isTrip {
             rows.append(
                 SelectAction(
-                    id: "remove", title: Self.removeRowTitle(selection.count),
+                    id: "remove",
+                    title: Self.removeRowTitle(selection.count, kind: openedTrip?.kind ?? .trip),
                     systemImage: "minus.circle", role: .destructive, disabled: !enabled
                 ) { askRemove() })
         }
@@ -1306,9 +1319,16 @@ struct TripView: View {
         guard manage.query == asked.query else { return }
         Task {
             do {
-                let outcome = try await memberStore.remove(
-                    asked.uids, from: asked.trip, using: asked.access.handle,
-                    baseURL: asked.access.baseURL)
+                // An album's pictures leave by the member DELETE; the server answers a trip's
+                // exclusion route with 409 for an album, so it is never sent one.
+                let outcome =
+                    asked.trip.kind == .album
+                    ? try await trips.removeMember(
+                        uid: asked.trip.uid, attachments: asked.uids, using: asked.access.handle,
+                        baseURL: asked.access.baseURL)
+                    : try await memberStore.remove(
+                        asked.uids, from: asked.trip, using: asked.access.handle,
+                        baseURL: asked.access.baseURL)
                 removeFailure = outcome.stopped.flatMap(TripManage.sentence)
             } catch {
                 removeFailure = TripManage.sentence(error)
@@ -1333,7 +1353,8 @@ struct TripView: View {
     /// row that opens the removed pictures.
     private var filterMenu: some View {
         Menu(Self.filterButton, systemImage: LibraryFilterMenuContent.symbol) {
-            TripFilterMenuContent(query: $manage.query) { manage.showRemoved() }
+            TripFilterMenuContent(
+                query: $manage.query, showRemoved: isAlbum ? nil : { manage.showRemoved() })
         }
     }
 
@@ -1368,7 +1389,9 @@ struct TripView: View {
             Button(Self.renameButton, systemImage: "pencil") {
                 manage.askRename(current: shownScope.title)
             }
-            Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
+            if !isAlbum {
+                Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
+            }
             Divider()
             Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
                 manage.askDelete()
@@ -1960,15 +1983,20 @@ struct TripPendingRemoval {
 /// the pictures removed from the trip.
 struct TripFilterMenuContent: View {
     @Binding var query: TripMemberQuery
-    let showRemoved: () -> Void
+    /// Nil on an album, which excludes nothing and has no Removed list.
+    let showRemoved: (() -> Void)?
 
     var body: some View {
         MediaFilterRows(
             filter: $query.filter, mine: $query.mine, visibility: $query.visibility)
         Divider()
         SortByMenu(order: $query.order)
+        // The trip's five parts stand as they did; on an album the last is empty, and a menu draws
+        // no divider at its end.
         Divider()
-        // Offered before anything is known: its sheet computes the list when it opens.
-        Button(TripView.removedRowButton, systemImage: "eye.slash", action: showRemoved)
+        if let showRemoved {
+            // Offered before anything is known: its sheet computes the list when it opens.
+            Button(TripView.removedRowButton, systemImage: "eye.slash", action: showRemoved)
+        }
     }
 }

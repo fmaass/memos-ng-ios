@@ -78,6 +78,7 @@ public final class TripStore {
         case delete
         case exclude(Set<String>)
         case include(Set<String>)
+        case removeMember(Set<String>)
     }
 
     private struct WriteKey: Hashable {
@@ -366,7 +367,24 @@ public final class TripStore {
         try Self.single(outcome)
     }
 
-    enum BatchKind { case exclude, include }
+    /// Takes `attachments` out of album `uid` on the server (memos-ng 2.6.0's member DELETE), one
+    /// request per picture under the album's slot, then reads the record and drains the members
+    /// again — `batch`'s whole operation. Each acknowledged removal is told to the record of the
+    /// app's own removals (`onAcknowledged`) exactly as an exclusion is, so a drain issued before
+    /// it cannot list the picture back. The same removal asked for again while it is out JOINS it
+    /// (one request on the wire, one outcome for both callers); another one is refused `.busy`.
+    /// A trip has no member to delete: the server answers 409, `.server(status: 409)` here.
+    @discardableResult
+    public func removeMember(
+        uid: String, attachments: [String], using handle: SessionHandle, baseURL: URL
+    ) async throws -> TripBatchOutcome {
+        let outcome = try await batch(
+            .removeMember, attachments, on: uid, using: handle, baseURL: baseURL)
+        try Self.single(outcome)
+        return outcome
+    }
+
+    enum BatchKind { case exclude, include, removeMember }
 
     /// One removal (or add-back) batch under the trip's slot: one request per picture in order,
     /// the authority asked again before each, stopping at the first failure or stale authority;
@@ -379,7 +397,11 @@ public final class TripStore {
         baseURL: URL
     ) async throws -> TripBatchOutcome {
         let operation: Operation =
-            kind == .exclude ? .exclude(Set(attachments)) : .include(Set(attachments))
+            switch kind {
+            case .exclude: .exclude(Set(attachments))
+            case .include: .include(Set(attachments))
+            case .removeMember: .removeMember(Set(attachments))
+            }
         let result = await write(uid: uid, operation, handle: handle) { authority in
             await self.runBatch(kind, attachments, authority, handle, baseURL)
         }
@@ -402,11 +424,15 @@ public final class TripStore {
                 break
             }
             do {
-                if kind == .exclude {
+                switch kind {
+                case .exclude:
                     try await Self.exclude(
                         handle.client, uid: authority.uid, attachment: attachment)
-                } else {
+                case .include:
                     try await Self.include(
+                        handle.client, uid: authority.uid, attachment: attachment)
+                case .removeMember:
+                    try await Self.removeMember(
                         handle.client, uid: authority.uid, attachment: attachment)
                 }
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
@@ -742,6 +768,24 @@ public final class TripStore {
         {
         case .noContent: return
         case .notFound: throw APIError.notFound
+        case .unprocessableContent: throw APIError.server(status: 422)
+        case .serviceUnavailable: throw APIError.fromStatus(503)
+        case .undocumented(let status, _): throw APIError.fromStatus(status)
+        default: throw StoreFailure.documentedRefusal
+        }
+    }
+
+    /// The member DELETE. Its 409 is the server's answer for a trip (no member rows to delete) and
+    /// is reported as that status, not as the documented-refusal default below.
+    static func removeMember(
+        _ client: any APIProtocol, uid: String, attachment: String
+    ) async throws {
+        let input = Operations.RemoveMemberApiCollectionsUidMembersAttachmentUidDelete.Input(
+            path: .init(uid: uid, attachmentUid: attachment))
+        switch try await client.removeMemberApiCollectionsUidMembersAttachmentUidDelete(input) {
+        case .noContent: return
+        case .notFound: throw APIError.notFound
+        case .conflict: throw APIError.server(status: 409)
         case .unprocessableContent: throw APIError.server(status: 422)
         case .serviceUnavailable: throw APIError.fromStatus(503)
         case .undocumented(let status, _): throw APIError.fromStatus(status)

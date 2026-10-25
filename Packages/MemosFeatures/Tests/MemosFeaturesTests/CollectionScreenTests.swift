@@ -1207,3 +1207,83 @@ struct OpenedStack<Destination: View>: View {
         .onChange(of: trail) { _, now in log.paths.append(now) }
     }
 }
+
+// MARK: - The album screen (MEMNG-804)
+
+extension CollectionScreenTests {
+    /// An album on the scripted server, listed by a real refresh: its members are the pictures the
+    /// suite's `portugal2026` listing answers.
+    private func filedAlbum(_ stores: (TripStore, TripMemberStore), _ wire: TripWire) async throws
+        -> CollectionScope
+    {
+        let uid = wire.transport.trips.seed("At the sea", kind: "album", picked: "portugal2026")
+        await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        let album = try #require(stores.0.trips.first { $0.uid == uid })
+        #expect(album.kind == .album, "control: the record is no album")
+        return .trip(album)
+    }
+
+    /// The album screen is the trip's, kind-switched: Manage stands (Rename is read from it, the
+    /// control that the menu is read at all) without Trip Dates, and the filter menu without the
+    /// Removed row. A trip's screen offers both, read the same way.
+    @Test("an album's screen offers no Trip Dates and no Removed row; a trip's does")
+    func anAlbumHasNoTripChrome() async throws {
+        for title in [TripView.spanButton, TripView.removedRowButton] {
+            let wire = TripWire()
+            let held = stores()
+            let trip = await filedTrip(held, wire)
+            await CollectionsHost.with(screen(held, wire, trip)) { screen in
+                let found = await screen.until { Self.offers(title, in: screen.window) }
+                #expect(found, "control: a trip does not offer \(title)")
+            }
+            let albumWire = TripWire()
+            let albumHeld = stores()
+            let album = try await filedAlbum(albumHeld, albumWire)
+            await CollectionsHost.with(screen(albumHeld, albumWire, album)) { screen in
+                _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+                let grid = TripProbe.photos(in: screen.window).count
+                #expect(grid == 5, "precondition: the album's grid landed")
+                #expect(
+                    Self.offers(TripView.renameButton, in: screen.window),
+                    "control: the album's Manage menu was not read: \(Self.bars(screen.window))")
+                #expect(
+                    !Self.offers(title, in: screen.window),
+                    "an album offers \(title): \(Self.bars(screen.window))")
+            }
+        }
+    }
+
+    /// The hero's cover with none chosen, as the card's (`TripMemberStore.summary`): an album's
+    /// newest member, a trip's oldest, of the members held oldest first.
+    @Test("an album's hero falls back to its newest member, a trip's to its oldest")
+    func theHeroFallbackIsKindSwitched() {
+        let rows = ["p0", "p1", "p2"].map { uid in
+            LibraryRow(
+                attachment: MemoAttachment(uid: uid, mime: "image/jpeg", status: .ready),
+                takenAt: nil, mine: true, filename: "\(uid).jpg")
+        }
+        let album = Trip(
+            uid: "a1", title: "At the sea", kind: .album, createdAt: .distantPast,
+            updatedAt: .distantPast)
+        let trip = Trip(
+            uid: "t1", title: "Portugal 2026", createdAt: .distantPast, updatedAt: .distantPast)
+        #expect(TripView.cover(of: album, members: rows)?.id == "p2", "the album's hero")
+        #expect(TripView.cover(of: trip, members: rows)?.id == "p0", "the trip's hero")
+    }
+
+    @Test("an album's Journal reads no memo and says it has none")
+    func anAlbumHasNoJournal() async throws {
+        let wire = TripWire()
+        let held = stores()
+        let album = try await filedAlbum(held, wire)
+        await CollectionsHost.with(screen(held, wire, album), height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(TripProbe.photos(in: screen.window).count == 5, "precondition: the grid")
+            modes.choose(.journal)
+            let said = await screen.until { screen.says(TripView.albumJournal) }
+            #expect(said, "the album's Journal: \(TripProbe.labels(in: screen.window))")
+            await screen.settle(turns: 6)
+            #expect(wire.transport.memoReads.isEmpty, "memos read: \(wire.transport.memoReads)")
+        }
+    }
+}
