@@ -9,13 +9,16 @@ nonisolated struct MosaicFrames: Equatable, Sendable {
 }
 
 /// The mosaic's 3-column grid as frames (plan decision 9): a square is one column, a hero two
-/// columns by two rows with the gap between them, a wide frame the full width at 16:9.
+/// columns by two rows with the gap between them, a wide frame the full width at 16:9. Decision 9
+/// is amended for the app (MEMNG-607): a month of nine days is two heroes, at the top and two bands
+/// further down, around seven squares — the slots say so, and this draws whatever they say.
 ///
 /// Bands are read off the slots rather than off the pattern that made them, so any walk of the
 /// patterns lays out: a hero opens a band and takes the sides that follow it, at most two;
 /// squares fill rows of three; a wide frame is a band alone. A side with no hero before it is
-/// drawn as a square. A hero on the RIGHT comes first in the list — its day is the earlier one —
-/// and still takes the top of its band, which is why this places frames instead of stacking views.
+/// drawn as a square. A hero on the RIGHT comes first in the list — its day is placed before its
+/// sides' (`placeDays`) — and still takes the top of its band, which is why this places frames
+/// instead of stacking views.
 nonisolated enum MonthMosaicGeometry {
     static func frames(for slots: [MosaicSlot], width: CGFloat, gap: CGFloat) -> MosaicFrames {
         let column = max((width - 2 * gap) / 3, 0)
@@ -74,7 +77,8 @@ nonisolated enum MonthMosaicGeometry {
 /// The mosaic as a SwiftUI layout: each child placed in the frame its slot names, at that frame's
 /// size, so a tile's picture is asked for at the shape it is drawn in.
 ///
-/// Children are taken in the order they are given — date order — whatever their place on screen.
+/// Children are taken in the order they are given — slot order, the busiest day first — whatever
+/// their place on screen.
 /// `nonisolated` for the reason `JustifiedRowsLayout` gives: SwiftUI's layout machinery drives it,
 /// not view code.
 nonisolated struct MonthMosaicLayout: Layout {

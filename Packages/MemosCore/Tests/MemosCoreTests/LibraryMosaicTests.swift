@@ -3,10 +3,12 @@ import Testing
 
 @testable import MemosCore
 
-/// The Months mosaic (MEMNG-596, plan decision 9), held to the web's vectors
-/// (`frontend/src/lib/__tests__/mosaic.spec.ts` in memos-ng): the frame cycle, the six-day pick and
-/// the month grouping. A ported pure function carries the SAME vectors as its spec, so a change on
-/// either side changes both.
+/// The Months mosaic (MEMNG-596, plan decision 9), first held to the web's vectors
+/// (`frontend/src/lib/__tests__/mosaic.spec.ts` in memos-ng): the frame cycle, the day pick and the
+/// month grouping. Decision 9 is amended for the app (MEMNG-607, the owner's answer of 2026-10-23):
+/// nine days a month, not six, two heroes and seven small frames, an odd month mirrored, and the
+/// two busiest days in the heroes. The vectors that amendment changed are the app's own; the rest
+/// are still the web's.
 @Suite("Library mosaic")
 struct LibraryMosaicTests {
     private static let a: [MosaicSlot] = [.heroLeft, .sideRight, .sideRight]
@@ -70,6 +72,25 @@ struct LibraryMosaicTests {
         #expect(monthMosaicCycle.map(\.slots) == [Self.a, Self.b, Self.c, Self.d])
     }
 
+    @Test("an odd month walks the mirror: C, B, A, then D")
+    func mirroredCycle() {
+        #expect(mirroredMonthMosaicCycle == [.c, .b, .a, .d])
+    }
+
+    /// MEMNG-607: two heroes, the first at the very top and the second two bands further down,
+    /// seven small frames and no wide one, whichever way the month is mirrored.
+    @Test("nine days are two heroes, at the top and further down, and seven small frames")
+    func nineDaysTwoHeroes() {
+        #expect(mosaicSlots(9, offset: 0) == Self.a + Self.b + Self.c)
+        #expect(mosaicSlots(9, offset: 1) == Self.c + Self.b + Self.a)
+        for offset in 0...3 {
+            let slots = mosaicSlots(9, offset: offset)
+            let heroes = slots.indices.filter { [.heroLeft, .heroRight].contains(slots[$0]) }
+            #expect(heroes == [0, 6], "month \(offset) put its heroes at \(heroes)")
+            #expect(!slots.contains(.wide), "month \(offset) drew a wide frame")
+        }
+    }
+
     @Test("reaches D at tile 10 and restarts the cycle at tile 11")
     func restartsAfterD() throws {
         let slots = mosaicSlots(11)
@@ -78,31 +99,31 @@ struct LibraryMosaicTests {
         #expect(slots[10] == .heroLeft)
     }
 
-    @Test("starts the cycle at the pattern the offset names, 0 through 3")
-    func offsetNamesTheFirstPattern() {
+    @Test("an even offset walks A B C D, an odd one C B A D, 0 through 3")
+    func offsetPicksTheWalk() {
         #expect(mosaicSlots(10, offset: 0) == Self.a + Self.b + Self.c + Self.d)
-        #expect(mosaicSlots(10, offset: 1) == Self.b + Self.c + Self.d + Self.a)
-        #expect(mosaicSlots(10, offset: 2) == Self.c + Self.d + Self.a + Self.b)
-        #expect(mosaicSlots(10, offset: 3) == Self.d + Self.a + Self.b + Self.c)
+        #expect(mosaicSlots(10, offset: 1) == Self.c + Self.b + Self.a + Self.d)
+        #expect(mosaicSlots(10, offset: 2) == Self.a + Self.b + Self.c + Self.d)
+        #expect(mosaicSlots(10, offset: 3) == Self.c + Self.b + Self.a + Self.d)
     }
 
-    @Test("wraps an offset past the last pattern, so any section index is a valid offset")
+    @Test("any section index is a valid offset")
     func offsetWraps() {
         #expect(mosaicSlots(4, offset: 4) == mosaicSlots(4, offset: 0))
-        #expect(mosaicSlots(4, offset: 7) == Self.d + Self.a)
+        #expect(mosaicSlots(4, offset: 7) == Self.c + [.square])
     }
 
     @Test("cuts a partial pattern after an offset too")
     func offsetThenCut() {
-        #expect(mosaicSlots(2, offset: 2) == [.heroRight, .sideLeft])
-        #expect(mosaicSlots(2, offset: 3) == [.wide, .heroLeft])
+        #expect(mosaicSlots(2, offset: 2) == [.heroLeft, .sideRight])
+        #expect(mosaicSlots(2, offset: 3) == [.heroRight, .sideLeft])
     }
 
-    /// Not a web vector: the web wraps a negative offset the same way, and a count below zero is
-    /// no tiles rather than a trap.
-    @Test("a negative offset wraps backwards, and a negative count is no tiles")
+    /// Not a web vector: a negative offset is odd or even like any other, and a count below zero
+    /// is no tiles rather than a trap.
+    @Test("a negative offset is mirrored when odd, and a negative count is no tiles")
     func negativeInputs() {
-        #expect(mosaicSlots(1, offset: -1) == [.wide])
+        #expect(mosaicSlots(1, offset: -1) == [.heroRight])
         #expect(mosaicSlots(3, offset: -4) == Self.a)
         #expect(mosaicSlots(-1) == [])
     }
@@ -123,9 +144,28 @@ struct LibraryMosaicTests {
         day("2026-09-01", 5),
     ]
 
-    @Test("keeps the six busiest of nine days in date order and reports three dropped")
+    /// The nine above and three more: 2026-09-11 is the busiest of all, and three days of 2 tie
+    /// for the ninth place, which the latest of them (the 12th) wins.
+    private static let twelve =
+        [day("2026-09-12", 2), day("2026-09-11", 10), day("2026-09-10", 2)]
+        + nine
+
+    @Test("keeps the nine busiest of twelve days in date order and reports three dropped")
+    func nineOfTwelve() {
+        let picked = pickDays(Self.twelve)
+        #expect(
+            picked.shown.map(\.key) == [
+                "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05", "2026-09-07",
+                "2026-09-08", "2026-09-11", "2026-09-12",
+            ]
+        )
+        #expect(picked.dropped == 3)
+    }
+
+    /// The web's own vector at a cap of six, which the app no longer defaults to.
+    @Test("at a cap of six keeps the six busiest of nine days in date order")
     func sixOfNine() {
-        let picked = pickDays(Self.nine)
+        let picked = pickDays(Self.nine, cap: 6)
         #expect(
             picked.shown.map(\.key) == [
                 "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-05", "2026-09-07", "2026-09-08",
@@ -141,15 +181,15 @@ struct LibraryMosaicTests {
         #expect(pickDays(tied.reversed(), cap: 1).shown.map(\.key) == ["2026-09-02"])
     }
 
-    @Test("passes six days through untouched with zero dropped")
-    func sixPassThrough() {
-        let six = Array(Self.nine.dropFirst(3).reversed())
-        let picked = pickDays(six)
-        #expect(picked.shown == six)
+    @Test("passes nine days through untouched with zero dropped")
+    func ninePassThrough() {
+        let nine = Array(Self.nine.reversed())
+        let picked = pickDays(nine)
+        #expect(picked.shown == nine)
         #expect(picked.dropped == 0)
     }
 
-    @Test("passes fewer than six days through in date order, whatever order they came in")
+    @Test("passes fewer than nine days through in date order, whatever order they came in")
     func fewerInDateOrder() {
         let picked = pickDays([Self.day("2026-09-09", 1), Self.day("2026-09-01", 5)])
         #expect(picked.shown.map(\.key) == ["2026-09-01", "2026-09-09"])
@@ -172,6 +212,64 @@ struct LibraryMosaicTests {
     func capBelowOne() {
         #expect(pickDays(Self.nine, cap: 0) == PickedDays(shown: [], dropped: 9))
         #expect(pickDays(Self.nine, cap: -1) == PickedDays(shown: [], dropped: 9))
+    }
+
+    // MARK: - placeDays (MEMNG-607, not a web vector)
+
+    @Test("the busiest day takes the top hero, the next the second, the rest stay in date order")
+    func heroesHoldTheBusiest() {
+        let shown = pickDays(Self.twelve).shown
+        for offset in 0...1 {
+            #expect(
+                placeDays(shown, in: mosaicSlots(9, offset: offset)).map(\.key) == [
+                    "2026-09-11", "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04",
+                    "2026-09-05", "2026-09-07", "2026-09-08", "2026-09-12",
+                ]
+            )
+        }
+    }
+
+    /// The second-busiest is the month's first day here, so date order alone would never put it
+    /// in the second hero: only the rank does.
+    @Test("the second-busiest day takes the second hero even when it is the earliest day")
+    func secondHeroIsByRank() {
+        let counts = [8, 1, 2, 3, 4, 5, 6, 7, 9]
+        let days = counts.indices.map { Self.day("2026-09-0\($0 + 1)", counts[$0]) }
+        #expect(
+            placeDays(days, in: mosaicSlots(9)).map(\.key) == [
+                "2026-09-09", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-05",
+                "2026-09-06", "2026-09-01", "2026-09-07", "2026-09-08",
+            ]
+        )
+    }
+
+    @Test("a tie for a hero goes to the later day, as a tie for a place does")
+    func heroTieGoesToTheLaterDay() {
+        let tied = [Self.day("2026-09-01", 3), Self.day("2026-09-02", 3)]
+        #expect(
+            placeDays(tied, in: [.heroLeft, .sideRight]).map(\.key) == ["2026-09-02", "2026-09-01"])
+    }
+
+    @Test("with no hero slot every day keeps its date order; with no day there is nothing")
+    func noHeroNoDay() {
+        let three = Array(Self.nine.prefix(3).reversed())
+        #expect(placeDays(three, in: Self.b) == three)
+        #expect(placeDays([], in: Self.a) == [])
+    }
+
+    @Test("hands back the buckets themselves, one per slot a day fills")
+    func placesTheBuckets() {
+        let two = [Self.day("2026-09-01", 1), Self.day("2026-09-02", 5)]
+        #expect(placeDays(two, in: Self.a) == [two[1], two[0]])
+    }
+
+    /// No caller hands more slots than days today; if one did, the busiest day must still be
+    /// drawn rather than wait for a hero slot the days never reach.
+    @Test("a day whose hero slot comes after the days run out takes the next slot instead")
+    func busiestIsNeverLost() {
+        let two = [Self.day("2026-09-01", 1), Self.day("2026-09-02", 5)]
+        #expect(placeDays(two, in: [.square, .square, .heroLeft]) == [two[0], two[1]])
+        #expect(placeDays(two, in: [.heroLeft, .heroRight, .square]) == [two[1], two[0]])
     }
 
     // MARK: - the year filter (web `daysOfYear`)
@@ -206,14 +304,13 @@ struct LibraryMosaicTests {
     @Test("groups by YYYY-MM in the order the months came, titled \"Sep 2026\", each picked")
     func monthsArePicked() {
         let days =
-            (0..<9).map { Self.day("2026-09-0\(9 - $0)", $0 + 1) }
-            + [Self.day("2026-08-31", 2), Self.day("2026-08-01", 1)]
+            Self.twelve + [Self.day("2026-08-31", 2), Self.day("2026-08-01", 1)]
         let months = mosaicMonths(days)
         #expect(months.map(\.key) == ["2026-09", "2026-08"])
         #expect(months.map(\.label) == ["Sep 2026", "Aug 2026"])
-        #expect(months.map(\.tiles.count) == [6, 2])
+        #expect(months.map(\.tiles.count) == [9, 2])
         #expect(months.map(\.dropped) == [3, 0])
-        #expect(months[1].tiles.map(\.bucket.key) == ["2026-08-01", "2026-08-31"])
+        #expect(months[1].tiles.map(\.bucket.key) == ["2026-08-31", "2026-08-01"])
     }
 
     @Test("titles January and December of their own year")
@@ -235,7 +332,7 @@ struct LibraryMosaicTests {
 
     // MARK: - what a month hands the screen
 
-    /// The frame cycle starts one pattern later per month, so consecutive months differ.
+    /// Every other month is mirrored, so consecutive months differ.
     @Test("a month's tiles carry the slots of its own offset: the section index")
     func slotsOffsetByMonth() {
         let days = [
@@ -253,23 +350,48 @@ struct LibraryMosaicTests {
             ]
         )
         #expect(months[0].tiles.map(\.slot) == [.heroLeft, .sideRight])
-        #expect(months[3].tiles.map(\.slot) == [.wide, .heroLeft])
+        #expect(months[3].tiles.map(\.slot) == [.heroRight, .sideLeft])
     }
 
-    @Test("a capped month says how many days it left out, and jumps to its first shown day")
+    @Test("a capped month says how many days it left out, and jumps to its earliest shown day")
     func moreDaysLine() {
-        let nine = mosaicMonths(Self.nine)[0]
-        #expect(nine.moreDaysLabel == "and 3 more days")
-        #expect(nine.firstShownDay == Self.nine[8])
+        let twelve = mosaicMonths(Self.twelve)[0]
+        #expect(twelve.moreDaysLabel == "and 3 more days")
+        #expect(twelve.tiles.first?.bucket.key == "2026-09-11", "control: the hero leads")
+        #expect(twelve.firstShownDay == Self.twelve[11])
 
-        let seven = mosaicMonths(Array(Self.nine.prefix(7)))[0]
-        #expect(seven.dropped == 1)
-        #expect(seven.moreDaysLabel == "and 1 more day")
+        let ten = mosaicMonths(Array(Self.twelve.prefix(10)))[0]
+        #expect(ten.dropped == 1)
+        #expect(ten.moreDaysLabel == "and 1 more day")
 
-        let six = mosaicMonths(Array(Self.nine.prefix(6)))[0]
-        #expect(six.dropped == 0)
-        #expect(six.moreDaysLabel == nil)
-        #expect(six.firstShownDay?.key == "2026-09-04")
+        let nine = mosaicMonths(Array(Self.twelve.prefix(9)))[0]
+        #expect(nine.dropped == 0)
+        #expect(nine.moreDaysLabel == nil)
+        #expect(nine.firstShownDay?.key == "2026-09-04")
+    }
+
+    /// MEMNG-607: a month shorter than nine days still opens on a hero holding its busiest day
+    /// and cuts the walk at its last day; a longer one stops at nine and counts the rest. Written
+    /// out tile by tile.
+    @Test("a month of 1, 2, 5 or 12 days lays out from its busiest day", arguments: [1, 2, 5, 12])
+    func shortAndLongMonths(_ count: Int) throws {
+        let expected: [Int: (slots: [MosaicSlot], days: [String], dropped: Int)] = [
+            1: ([.heroLeft], ["1"], 0),
+            2: ([.heroLeft, .sideRight], ["2", "1"], 0),
+            5: (Self.a + [.square, .square], ["3", "1", "2", "4", "5"], 0),
+            12: (Self.a + Self.b + Self.c, ["11", "1", "2", "3", "4", "5", "7", "8", "12"], 3),
+        ]
+        let fives = [3, 1, 5, 2, 4]
+        let days =
+            count == 12
+            ? Self.twelve
+            : (1...count).map { Self.day("2026-09-0\($0)", count == 5 ? fives[$0 - 1] : $0) }
+        let want = try #require(expected[count])
+        let month = try #require(mosaicMonths(days).first)
+        #expect(month.tiles.map(\.slot) == want.slots)
+        #expect(month.tiles.map(\.dayLabel) == want.days)
+        #expect(month.dropped == want.dropped)
+        #expect(month.moreDaysLabel == (want.dropped == 0 ? nil : "and 3 more days"))
     }
 }
 

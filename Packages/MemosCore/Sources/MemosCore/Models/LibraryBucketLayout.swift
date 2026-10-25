@@ -99,7 +99,8 @@ public struct LibraryMosaicMonth: Sendable, Equatable, Identifiable {
     /// "Sep 2026" (plan decision 9). The All view's month headers keep the full name
     /// (`groupByMonth`); this label is the Months view's own.
     public let label: String
-    /// The days `pickDays` kept, in date order.
+    /// The days `pickDays` kept, in the order of their slots (`placeDays`): the busiest first, in
+    /// the top hero, the next busiest in the second, the rest in date order between them.
     public let tiles: [LibraryMosaicTile]
     /// How many of the month's days are not drawn.
     public let dropped: Int
@@ -112,20 +113,23 @@ public struct LibraryMosaicMonth: Sendable, Equatable, Identifiable {
         return dropped == 1 ? "and 1 more day" : "and \(dropped) more days"
     }
 
-    /// Where the "more days" line opens All: the first day the month SHOWS, not its first day.
-    public var firstShownDay: LibraryBucket? { tiles.first?.bucket }
+    /// Where the "more days" line opens All: the earliest day the month SHOWS, not its first day —
+    /// and not the first tile, which is the busiest day (MEMNG-607).
+    public var firstShownDay: LibraryBucket? { tiles.map(\.bucket).min { $0.key < $1.key } }
 }
 
 /// Day buckets filed under their months, each month reduced to its `cap` busiest days.
 ///
 /// Months follow the order their first day arrives in, so newest-first from the server stays
-/// newest-first on screen; within a month, `pickDays` keeps the busiest and lays them out in date
-/// order, and each month's frames start one pattern later than the month above it
-/// (`mosaicSlots(_:offset:)` with the month's index). A bucket without a cover is laid out like any
-/// other — whether a cover can be drawn is the tile's question, not the layout's. A key that is not
-/// `YYYY-MM-DD` is filed under "Undated" rather than dropped, as `groupByMonth` files a row with no
-/// instant, and is picked like any month's days.
-public func mosaicMonths(_ days: [LibraryBucket], cap: Int = 6) -> [LibraryMosaicMonth] {
+/// newest-first on screen; within a month, `pickDays` keeps the busiest, every other month is
+/// mirrored (`mosaicSlots(_:offset:)` with the month's index), and `placeDays` puts the two
+/// busiest in the heroes and the rest in date order (MEMNG-607). A bucket without a cover is laid
+/// out like any other — whether a cover can be drawn is the tile's question, not the layout's. A
+/// key that is not `YYYY-MM-DD` is filed under "Undated" rather than dropped, as `groupByMonth`
+/// files a row with no instant, and is picked like any month's days.
+public func mosaicMonths(
+    _ days: [LibraryBucket], cap: Int = monthMosaicDayCap
+) -> [LibraryMosaicMonth] {
     var order: [String] = []
     var labels: [String: String] = [:]
     var members: [String: [LibraryBucket]] = [:]
@@ -141,7 +145,7 @@ public func mosaicMonths(_ days: [LibraryBucket], cap: Int = 6) -> [LibraryMosai
     return order.enumerated().map { index, key in
         let picked = pickDays(members[key] ?? [], cap: cap)
         let slots = mosaicSlots(picked.shown.count, offset: index)
-        let tiles = zip(picked.shown, slots).map { bucket, slot in
+        let tiles = zip(placeDays(picked.shown, in: slots), slots).map { bucket, slot in
             LibraryMosaicTile(
                 bucket: bucket,
                 dayLabel: LibraryDayKey(bucket.key).map { "\($0.day)" } ?? bucket.key,

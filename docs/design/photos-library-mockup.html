@@ -200,7 +200,7 @@ td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:now
 <header class="top">
   <div class="eyebrow">memos-ng · WP-9 · plan page 3929 · Epic MEMNG-505</div>
   <h1>The picture library, rebuilt after the iOS Photos app</h1>
-  <p>A walkthrough of what the approved plan will build on <code>/resources</code>, so the understanding can be checked before any code exists. The phone on the left is a working mock: switch the tabs and the pill, open the filter menu, press Select, scroll the grid. Revised 2026-09-23 twice: the Months day mosaic (from your screenshots) and the app tab pill.</p>
+  <p>A walkthrough of what the approved plan will build on <code>/resources</code>, so the understanding can be checked before any code exists. The phone on the left is a working mock: switch the tabs and the pill, open the filter menu, press Select, scroll the grid. Revised 2026-09-23 twice: the Months day mosaic (from your screenshots) and the app tab pill. Revised 2026-10-23 for the iOS app: Months shows nine days per month with two heroes (your answer B).</p>
   <div class="meta"><span>Owner decision <b>2026-09-22</b></span><span>Codex plan gate <b>APPROVE, round 3</b></span><span>Milestone <b>328</b>, target 2026-10-31</span><span>Tickets <b>MEMNG-501…511</b></span></div>
 </header>
 
@@ -337,15 +337,16 @@ td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:now
 
 <section id="months-section">
   <div class="eyebrow">6 · Months and Years</div>
-  <h2>Months: the six busiest days of each month, laid out as a mosaic</h2>
-  <p>Corrected on 2026-09-23 after your reference screenshots. Months is not a list of month cards. Each month gets a bold title ("Sep 2026"), then one tile per shown day, edge to edge with hairline gaps. Not every day: the six days with the most pictures, in date order, and a small "and N more days" line under the month when it had more (settled 2026-09-23 after counting: every month since May has 20 to 31 days with pictures, so all of them would be about 130 tiles for five months, a second All view rather than an overview). Some days get a large hero frame, the rest are squares, and the pattern cycles as the Photos app does: hero left with two stacked right, a row of three, hero right, a full-width hero. The day number sits top-left on its tile, bold white, no chip and no count badge. Years keeps one wide card per year.</p>
+  <h2>Months: the nine busiest days of each month, two of them as heroes</h2>
+  <p>Corrected on 2026-09-23 after your reference screenshots. Months is not a list of month cards. Each month gets a bold title ("Sep 2026"), then one tile per shown day, edge to edge with hairline gaps. Not every day: the nine days with the most pictures and a small "and N more days" line under the month when it had more (settled 2026-09-23 after counting: every month since May has 20 to 31 days with pictures, so all of them would be about 130 tiles for five months, a second All view rather than an overview). The day number sits top-left on its tile, bold white, no chip and no count badge. Years keeps one wide card per year.</p>
+  <p><b>Amended 2026-10-23</b> (your answer B on the decision canvas, board 2): nine days per month instead of six, and two large tiles. The busiest day is the large tile at the top, the second-busiest the large tile further down, and the seven other days are small, in date order between them; "and N more days" follows. In the 3-column grid that is: hero left with two stacked right, a row of three, hero right with two stacked left. Every other month is the mirror image (hero right at the top, hero left further down), so neighbouring months do not look alike. A month with fewer than nine days keeps the same order and stops at its last day: one day is a single hero, two are a hero and one small tile, five are a hero, two small beside it and two in the row below. Only a month showing more than nine days would reach the full-width frame.</p>
   <ul>
     <li><b>Tap a day tile</b> and the All view opens scrolled to that day. The page loads as many pages as needed to get there.</li>
     <li><b>Tap "and N more days"</b> and the All view opens at that month's first shown day, where every day is there.</li>
     <li><b>Tap a year card</b> and Months opens filtered to that year.</li>
     <li><b>The key photo of a day</b> is the newest picture of that day. No multi-photo collage inside one day tile.</li>
     <li><b>Day and month boundaries</b> are computed in Europe/Zurich on the server and in the browser, so a photo taken at 23:30 on 31 August lands on 31 August, not on 1 September.</li>
-    <li><b>Which days are shown</b> is by picture count, ties to the later day. <b>Which of them get a hero</b> follows the fixed cycling pattern above, not the picture's importance. The Photos app picks both by content; that is out of scope.</li>
+    <li><b>Which days are shown</b> is by picture count, ties to the later day. <b>Which of them get a hero</b> is by the same count since 2026-10-23: the two busiest days, ties to the later day; where the heroes sit is the fixed pattern above. The Photos app picks both by content; that is out of scope.</li>
   </ul>
   <div class="note warn">This changes the approved plan: the counting endpoint gains a day size, phase 4 builds the day mosaic instead of month cards, and the "no per-day grouping" cut is lifted for the Months view. The change is folded into plan page 3929 and Stories MEMNG-507 and MEMNG-509 and goes through a Codex delta round.</div>
 </section>
@@ -438,11 +439,12 @@ td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:now
 
   // Example months: real months of the live library (Sep 2026 back to May 2026); counts are illustrative.
   var months=[
-    {key:'2026-09',label:'September 2026',short:'Sep 2026',n:31,dn:20,days:[4,8,11,12,15,17]},
-    {key:'2026-08',label:'August 2026',short:'Aug 2026',n:47,dn:31,days:[2,9,12,18,29,31]},
-    {key:'2026-07',label:'July 2026',short:'Jul 2026',n:38,dn:31,days:[4,5,11,18,25,28]},
-    {key:'2026-06',label:'June 2026',short:'Jun 2026',n:29,dn:4,days:[7,11,20,27]},
-    {key:'2026-05',label:'May 2026',short:'May 2026',n:24,dn:5,days:[12,14,19,23,30]}
+    // days: the shown days in date order; busy: the busiest and the second-busiest of them.
+    {key:'2026-09',label:'September 2026',short:'Sep 2026',n:31,dn:20,days:[4,8,11,12,15,17,21,24,28],busy:[15,4]},
+    {key:'2026-08',label:'August 2026',short:'Aug 2026',n:47,dn:31,days:[2,9,12,14,18,22,26,29,31],busy:[18,29]},
+    {key:'2026-07',label:'July 2026',short:'Jul 2026',n:38,dn:31,days:[4,5,11,14,18,21,25,27,28],busy:[4,25]},
+    {key:'2026-06',label:'June 2026',short:'Jun 2026',n:29,dn:4,days:[7,11,20,27],busy:[20]},
+    {key:'2026-05',label:'May 2026',short:'May 2026',n:24,dn:5,days:[12,14,19,23,30],busy:[19]}
   ];
   var palettes=[['#4d7ec9','#7fb0e6'],['#3f9c8a','#7fd1b9'],['#c97a3f','#e9b07a'],['#7e5fc4','#b49ce6'],['#c94d6a','#e68aa0'],['#3f6fa8','#5fa3d6']];
   var other=['#8a8d93','#5e6167'];
@@ -479,23 +481,29 @@ td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:now
     var total=months.reduce(function(a,m){return a+m.n;},0);
     screen.innerHTML='<div class="cards"><button type="button" class="card" data-year="2026"><div class="cov" style="--c1:#4d7ec9;--c2:#c97a3f"><small>'+total+'</small><b>2026</b></div></button></div>';
   }
-  // Mosaic patterns cycle over the month's days, as the Photos app does:
-  // A = hero left 2x2 + two stacked right; B = a row of three; C = hero right 2x2 + two stacked left; D = full-width hero.
-  var patterns=[['hero-l','',''],['','',''],['','hero-r',''],['hero-w']];
+  // Mosaic patterns: A = hero left 2x2 + two stacked right; B = a row of three; C = hero right 2x2 +
+  // two stacked left; D = full-width hero. Amended 2026-10-23: nine days, two heroes. An even month
+  // walks A B C (hero left at the top, hero right further down), an odd month the mirror C B A; D
+  // only past nine. The two busiest days (m.busy) take the heroes, the others stay in date order.
+  var patterns={a:['hero-l','',''],b:['','',''],c:['','hero-r',''],d:['hero-w']};
+  var walks=[['a','b','c','d'],['c','b','a','d']];
+  function monthSlots(n,mi){
+    var walk=walks[mi%2],out=[],i=0;
+    while(out.length<n){var pat=patterns[walk[i%walk.length]];for(var k=0;k<pat.length&&out.length<n;k++)out.push(pat[k]);i++;}
+    return out;
+  }
   function renderMonths(){
     var list=state.order==='newest'?months:months.slice().reverse();
     var h='';
     list.forEach(function(m,mi){
       h+='<div class="mtitle" id="mt-'+m.key+'">'+m.short+'</div><div class="mosaic">';
-      var di=0,pi=mi%patterns.length;
-      while(di<m.days.length){
-        var pat=patterns[pi%patterns.length];
-        for(var k=0;k<pat.length&&di<m.days.length;k++,di++){
-          var d=m.days[di], p=palettes[(mi*7+d)%palettes.length];
-          h+='<button type="button" class="day '+pat[k]+'" data-month="'+m.key+'" data-day="'+d+'" style="--c1:'+p[0]+';--c2:'+p[1]+'" aria-label="'+d+' '+m.short+'"><b>'+d+'</b></button>';
-        }
-        pi++;
-      }
+      var heroes=m.busy.slice(), rest=m.days.filter(function(d){return m.busy.indexOf(d)<0;});
+      monthSlots(m.days.length,mi).forEach(function(cls){
+        var d=cls?heroes.shift():rest.shift();
+        if(d===undefined)d=cls?rest.shift():heroes.shift();
+        var p=palettes[(mi*7+d)%palettes.length];
+        h+='<button type="button" class="day '+cls+'" data-month="'+m.key+'" data-day="'+d+'" style="--c1:'+p[0]+';--c2:'+p[1]+'" aria-label="'+d+' '+m.short+'"><b>'+d+'</b></button>';
+      });
       h+='</div>';
       if(m.dn>m.days.length)h+='<button type="button" class="more" data-month="'+m.key+'" data-day="'+m.days[0]+'">and '+(m.dn-m.days.length)+' more days</button>';
     });

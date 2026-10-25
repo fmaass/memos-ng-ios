@@ -2,7 +2,7 @@ memos-ng · WP-9 · plan page 3929 · Epic MEMNG-505
 
 # The picture library, rebuilt after the iOS Photos app
 
-A walkthrough of what the approved plan will build on `/resources`, so the understanding can be checked before any code exists. The phone on the left is a working mock: switch the tabs and the pill, open the filter menu, press Select, scroll the grid. Revised 2026-09-23 twice: the Months day mosaic (from your screenshots) and the app tab pill.
+A walkthrough of what the approved plan will build on `/resources`, so the understanding can be checked before any code exists. The phone on the left is a working mock: switch the tabs and the pill, open the filter menu, press Select, scroll the grid. Revised 2026-09-23 twice: the Months day mosaic (from your screenshots) and the app tab pill. Revised 2026-10-23 for the iOS app: Months shows nine days per month with two heroes (your answer B).
 
 Owner decision 2026-09-22 · Codex plan gate APPROVE, round 3 · Milestone 328, target 2026-10-31 · Tickets MEMNG-501…511
 
@@ -53,16 +53,18 @@ Owner decision 2026-09-22. Every picture gets one `takenAt` value, and both the 
 | Videos | 169 | The Videos filter and the count badges use the same date. |
 | Years with dated pictures | 1 | The Years view shows one card today. Backdated memos can add earlier years. |
 
-## 6 · Months and Years — Months: the six busiest days of each month, laid out as a mosaic
+## 6 · Months and Years — Months: the nine busiest days of each month, two of them as heroes
 
-Corrected on 2026-09-23 after your reference screenshots. Months is not a list of month cards. Each month gets a bold title ("Sep 2026"), then one tile per shown day, edge to edge with hairline gaps. Not every day: the six days with the most pictures, in date order, and a small "and N more days" line under the month when it had more. Some days get a large hero frame, the rest are squares, and the pattern cycles as the Photos app does: hero left with two stacked right, a row of three, hero right, a full-width hero. The day number sits top-left on its tile, bold white, no chip and no count badge. Years keeps one wide card per year.
+Corrected on 2026-09-23 after your reference screenshots. Months is not a list of month cards. Each month gets a bold title ("Sep 2026"), then one tile per shown day, edge to edge with hairline gaps. Not every day: the nine days with the most pictures and a small "and N more days" line under the month when it had more. The day number sits top-left on its tile, bold white, no chip and no count badge. Years keeps one wide card per year.
+
+Amended 2026-10-23 (your answer B on the decision canvas, board 2): nine days per month instead of six, and two large tiles. The busiest day is the large tile at the top, the second-busiest the large tile further down, and the seven other days are small, in date order between them; "and N more days" follows. In the 3-column grid that is: hero left with two stacked right, a row of three, hero right with two stacked left. Every other month is the mirror image (hero right at the top, hero left further down), so neighbouring months do not look alike. A month with fewer than nine days keeps the same order and stops at its last day: one day is a single hero, two are a hero and one small tile, five are a hero, two small beside it and two in the row below. Only a month showing more than nine days would reach the full-width frame.
 
 - Tap a day tile and the All view opens scrolled to that day. The page loads as many pages as needed to get there.
 - Tap "and N more days" and the All view opens at that month's first shown day, where every day is there.
 - Tap a year card and Months opens filtered to that year.
 - The key photo of a day is the newest picture of that day. No multi-photo collage inside one day tile.
 - Day and month boundaries are computed in Europe/Zurich on the server and in the browser.
-- Which days are shown is by picture count, ties to the later day. Which of them get a hero follows the fixed cycling pattern above, not the picture's importance.
+- Which days are shown is by picture count, ties to the later day. Which of them get a hero is by the same count since 2026-10-23: the two busiest days, ties to the later day. Where the heroes sit is the fixed pattern above.
 
 ## 7 · Select — Select mode: glass buttons above, a toolbar below
 

@@ -5,8 +5,9 @@ import UIKit
 
 @testable import MemosFeatures
 
-/// The Months mosaic on screen (MEMNG-596, plan decision 9): a capped month draws its six busiest
-/// days in date order and a line for the rest, a short month draws every day and no line, and no
+/// The Months mosaic on screen (MEMNG-596, plan decision 9 as MEMNG-607 amends it for the app):
+/// a capped month draws its nine busiest days — the two busiest in its two heroes, the other
+/// seven in date order — and a line for the rest, a short month draws every day and no line, and no
 /// tile says how many files fall on its day.
 @MainActor
 @Suite("Library Months mosaic")
@@ -17,16 +18,19 @@ struct LibraryMonthsMosaicTests {
         LibraryBucket(key: key, count: count, coverUID: "c-\(key)", coverThumbnailURL: nil)
     }
 
-    /// The web's nine-day vector with forty added to every count, so no count can be mistaken for
-    /// a day number or for the "more days" line: 2026-09-01, -02, -03, -05, -07 and -08 are the
-    /// six busiest, the 8th winning the tie with the 4th.
+    /// The web's nine-day vector and three more days, forty added to every count (the 1st's and
+    /// the 7th's swapped), so no count can be mistaken for a day number or for the "more days"
+    /// line: the 11th and the 1st are the two busiest — the 1st, the earliest day, can only reach
+    /// the second hero by its rank — and the 12th wins the ninth place from the 10th and the 6th.
     private static let september = [
-        day("2026-09-09", 41), day("2026-09-08", 44), day("2026-09-07", 49),
+        day("2026-09-12", 42), day("2026-09-11", 50), day("2026-09-10", 42),
+        day("2026-09-09", 41), day("2026-09-08", 44), day("2026-09-07", 45),
         day("2026-09-06", 42), day("2026-09-05", 47), day("2026-09-04", 44),
-        day("2026-09-03", 48), day("2026-09-02", 46), day("2026-09-01", 45),
+        day("2026-09-03", 48), day("2026-09-02", 46), day("2026-09-01", 49),
     ]
+    /// Its busiest day is the 20th, so the mirrored month's one hero is not its first day.
     private static let august = [
-        day("2026-08-25", 31), day("2026-08-20", 32), day("2026-08-12", 33), day("2026-08-10", 34),
+        day("2026-08-25", 31), day("2026-08-20", 34), day("2026-08-12", 33), day("2026-08-10", 32),
     ]
 
     /// Every control on screen by the label VoiceOver reads, in the order it reads them.
@@ -58,8 +62,8 @@ struct LibraryMonthsMosaicTests {
         )
     }
 
-    @Test("nine days draw six tiles in date order and the line; four days draw four, no line")
-    func sixTilesThenTheLine() async {
+    @Test("twelve days draw nine tiles, the busiest two as heroes, and the line; four draw four")
+    func nineTilesThenTheLine() async {
         let labels = await PressProbe.withScreen(Self.mosaic(), height: 2000) { screen in
             await screen.settle(turns: 20)
             var found: [String] = []
@@ -67,8 +71,15 @@ struct LibraryMonthsMosaicTests {
             Self.buttons(in: screen.window, into: &found, seen: &seen)
             return found
         }
+        // VoiceOver reads the tiles by where they sit, not in the order they were handed over:
+        // in September the 11th's hero, its two sides, the row of three, then the left column
+        // (the 8th above the 12th) before the 1st's hero right of it; in the mirrored August the
+        // left column before the 20th's hero.
         #expect(
-            labels == ["1", "2", "3", "5", "7", "8", "and 3 more days", "10", "12", "20", "25"]
+            labels == [
+                "11", "2", "3", "4", "5", "7", "8", "12", "1", "and 3 more days",
+                "10", "12", "20", "25",
+            ]
         )
     }
 
@@ -125,7 +136,7 @@ struct LibraryMonthsMosaicTests {
     @Test("C then D: a hero right with two squares stacked left, then a full-width 16:9 frame")
     func heroRightThenWide() {
         #expect(
-            Self.frames(mosaicSlots(4, offset: 2))
+            Self.frames([.heroRight, .sideLeft, .sideLeft, .wide])
                 == MosaicFrames(
                     frames: [
                         CGRect(x: 102, y: 0, width: 202, height: 202),
@@ -134,6 +145,46 @@ struct LibraryMonthsMosaicTests {
                         CGRect(x: 0, y: 204, width: 304, height: 171),
                     ],
                     height: 375
+                )
+        )
+    }
+
+    /// MEMNG-607: the first hero at the very top, the second two bands further down on the other
+    /// side, seven squares around them; the odd month is the same mosaic mirrored.
+    @Test("nine days: a hero at the top, a row of three, a second hero further down")
+    func nineDaysTwoHeroes() {
+        #expect(
+            Self.frames(mosaicSlots(9))
+                == MosaicFrames(
+                    frames: [
+                        CGRect(x: 0, y: 0, width: 202, height: 202),
+                        CGRect(x: 204, y: 0, width: 100, height: 100),
+                        CGRect(x: 204, y: 102, width: 100, height: 100),
+                        CGRect(x: 0, y: 204, width: 100, height: 100),
+                        CGRect(x: 102, y: 204, width: 100, height: 100),
+                        CGRect(x: 204, y: 204, width: 100, height: 100),
+                        CGRect(x: 102, y: 306, width: 202, height: 202),
+                        CGRect(x: 0, y: 306, width: 100, height: 100),
+                        CGRect(x: 0, y: 408, width: 100, height: 100),
+                    ],
+                    height: 508
+                )
+        )
+        #expect(
+            Self.frames(mosaicSlots(9, offset: 1))
+                == MosaicFrames(
+                    frames: [
+                        CGRect(x: 102, y: 0, width: 202, height: 202),
+                        CGRect(x: 0, y: 0, width: 100, height: 100),
+                        CGRect(x: 0, y: 102, width: 100, height: 100),
+                        CGRect(x: 0, y: 204, width: 100, height: 100),
+                        CGRect(x: 102, y: 204, width: 100, height: 100),
+                        CGRect(x: 204, y: 204, width: 100, height: 100),
+                        CGRect(x: 0, y: 306, width: 202, height: 202),
+                        CGRect(x: 204, y: 306, width: 100, height: 100),
+                        CGRect(x: 204, y: 408, width: 100, height: 100),
+                    ],
+                    height: 508
                 )
         )
     }
