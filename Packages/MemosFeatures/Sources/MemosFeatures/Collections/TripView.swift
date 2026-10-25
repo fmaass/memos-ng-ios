@@ -207,7 +207,7 @@ struct TripView: View {
         identity: TimelineSnapshotIdentity?,
         access: @escaping () -> CollectionsAccess?,
         trail: Binding<[CollectionRoute]> = .constant([]),
-        manage: TripManage = TripManage(),
+        manage: TripManage? = nil,
         modes: CollectionModeChoice = CollectionModeChoice(),
         viewerTransport: any MediaTransport = MediaSession.shared,
         shareLane: TripShareLane? = nil,
@@ -222,7 +222,7 @@ struct TripView: View {
         self.identity = identity
         self.access = access
         self.trail = trail
-        _manage = State(initialValue: manage)
+        _manage = State(initialValue: manage ?? TripManage(for: scope))
         _modes = State(initialValue: modes)
         self.viewerTransport = viewerTransport
         self.shareLane = shareLane
@@ -873,7 +873,8 @@ struct TripView: View {
 
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
     private func journal(_ shown: CollectionScope) -> some View {
-        let memos = memberStore.journal(for: shown)
+        // A month's and a year's follow "Captured by me" (MEMNG-919); a trip's take none.
+        let memos = memberStore.journal(for: shown, mine: gridQuery.mine)
         let state = memberStore.journalState(for: shown)
         let calendar = journalCalendar(for: shown)
         return List {
@@ -1468,15 +1469,20 @@ struct TripView: View {
     /// are then turned round — rather than a read of its own.
     private var readsMembers: Bool {
         let query = gridQuery
-        if query.isUnfiltered { return true }
-        return !scope.isTrip && query.isOrderOnly && shownMembers.summary?.complete == true
+        if query == drainQuery { return true }
+        return !scope.isTrip && query.isOrderOnly(over: drainQuery)
+            && shownMembers.summary?.complete == true
     }
+
+    /// What this screen's members were drained under (MEMNG-919): a month's and a year's own
+    /// pictures, every other collection's everyone's.
+    private var drainQuery: TripMemberQuery { TripMemberStore.drainQuery(for: scope) }
 
     /// The order the read the grid draws walked in, which decides the end a cut one kept: the
     /// drain's own (oldest first) whenever the grid draws the members, however they are turned
     /// round on screen; the grid's read's otherwise.
     private var readOrder: MediaLibraryOrder {
-        readsMembers ? TripMemberQuery.unfiltered.order : gridQuery.order
+        readsMembers ? drainQuery.order : gridQuery.order
     }
 
     /// What the grid draws: `viewerRows`, narrowed to the chosen pictures while Show Selected is
@@ -1499,7 +1505,8 @@ struct TripView: View {
         let query = gridQuery
         guard !readsMembers else {
             let current = shownMembers
-            let rows = query.isOrderOnly ? Array(current.rows.reversed()) : current.rows
+            let rows =
+                query.isOrderOnly(over: drainQuery) ? Array(current.rows.reversed()) : current.rows
             return (rows, current.loaded)
         }
         let filtered = memberStore.filteredMembers(for: shownScope, query: query)
@@ -1777,7 +1784,15 @@ final class TripManage {
     /// The filter menu's Removed from trip sheet is up.
     var showingRemoved = false
     /// The grid's Kind and Sort (MEMNG-780): the filter menu's choice, read by the server.
-    var query = TripMemberQuery.unfiltered
+    var query: TripMemberQuery
+
+    init(query: TripMemberQuery = .unfiltered) { self.query = query }
+
+    /// The flow a screen opens with: its filter menu on what `scope` drains (MEMNG-919) — a
+    /// month's or a year's "Captured by me" checked, a trip's and a tag's everyone's.
+    convenience init(for scope: CollectionScope) {
+        self.init(query: TripMemberStore.drainQuery(for: scope))
+    }
 
     /// Whether a rename, delete or cover change is out: the hero says so.
     var isSaving: Bool { saving > 0 }

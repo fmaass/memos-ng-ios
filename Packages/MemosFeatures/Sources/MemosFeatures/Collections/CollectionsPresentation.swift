@@ -197,13 +197,14 @@ enum CollectionsPresentation {
     }
 
     /// The buckets `store` holds while they answer a read of `size`, every kind, every tag and
-    /// everyone's pictures of any visibility (MEMNG-787), in its own zone — else nil, so a failed
-    /// or another read puts no row on screen.
+    /// my own pictures of any visibility (MEMNG-787, MEMNG-919: another member's pictures are
+    /// there only to fill out a trip), in its own zone — else nil, so a failed or another read
+    /// puts no row on screen.
     static func bucketsShown(_ store: LibraryBucketStore, size: LibraryBucketSize)
         -> [LibraryBucket]?
     {
         guard let request = store.loadedRequest, request.size == size, request.filter == .all,
-            request.tag == nil, !request.mine, request.visibility == .any,
+            request.tag == nil, request.mine, request.visibility == .any,
             request.timeZoneIdentifier == store.timeZoneIdentifier
         else { return nil }
         return store.buckets

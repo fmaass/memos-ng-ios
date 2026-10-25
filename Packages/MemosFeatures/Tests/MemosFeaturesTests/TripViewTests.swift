@@ -1027,7 +1027,7 @@ struct TripScreenRenderTests {
         let view = TripStack(log: stack) { trail in
             CollectionsScreen(
                 trips: stores.0, members: stores.1, tags: LibraryTagStore(), identity: alice,
-                access: { access }, trail: trail, tripManage: { manage })
+                access: { access }, trail: trail, tripManage: { _ in manage })
         }
         .environment(\.locale, Locale(identifier: "en_GB"))
         .environment(\.timeZone, TimeZone(identifier: "UTC")!)
@@ -2385,6 +2385,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var pictured = false
     private nonisolated(unsafe) var dropped: Set<String> = []
     private nonisolated(unsafe) var others: Set<String> = []
+    private nonisolated(unsafe) var othersMemos: Set<String> = []
     private nonisolated(unsafe) var films: Set<String> = []
     private nonisolated(unsafe) var deleted: [String] = []
     private nonisolated(unsafe) var sent: [String] = []
@@ -2447,6 +2448,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
     /// `uid` is another member's picture: from here on its reads say it is not mine.
     nonisolated func others(_ uid: String) { lock.withLock { _ = others.insert(uid) } }
+    /// The journal memo `uid` is another member's, Just us, from here on (MEMNG-919).
+    nonisolated func othersMemo(_ uid: String) { lock.withLock { _ = othersMemos.insert(uid) } }
     /// `uid` is a video from here on: a read that names images leaves it out, as the server does.
     nonisolated func film(_ uid: String) { lock.withLock { _ = films.insert(uid) } }
 
@@ -2496,7 +2499,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
                 return past
             }
             return Self.memoPage(
-                query, pictures: pictures, signed: sig, edged: lock.withLock { edged })
+                query, pictures: pictures, signed: sig, edged: lock.withLock { edged },
+                theirs: lock.withLock { othersMemos })
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
@@ -2577,7 +2581,8 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// A page of `portugal2026`'s memos, two at a time, in the order the query's `sort` asks for:
     /// oldest first under `created_at`, newest first under anything else — the server's default.
     private nonisolated static func memoPage(
-        _ query: [String: String], pictures: Bool, signed sig: String, edged: Bool = false
+        _ query: [String: String], pictures: Bool, signed sig: String, edged: Bool = false,
+        theirs: Set<String> = []
     ) -> (HTTPResponse, HTTPBody?) {
         // A month's or a year's journal asks from its start, with no tag (MEMNG-817).
         let dated = query["tag"] == nil && query["created_after"] != nil
@@ -2587,9 +2592,12 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             let stamp = edged && memo.uid == "j0" ? Self.edgeStamp : memo.stamp
             let uids = pictures && memo.uid == "j1" ? ["p1", "p3"] : []
             let attached = uids.map { reference($0, sig: sig) }
+            let other = theirs.contains(memo.uid)
+            let owner = other ? "anna" : "fabian"
+            let visibility = other ? "PROTECTED" : "PRIVATE"
             return """
-                {"uid":"\(memo.uid)","owner":"fabian","mine":true,"content":"\(memo.text)",\
-                "visibility":"PRIVATE","pinned":false,"created_at":"\(stamp)",\
+                {"uid":"\(memo.uid)","owner":"\(owner)","mine":\(!other),"content":"\(memo.text)",\
+                "visibility":"\(visibility)","pinned":false,"created_at":"\(stamp)",\
                 "updated_at":"\(stamp)","archived_at":null,"tags":["portugal2026"],\
                 "attachments":[\(attached.joined(separator: ","))]}
                 """
@@ -3746,6 +3754,16 @@ enum TripMenuProbe {
             }
         }
         return false
+    }
+
+    /// Whether the first row titled `title` of any menu under `window` is checked; nil with none.
+    static func isOn(_ title: String, in window: UIWindow) -> Bool? {
+        for holder in CollectionScreenTests.menuHolders(in: window) {
+            for case let action as UIAction in leaves(holder.menu) where action.title == title {
+                return action.state == .on
+            }
+        }
+        return nil
     }
 
     /// The alert over `host`'s `label` action as a call: the alert is dismissed now, and each call

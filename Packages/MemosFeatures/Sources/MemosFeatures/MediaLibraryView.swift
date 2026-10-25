@@ -183,12 +183,7 @@ struct MediaLibraryView: View {
         .onAppear { followOrder() }
         .task(id: session.state.user?.subject) {
             if library == nil {
-                library = MediaLibraryStore(
-                    order: preferences.order,
-                    onUnauthorized: { [session] refusal in
-                        await session.handle(refusal)
-                    }
-                )
+                library = Self.makeLibrary(order: preferences.order, session: session)
             }
             if tags == nil {
                 tags = LibraryTagStore(
@@ -576,6 +571,15 @@ struct MediaLibraryView: View {
                 Task { await load() }
             }
         )
+    }
+
+    /// The grid's store as the tab opens it: in the device's order, on "Captured by me"
+    /// (MEMNG-919) — another member's pictures are there only to fill out a trip, so the Library
+    /// starts on my own and the menu widens it on purpose.
+    static func makeLibrary(order: MediaLibraryOrder, session: SessionStore) -> MediaLibraryStore {
+        MediaLibraryStore(
+            order: order, mine: true,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
     }
 
     /// "Captured by me" (MEMNG-787): a new list, read from its first page as a kind is; the buckets

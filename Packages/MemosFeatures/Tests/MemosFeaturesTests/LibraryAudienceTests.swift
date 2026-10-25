@@ -395,7 +395,7 @@ extension MediaImageLoaderTests {
         return condition()
     }
 
-    @Test("the Library's Captured by me and Just us read the list and the day counts; both show")
+    @Test("the Library opens on Captured by me; unchecked, mine and Just us each read and show")
     func capturedByMeInTheLibrary() async {
         let wire = AudienceTransport()
         await withTransport(AudiencePictures()) {
@@ -412,15 +412,29 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
+            // The Library opens on Captured by me (MEMNG-919): my own pictures and their counts.
             let everybody = Set(["aud-a", "aud-b", "aud-c"])
             let landed = await audienceUntil(window) {
+                Set(TripProbe.tiles(in: window)) == ["aud-a", "aud-b"]
+                    && Self.audienceHeading(in: window) == bucketCountLabel(7)
+            }
+            #expect(landed, "the opening grid drew \(Self.drawn(in: window))")
+            let firstList = wire.reads(AudienceWire.listAttachments).first
+            #expect(firstList?["mine"] == "true", "the Library did not open on Captured by me")
+            #expect(firstList?["visibility"] == nil, "control: the first list named a visibility")
+
+            // Unchecked on purpose: everyone's pictures, everyone's counts.
+            let opened = wire.reads(AudienceWire.listAttachments).count
+            #expect(
+                LibraryMenuProbe.perform("Captured by me", in: window),
+                "no Captured by me row: \(LibraryMenuProbe.describe(window))")
+            let widened = await audienceUntil(window) {
                 Set(TripProbe.tiles(in: window)) == everybody
                     && Self.audienceHeading(in: window) == bucketCountLabel(12)
             }
-            #expect(landed, "control: the unfiltered grid drew \(Self.drawn(in: window))")
-            let firstList = wire.reads(AudienceWire.listAttachments).first
-            #expect(firstList?["mine"] == nil, "control: the first list asked for mine")
-            #expect(firstList?["visibility"] == nil, "control: the first list named a visibility")
+            #expect(widened, "unchecking drew \(Self.drawn(in: window))")
+            let everyLists = wire.reads(AudienceWire.listAttachments).dropFirst(opened)
+            #expect(everyLists.last?["mine"] == nil, "unchecking still read mine")
 
             // Captured by me, pressed as the menu would press it.
             let lists = wire.reads(AudienceWire.listAttachments).count

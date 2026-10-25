@@ -239,6 +239,38 @@ struct CollectionCardsTests {
         #expect(wire.transport.coverReads() == 0, "\(wire.transport.sent)")
     }
 
+    // MARK: - My own pictures outside a trip (MEMNG-919)
+
+    @Test("a month card and a year card count and cover my own pictures, read with mine=true")
+    func periodCardsAreMyOwn() async {
+        let wire = CollectionsWire()
+        wire.transport.answerTags("[]")
+        wire.transport.answerMonths("[\(Self.bucket("2026-03", 3, cover: "p0"))]")
+        wire.transport.answerYears("[\(Self.bucket("2026", 3, cover: "p0"))]")
+        // Another member's picture of March counted in, and the cover, for everyone's reads.
+        wire.transport.answerEveryone(
+            months: "[\(Self.bucket("2026-03", 4, cover: "fam"))]",
+            years: "[\(Self.bucket("2026", 4, cover: "fam"))]")
+        let view = screen(
+            stores(), wire, years: LibraryBucketStore(), months: LibraryBucketStore())
+        await CollectionsHost.with(view) { screen in
+            let shown = await screen.until {
+                screen.element(labelled: "Mar 2026") != nil
+                    && screen.element(labelled: "2026") != nil
+            }
+            #expect(shown, "the cards never appeared: \(wire.transport.sent)")
+            #expect(screen.element(labelled: "Mar 2026")?.accessibilityValue == "3 items")
+            #expect(screen.element(labelled: "2026")?.accessibilityValue == "3 items")
+            let own = CollectionCard.coverIdentifier("p0")
+            let theirs = CollectionCard.coverIdentifier("fam")
+            #expect(CollectionsHost.identified(own, in: screen.window), "no own cover")
+            #expect(!CollectionsHost.identified(theirs, in: screen.window), "a family cover")
+        }
+        let reads = wire.transport.sent.filter { $0.hasPrefix("attachment_buckets") }
+        #expect(reads.count == 2, "one month and one year read: \(reads)")
+        #expect(reads.allSatisfy { $0.contains("mine=true") }, "an everyone read: \(reads)")
+    }
+
     // MARK: - RED 5: no span on any card
 
     @Test("a card takes a cover, a title and a count, and nothing on the root says a span")

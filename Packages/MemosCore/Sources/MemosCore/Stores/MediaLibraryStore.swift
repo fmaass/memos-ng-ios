@@ -55,8 +55,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// pictures, which is the worse failure.
     public private(set) var tag: String?
     /// "Captured by me" (MEMNG-787): only the signed-in account's own pictures, `mine=true` on the
-    /// wire. Changed only through `setMine`, and not persisted, for `tag`'s reason.
-    public private(set) var mine = false
+    /// wire. Changed only through `setMine`, and not persisted, for `tag`'s reason; the Library tab
+    /// starts on it (MEMNG-919).
+    public private(set) var mine: Bool
     /// Who may see the memo a picture hangs on (MEMNG-787). Changed only through `setVisibility`,
     /// and not persisted, for `tag`'s reason.
     public private(set) var visibility = MediaVisibilityFilter.any
@@ -105,6 +106,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         pageSize: Int = 60,
         filter: MediaLibraryFilter = .all,
         order: MediaLibraryOrder = .newestFirst,
+        mine: Bool = false,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded },
         reissueCooldown: @escaping @MainActor @Sendable () async -> Void = {
@@ -116,6 +118,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         self.nextCursorLimit = pageSize
         self.filter = filter
         self.order = order
+        self.mine = mine
         self.onUnauthorized = onUnauthorized
     }
 

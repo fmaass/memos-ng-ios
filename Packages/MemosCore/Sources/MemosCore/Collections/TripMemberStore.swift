@@ -444,8 +444,22 @@ public final class TripMemberStore {
         }
     }
 
-    /// An automatic collection's drain: `walkAutomatic` under the unfiltered query — every kind,
-    /// oldest taken first — into the members the hero, the Journal and the Map read.
+    /// What a scope's drain reads, and so what its grid shows with nothing chosen (MEMNG-919): a
+    /// month's and a year's own pictures — another member's are there only to fill out a trip —
+    /// every other scope's everyone's. The filter menu starts on it, and a query equal to it
+    /// sends no read of its own.
+    public static func drainQuery(for scope: CollectionScope) -> TripMemberQuery {
+        request(for: scope).map(drainQuery) ?? .unfiltered
+    }
+
+    private static func drainQuery(_ request: MemberRequest) -> TripMemberQuery {
+        if case .period = request { return .capturedByMe }
+        return .unfiltered
+    }
+
+    /// An automatic collection's drain: `walkAutomatic` under its `drainQuery` — every kind,
+    /// oldest taken first, a month's and a year's own pictures only — into the members the hero
+    /// and the Map read. The Journal reads memos of its own (`loadJournal`).
     private func runAutomaticDrain(
         _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
     ) async {
@@ -454,7 +468,8 @@ public final class TripMemberStore {
         let walked: AutomaticWalk?
         do {
             walked = try await walkAutomatic(
-                lineage.request, query: .unfiltered, handle, baseURL, owned: owned)
+                lineage.request, query: Self.drainQuery(lineage.request), handle, baseURL,
+                owned: owned)
         } catch {
             noteDrainFailure(error, lineage, token: token)
             await report(error, handle: handle, while: owned)
@@ -478,7 +493,7 @@ public final class TripMemberStore {
     }
 
     /// The walk over `GET /api/attachments` under `request`, with `query`'s kind, order, "Captured
-    /// by me" and Visibility on the wire (MEMNG-827; the drain's is `.unfiltered`). `bucket=` only
+    /// by me" and Visibility on the wire (MEMNG-827; the drain's is `drainQuery`). `bucket=` only
     /// says where the walk STARTS — the listing runs on past the period, and past an empty bucket
     /// into the next — so a period keeps a row only while it lies inside the period, in the
     /// direction the walk goes: before `nextStart` oldest first, at or after `start` newest first
@@ -776,11 +791,11 @@ public final class TripMemberStore {
         case .automatic: break
         }
         activeQueries[key] = query
-        guard !query.isUnfiltered, let request = Self.request(for: scope) else {
+        guard let request = Self.request(for: scope), query != Self.drainQuery(request) else {
             filteredFlights[key] = nil
             return
         }
-        if query.isOrderOnly {
+        if query.isOrderOnly(over: Self.drainQuery(request)) {
             // The drain answers an order alone unless the cap stopped it: read it when nothing
             // is held — joining the screen's own drain when that is already on the wire — so a
             // first showing newest first walks the collection once, not twice.
@@ -820,7 +835,7 @@ public final class TripMemberStore {
         _ scope: CollectionScope, under lease: CoverLease, query: TripMemberQuery,
         using handle: SessionHandle, baseURL: URL
     ) async {
-        guard leaseIsLive(lease, for: scope), !query.isUnfiltered,
+        guard leaseIsLive(lease, for: scope), query != Self.drainQuery(for: scope),
             activeQueries[scope.id] == query
         else { return }
         await drainFiltered(scope, query: query, using: handle, baseURL: baseURL)
@@ -837,10 +852,10 @@ public final class TripMemberStore {
         case .automatic: break
         }
         guard let request = Self.request(for: scope) else { return nil }
-        if query.isUnfiltered {
+        if query == Self.drainQuery(request) {
             return held(scope.id, request: request) == nil ? nil : members(for: scope)
         }
-        if query.isOrderOnly, drainAnswers(scope.id, request) {
+        if query.isOrderOnly(over: Self.drainQuery(request)), drainAnswers(scope.id, request) {
             return Array(members(for: scope).reversed())
         }
         guard let held = filteredDrains[scope.id], held.query == query,
@@ -857,9 +872,13 @@ public final class TripMemberStore {
         case .trip(let trip): return filteredState(for: trip, query: query)
         case .automatic: break
         }
-        if query.isUnfiltered { return state(for: scope) }
-        guard let request = Self.request(for: scope) else { return .notLoaded }
-        if query.isOrderOnly, drainAnswers(scope.id, request) { return .complete }
+        guard let request = Self.request(for: scope) else {
+            return query.isUnfiltered ? state(for: scope) : .notLoaded
+        }
+        if query == Self.drainQuery(request) { return state(for: scope) }
+        if query.isOrderOnly(over: Self.drainQuery(request)), drainAnswers(scope.id, request) {
+            return .complete
+        }
         if let flight = filteredFlights[scope.id], flight.query == query { return .draining }
         guard let held = filteredDrains[scope.id], held.query == query,
             current(held.drain.lineage), held.drain.lineage.request == request
@@ -1377,7 +1396,18 @@ public struct TripMemberQuery: Sendable, Hashable {
 
     public var isUnfiltered: Bool { self == .unfiltered }
 
+    /// Every kind, oldest taken first, my own pictures, any visibility: what a month's and a
+    /// year's drain reads (MEMNG-919).
+    public static let capturedByMe = TripMemberQuery(mine: true)
+
     /// Every kind, everyone's, any visibility, newest first: the drain's members in the other
     /// order, which a whole drain answers turned round (MEMNG-827).
-    public var isOrderOnly: Bool { !isUnfiltered && TripMemberQuery(order: order) == self }
+    public var isOrderOnly: Bool { isOrderOnly(over: .unfiltered) }
+
+    /// Whether this is `drain` in another order alone: the drain's members turned round.
+    public func isOrderOnly(over drain: TripMemberQuery) -> Bool {
+        var turned = drain
+        turned.order = order
+        return self != drain && turned == self
+    }
 }

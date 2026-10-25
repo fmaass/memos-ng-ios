@@ -150,10 +150,19 @@ extension TripMemberStore {
     /// A scope's journal: a trip's as `journal(for:)` reads it; an automatic collection's every
     /// memo its rule read, oldest first by journal instant, less the files Delete took. Empty until
     /// a load under the scope's own rule — its zone and bounds included — has applied.
-    public func journal(for scope: CollectionScope) -> [Memo] {
+    ///
+    /// A month's and a year's are my own memos while `mine` holds (MEMNG-919: another member's
+    /// are there only to fill out a trip); `mine` is the screen's "Captured by me", nil for the
+    /// scope's own start (`drainQuery`). The read itself is everyone's, so unchecking widens it
+    /// with no second read. A trip's and a tag's journal take no such choice.
+    public func journal(for scope: CollectionScope, mine: Bool? = nil) -> [Memo] {
         if case .trip(let trip) = scope { return journal(for: trip) }
         guard let journal = automaticJournal(scope) else { return [] }
-        return withoutDeleted(journal.memos)
+        let memos = withoutDeleted(journal.memos)
+        guard case .automatic(let collection) = scope, collection.bucket != nil,
+            mine ?? Self.drainQuery(for: scope).mine
+        else { return memos }
+        return memos.filter(\.mine)
     }
 
     public func journalState(for scope: CollectionScope) -> TripMemberState {

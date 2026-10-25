@@ -932,6 +932,7 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var pictureTagsRead = 0
     private nonisolated(unsafe) var monthsAnswer: String?
     private nonisolated(unsafe) var yearsAnswer: String?
+    private nonisolated(unsafe) var everyoneBuckets: (months: String, years: String)?
     private nonisolated(unsafe) var coversFail = false
     private nonisolated(unsafe) var coversHeld = false
     private nonisolated(unsafe) var favoriteCovers: [String] = []
@@ -1018,6 +1019,12 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     /// Answers every month read with `json`; unset, a month read is not found.
     nonisolated func answerMonths(_ json: String) {
         lock.withLock { monthsAnswer = json }
+    }
+
+    /// Answers every month and year read WITHOUT `mine=true` with these — everyone's pictures,
+    /// another member's counted too (MEMNG-919); a `mine=true` read answers as before.
+    nonisolated func answerEveryone(months: String, years: String) {
+        lock.withLock { everyoneBuckets = (months, years) }
     }
 
     /// Answers fabian's year reads with `json` instead of 2026 and 2019.
@@ -1166,6 +1173,11 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
             // Years only (MEMNG-720): 2026 three pictures, 2019 forty. Every other size stays
             // unanswered, as it was before the Years row.
             let query = URLComponents(string: path)?.queryItems ?? []
+            let mine = query.contains { $0.name == "mine" && $0.value == "true" }
+            if !mine, let everyone = lock.withLock({ everyoneBuckets }) {
+                let month = query.contains { $0.name == "size" && $0.value == "month" }
+                return Self.json(month ? everyone.months : everyone.years)
+            }
             if query.contains(where: { $0.name == "size" && $0.value == "month" }),
                 let months = lock.withLock({ monthsAnswer })
             {
