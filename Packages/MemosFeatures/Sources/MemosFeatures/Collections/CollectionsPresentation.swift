@@ -25,22 +25,29 @@ enum CollectionsPresentation {
 
     /// The root header's subtitle (MEMNG-757): the trip count alone. No order phrase, because the
     /// trips stand in the order the server lists them, which is no rule a phrase could name.
-    static func headerSubtitle(tripCount: Int) -> String {
-        switch tripCount {
-        case 0: "No trips yet"
-        case 1: "1 trip"
-        default: "\(tripCount) trips"
+    /// The listed trips, in the server's order: the Trips row's.
+    static func trips(of listed: [Trip]) -> [Trip] { listed.filter { $0.kind == .trip } }
+
+    /// The listed albums, in the server's order: the Albums row's.
+    static func albums(of listed: [Trip]) -> [Trip] { listed.filter { $0.kind == .album } }
+
+    /// One card of the Albums row.
+    enum AlbumRowCard: Identifiable, Equatable {
+        case album(Trip)
+        /// The row's one card while there is no album (the owner, 2026-10-25, as Photos does).
+        case newAlbum
+
+        var id: String {
+            switch self {
+            case .album(let album): album.uid
+            case .newAlbum: "new-album"
+            }
         }
     }
 
-    /// What the header says while the list failed with no trip to show: never "No trips yet",
-    /// which the server did not say.
-    static let headerUnread = "Trips not read"
-
-    /// The header's subtitle over the trips the store holds: the count, or `headerUnread` when the
-    /// list failed and there is nothing to count.
-    static func headerSubtitle(tripCount: Int, listFailed: Bool) -> String {
-        tripCount == 0 && listFailed ? headerUnread : headerSubtitle(tripCount: tripCount)
+    /// The Albums row's cards: the albums, or the New Album card alone while there are none.
+    static func albumRow(_ albums: [Trip]) -> [AlbumRowCard] {
+        albums.isEmpty ? [.newAlbum] : albums.map { .album($0) }
     }
 
     /// How many pictures a trip or a tag holds: "1 photo", "3 photos".

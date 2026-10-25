@@ -29,11 +29,17 @@ import Observation
 /// session becomes somebody else's while it is out, the flow is abandoned — the sheet closes with
 /// no result and nothing is retried under the new identity.
 ///
+/// **Trip or Album first** (MEMNG-803; the owner, 2026-10-13: "trips have a date, album dont").
+/// A flow opened by the root's + asks which (`kind` nil) before anything else; a flow made for
+/// a kind already known starts on it. An album is its title alone: no tag, no span, no prefill.
+///
 /// **One trip per sheet, refused after.** A second Create after one that succeeded, or while one is
 /// out, is refused and sends nothing.
 @MainActor
 @Observable
 final class NewTripFlow: Identifiable {
+    /// What the sheet makes, or nil while its first step still asks.
+    private(set) var kind: Trip.Kind?
     /// The tag the trip is made of, or nil before one is chosen.
     private(set) var chosenTag: String?
     /// The title field, prefilled from the chosen tag.
@@ -70,7 +76,16 @@ final class NewTripFlow: Identifiable {
 
     nonisolated let id = UUID()
 
-    init() {}
+    /// A flow on `kind`, or one that asks first when it is nil.
+    init(kind: Trip.Kind? = .trip) {
+        self.kind = kind
+    }
+
+    /// The first step's answer. Asked once: a kind already chosen stays.
+    func choose(kind chosen: Trip.Kind) {
+        guard kind == nil else { return }
+        kind = chosen
+    }
 
     /// Chooses `tag`, and fills the title from it unless somebody has written their own — and the
     /// span from its pictures (`prefill`), when they are known.
@@ -156,11 +171,14 @@ final class NewTripFlow: Identifiable {
     /// The title as it will be filed: trimmed.
     var trimmedTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// Whether Create has anything to file: a title, a tag or a span, no span that ends before it
-    /// starts, no prefill still awaited, and no Create out or done.
+    /// Whether Create has anything to file: a kind, a title, and for a trip a tag or a span, no
+    /// span that ends before it starts and no prefill still awaited; no Create out or done.
     var canCreate: Bool {
-        guard created == nil, !isCreating, !abandoned, !trimmedTitle.isEmpty, !awaitingDates
-        else { return false }
+        guard let kind, created == nil, !isCreating, !abandoned, !trimmedTitle.isEmpty else {
+            return false
+        }
+        if kind == .album { return true }
+        guard !awaitingDates else { return false }
         if let span { return span.span != nil }
         return chosenTag != nil
     }
@@ -168,16 +186,24 @@ final class NewTripFlow: Identifiable {
     /// The request the form makes under `scope`: the one sent last while the form still says the
     /// same — a retry re-sends it whole, key and all — else a new one with a new key.
     func request(under scope: TimelineSnapshotIdentity) -> NewTripRequest {
+        if self.kind == .album {
+            if let frozen, frozen.scope == scope, frozen.kind == .album,
+                frozen.title == trimmedTitle
+            {
+                return frozen
+            }
+            return NewTripRequest(scope: scope, title: trimmedTitle, kind: .album)
+        }
         let span = span?.span
-        if let frozen, frozen.scope == scope, frozen.title == trimmedTitle,
+        if let frozen, frozen.scope == scope, frozen.kind == .trip, frozen.title == trimmedTitle,
             frozen.tag == chosenTag, frozen.spanStart == span?.start,
             frozen.spanEnd == span?.end, frozen.tz == span?.zone
         {
             return frozen
         }
         return NewTripRequest(
-            scope: scope, title: trimmedTitle, tag: chosenTag, spanStart: span?.start,
-            spanEnd: span?.end, tz: span?.zone)
+            scope: scope, title: trimmedTitle, kind: .trip, tag: chosenTag,
+            spanStart: span?.start, spanEnd: span?.end, tz: span?.zone)
     }
 
     /// Sends the trip to the server and answers it, or nil when nothing was filed — refused, failed

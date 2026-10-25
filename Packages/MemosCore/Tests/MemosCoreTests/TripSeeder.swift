@@ -25,6 +25,8 @@ final class TripServer: @unchecked Sendable {
         /// The pictures (`TripWire` indices) its tag and span take in, before exclusions.
         var pictures: [Int] = []
         var updatedAt = "2026-10-10T14:05:00Z"
+        /// As the server stores it: the sent kind, or `trip` when none was sent.
+        var kind = "trip"
     }
 
     typealias Answer = @Sendable (HTTPRequest, String) async -> (HTTPResponse, HTTPBody?)?
@@ -131,7 +133,8 @@ final class TripServer: @unchecked Sendable {
                 let row = Row(
                     uid: "t\(made)", title: sent["title"] as? String ?? "",
                     tag: sent["tag"] as? String, spanStart: sent["spanStart"] as? String,
-                    spanEnd: sent["spanEnd"] as? String, tz: sent["tz"] as? String)
+                    spanEnd: sent["spanEnd"] as? String, tz: sent["tz"] as? String,
+                    kind: sent["kind"] as? String ?? "trip")
                 stored.append(row)
                 keys[key] = row.uid
                 return Stub.json(Self.json(row), status: .created)
@@ -212,7 +215,8 @@ final class TripServer: @unchecked Sendable {
 
     static func json(_ row: Row) -> String {
         TripWire.collection(
-            row.uid, title: Stub.jsonEscaped(row.title), tag: row.tag.map(Stub.jsonEscaped),
+            row.uid, title: Stub.jsonEscaped(row.title), kind: row.kind,
+            tag: row.tag.map(Stub.jsonEscaped),
             spanStart: row.spanStart, spanEnd: row.spanEnd, tz: row.tz,
             cover: row.cover.map { TripWire.item($0, taken: TripWire.taken(0)) },
             memberCount: row.pictures.isEmpty ? row.memberCount : visible(row).count,

@@ -127,6 +127,36 @@ struct TagCard: View {
     }
 }
 
+/// The Albums row's card while there is no album (the owner, 2026-10-25): a collection card's
+/// size, a plus and "New Album"; it opens the new-collection sheet on Album.
+struct NewAlbumCard: View {
+    let open: () -> Void
+
+    static let title = "New Album"
+
+    var body: some View {
+        Button(action: open) {
+            Rectangle().fill(.quaternary)
+                .frame(width: CollectionCard.width, height: CollectionCard.width)
+                .overlay {
+                    Image(systemName: "plus")
+                        .font(.largeTitle)
+                        .foregroundStyle(DesignTokens.accent)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    Text(Self.title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                        .padding(CollectionCard.inset)
+                }
+                .clipShape(.rect(cornerRadius: DesignTokens.Radius.card))
+                .contentShape(.rect(cornerRadius: DesignTokens.Radius.card))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Self.title)
+    }
+}
+
 /// The Favorites card (MEMNG-868): a heart, "Favorites", the count of pictures carrying the
 /// `favorites` picture tag, and the newest of them as the cover — the tag card's `limit: 1` read
 /// under `pictureTag=` (`TagCoverStore`), its thumbnail tier like every card. A tap opens the

@@ -38,6 +38,8 @@ nonisolated final class TripRows: @unchecked Sendable {
         var count: Int
         var exclusions: [String] = []
         var stamp = 0
+        /// As the server stores it: the sent kind, or `trip` when none was sent.
+        var kind = "trip"
     }
 
     nonisolated struct Call: Sendable {
@@ -96,13 +98,13 @@ nonisolated final class TripRows: @unchecked Sendable {
     @discardableResult
     func seed(
         _ title: String, tag: String? = nil, spanStart: String? = nil, spanEnd: String? = nil,
-        tz: String? = nil, cover: String? = nil, count: Int = 0
+        tz: String? = nil, cover: String? = nil, count: Int = 0, kind: String = "trip"
     ) -> String {
         lock.withLock {
             made += 1
             let row = Row(
                 uid: "trip-\(made)", title: title, tag: tag, spanStart: spanStart, spanEnd: spanEnd,
-                tz: tz, cover: cover, count: count)
+                tz: tz, cover: cover, count: count, kind: kind)
             stored.append(row)
             return row.uid
         }
@@ -188,7 +190,7 @@ nonisolated final class TripRows: @unchecked Sendable {
                     uid: "trip-\(made)", title: sent["title"] as? String ?? "",
                     tag: sent["tag"] as? String, spanStart: sent["spanStart"] as? String,
                     spanEnd: sent["spanEnd"] as? String, tz: sent["tz"] as? String, count: 0,
-                    stamp: writes)
+                    stamp: writes, kind: sent["kind"] as? String ?? "trip")
                 stored.append(row)
                 keys[key] = row.uid
                 return row
@@ -266,7 +268,8 @@ nonisolated final class TripRows: @unchecked Sendable {
         }
         let updated = Date(timeIntervalSince1970: 1_791_641_100 + Double(row.stamp))
         return """
-            {"uid":"\(row.uid)","title":"\(Self.escaped(row.title))","tag":\(quoted(row.tag)),\
+            {"uid":"\(row.uid)","title":"\(Self.escaped(row.title))","kind":"\(row.kind)",\
+            "tag":\(quoted(row.tag)),\
             "spanStart":\(quoted(row.spanStart)),"spanEnd":\(quoted(row.spanEnd)),\
             "tz":\(quoted(row.tz)),"cover":\(row.cover.map(coverItem) ?? "null"),\
             "memberCount":\(count(of: row)),"createdBy":"owner",\

@@ -86,6 +86,7 @@ filter:
     - put_export_settings_api_admin_export_settings_put
     - react_api_memos__uid__reactions_post
     - remove_digest_recipient_api_admin_digest_recipients__recipient_id__delete
+    - remove_member_api_collections__uid__members__attachment_uid__delete
     - remove_picture_tag_api_attachments__uid__tags__name__delete
     - rename_native_token_api_auth_native_token_patch
     - revoke_pat_api_pats__pat_id__delete

@@ -308,7 +308,7 @@ struct MediaLibraryRenderTests {
         var measured = reference
         if tab == .collections {
             measured = try await Self.frames(
-                of: CollectionsScreen.header(tripCount: 3, newTrip: {}),
+                of: CollectionsScreen.header(newTrip: {}),
                 labels: [MainTab.collections.title, CollectionsScreen.newTripButton],
                 width: width)
         }

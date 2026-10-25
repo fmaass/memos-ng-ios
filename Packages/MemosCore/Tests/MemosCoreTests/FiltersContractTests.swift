@@ -186,7 +186,7 @@ struct FiltersContractTests {
             ("t2", Self.row(uid: "c2", visibility: nil, orphan: true)),
         ].map { uid, cover in
             """
-            {"uid":"\(uid)","title":"Trip \(uid)","tag":"trip-\(uid)",\
+            {"uid":"\(uid)","title":"Trip \(uid)","kind":"trip","tag":"trip-\(uid)",\
             "spanStart":null,"spanEnd":null,"tz":null,"cover":\(cover),"memberCount":1,\
             "createdBy":null,"createdAt":"2026-09-26T10:00:00Z",\
             "updatedAt":"2026-09-26T10:00:00Z"}

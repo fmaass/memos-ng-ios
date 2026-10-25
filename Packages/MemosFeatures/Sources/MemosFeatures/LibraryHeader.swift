@@ -67,7 +67,9 @@ struct LibraryHeader<MenuContent: View>: View {
 /// titles stand at one edge and their controls at one height.
 struct ScreenHeader<Trailing: View>: View {
     let title: String
-    let subtitle: String
+    /// The line under the title, or nil for none. Its line stays reserved either way, so the
+    /// title stands where every tab's does.
+    let subtitle: String?
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
@@ -76,10 +78,11 @@ struct ScreenHeader<Trailing: View>: View {
                 Text(title)
                     .font(.largeTitle.bold())
                     .accessibilityAddTraits(.isHeader)
-                Text(subtitle)
+                Text(subtitle ?? " ")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .accessibilityHidden(subtitle == nil)
             }
             Spacer(minLength: DesignTokens.Space.snug)
             trailing()

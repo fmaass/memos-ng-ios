@@ -217,6 +217,8 @@ struct CollectionsScreen: View {
     static let newTripButton = "New Trip"
     /// The trips' heading.
     static let tripsHeader = "Trips"
+    /// The albums' heading, the row under the trips (MEMNG-803).
+    static let albumsHeader = "Albums"
     /// The tags' heading.
     static let tagsHeader = "Tags"
     /// The months' heading.
@@ -234,6 +236,7 @@ struct CollectionsScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: DesignTokens.Space.section) {
                 tripsSection
+                albumsRow
                 if !tagRow.isEmpty {
                     tagsRow
                 }
@@ -253,10 +256,7 @@ struct CollectionsScreen: View {
         // The Library's header over the root, its + included, with no bar above it: the two tabs
         // read as a pair (MEMNG-757).
         .safeAreaBar(edge: .top) {
-            Self.header(
-                subtitle: CollectionsPresentation.headerSubtitle(
-                    tripCount: trips.trips.count, listFailed: trips.lastError != nil)
-            ) { newTrip = NewTripFlow() }
+            Self.header { newTrip = NewTripFlow(kind: nil) }
         }
         .toolbarVisibility(.hidden, for: .navigationBar)
         // A card opens its trip inside the tab's stack (MEMNG-714), under the main bar, with
@@ -358,21 +358,17 @@ struct CollectionsScreen: View {
     static var placeholder: some View {
         ScrollView { emptyState.padding(.vertical, DesignTokens.Space.roomy) }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .safeAreaBar(edge: .top) { header(tripCount: 0, newTrip: nil) }
+            .safeAreaBar(edge: .top) { header(newTrip: nil) }
             .toolbarVisibility(.hidden, for: .navigationBar)
     }
 
     /// The root's header (MEMNG-757): the Library's, the trip count under the title and the `+`
     /// the same glass circle as the Library's options button. With no action — the placeholder's
     /// — the `+` is drawn and cannot act.
-    static func header(tripCount: Int, newTrip: (() -> Void)?) -> some View {
-        let subtitle = CollectionsPresentation.headerSubtitle(tripCount: tripCount)
-        return header(subtitle: subtitle, newTrip: newTrip)
-    }
-
-    /// The header over a subtitle already worded: the count, or that the list was not read.
-    static func header(subtitle: String, newTrip: (() -> Void)?) -> some View {
-        ScreenHeader(title: MainTab.collections.title, subtitle: subtitle) {
+    static func header(newTrip: (() -> Void)?) -> some View {
+        // No count under the title (the owner, 2026-10-25): a failed list says so in the trips
+        // section, over its Try Again.
+        ScreenHeader(title: MainTab.collections.title, subtitle: nil) {
             HeaderGlassCircle(systemName: "plus", label: newTripButton) { newTrip?() }
                 .disabled(newTrip == nil)
         }
@@ -397,8 +393,11 @@ struct CollectionsScreen: View {
             }
             .padding(.horizontal, DesignTokens.Space.roomy)
         }
-        if !trips.trips.isEmpty {
+        if !tripsOnly.isEmpty {
             tripsRow
+        } else if !albums.isEmpty {
+            // Albums only: their row stands, and the empty state would say nothing is there.
+            EmptyView()
         } else if trips.isRefreshing {
             HStack(spacing: DesignTokens.Space.snug) {
                 ProgressView()
@@ -430,16 +429,33 @@ struct CollectionsScreen: View {
         }
     }
 
+    /// The listed collections of each kind, in the server's order.
+    private var tripsOnly: [Trip] { CollectionsPresentation.trips(of: trips.trips) }
+    private var albums: [Trip] { CollectionsPresentation.albums(of: trips.trips) }
+
     private var tripsRow: some View {
-        row(Self.tripsHeader, trips.trips) { trip in
-            NavigationLink(value: CollectionRoute(trip, openedUnder: identity)) {
-                CollectionCard(
-                    cover: CollectionsPresentation.cover(of: trip, summary: shownSummary(of: trip)),
-                    title: trip.title,
-                    count: trip.memberCount)
+        row(Self.tripsHeader, tripsOnly) { trip in collectionCard(trip) }
+    }
+
+    /// The albums under the trips, on the trip's own card: its cover, its title and its count.
+    /// With none yet, the row stands with one New Album card, which opens the sheet on Album.
+    private var albumsRow: some View {
+        row(Self.albumsHeader, CollectionsPresentation.albumRow(albums)) { card in
+            switch card {
+            case .album(let album): collectionCard(album)
+            case .newAlbum: NewAlbumCard { newTrip = NewTripFlow(kind: .album) }
             }
-            .buttonStyle(.plain)
         }
+    }
+
+    private func collectionCard(_ trip: Trip) -> some View {
+        NavigationLink(value: CollectionRoute(trip, openedUnder: identity)) {
+            CollectionCard(
+                cover: CollectionsPresentation.cover(of: trip, summary: shownSummary(of: trip)),
+                title: trip.title,
+                count: trip.memberCount)
+        }
+        .buttonStyle(.plain)
     }
 
     /// The cards the row draws: Favorites first while a picture carries it, then the store's

@@ -331,25 +331,6 @@ struct CollectionsRootRenderTests {
     /// 2026-10-08T12:00:00Z.
     private static let now = Date(timeIntervalSince1970: 1_791_460_800)
 
-    /// MEMNG-757, decision 7: the header says how many trips there are, and nothing else.
-    @Test(
-        "the header's subtitle is the trip count alone",
-        arguments: [(0, "No trips yet"), (1, "1 trip"), (3, "3 trips")]
-    )
-    func headerSubtitle(count: Int, expected: String) {
-        #expect(CollectionsPresentation.headerSubtitle(tripCount: count) == expected)
-    }
-
-    /// A failed list has counted nothing: the header never says there is no trip.
-    @Test("the header of a failed list with no trip says it was not read, never no trips")
-    func headerOfAFailedList() {
-        let unread = CollectionsPresentation.headerUnread
-        #expect(CollectionsPresentation.headerSubtitle(tripCount: 0, listFailed: true) == unread)
-        let none = CollectionsPresentation.headerSubtitle(tripCount: 0, listFailed: false)
-        #expect(none == "No trips yet")
-        #expect(CollectionsPresentation.headerSubtitle(tripCount: 2, listFailed: true) == "2 trips")
-    }
-
     /// A change to any trip lets every trip's members go, so a card stands on the summary it last
     /// showed while its own trip is read again — but only for the same tag, span and cover.
     @Test("a card keeps its last summary through a re-read, never for a changed trip")
@@ -410,6 +391,9 @@ struct CollectionsRootRenderTests {
                 .contains { $0.convert($0.bounds, to: nil).contains(middle) }
             #expect(!onABar, "the + stands on a navigation bar at \(frame)")
             #expect(screen.press(plus), "the + took no press")
+            // The sheet asks Trip or Album first (MEMNG-803); the trip path follows Trip.
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.tripChoice) != nil })
+            #expect(screen.press(NewTripSheet.tripChoice), "Trip took no press")
             #expect(await screen.until { screen.element(labelled: NewTripSheet.create) != nil })
         }
     }
@@ -558,6 +542,9 @@ struct CollectionsRootRenderTests {
             #expect(await screen.until { screen.element(labelled: plus) != nil })
             let pressed = CollectionsHost.pressBarItem(plus, on: screen)
             #expect(pressed.took, "the + took no press: \(pressed.seen)")
+            // The sheet asks Trip or Album first (MEMNG-803); the trip path follows Trip.
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.tripChoice) != nil })
+            #expect(screen.press(NewTripSheet.tripChoice), "Trip took no press")
             #expect(await screen.until { screen.element(labelled: "portugal2026") != nil })
             #expect(screen.press("portugal2026"))
             #expect(await screen.until { screen.says("Portugal 2026") }, "the title was not filled")
@@ -1701,8 +1688,8 @@ extension CollectionsRootRenderTests {
             #expect(await screen.until { screen.element(labelled: retry) != nil })
             #expect(stores.0.lastError != nil, "precondition: the list failed")
             #expect(!screen.says(CollectionsScreen.emptyTitle), "a failed list read as no trip")
-            let unread = CollectionsPresentation.headerUnread
-            #expect(screen.says(unread), "the header did not say the list was not read")
+            let said = stores.0.lastError ?? "?"
+            #expect(screen.says(said), "the trips section did not say the list failed")
             wire.transport.trips.fail([])
             #expect(screen.press(retry), "Try Again took no press")
             #expect(await screen.until { screen.says("Portugal 2026") }, "the retry listed nothing")
@@ -1721,6 +1708,9 @@ extension CollectionsRootRenderTests {
             #expect(await screen.until { screen.element(labelled: plus) != nil })
             let opened = CollectionsHost.pressBarItem(plus, on: screen)
             #expect(opened.took, "the + took no press")
+            // The sheet asks Trip or Album first (MEMNG-803); the trip path follows Trip.
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.tripChoice) != nil })
+            #expect(screen.press(NewTripSheet.tripChoice), "Trip took no press")
             #expect(await screen.until { screen.element(labelled: "portugal2026") != nil })
             #expect(screen.press("portugal2026"))
             #expect(await screen.until { screen.says("Portugal 2026") }, "the title was not filled")
@@ -2012,5 +2002,244 @@ extension CollectionsRootRenderTests {
         selection.toggle(rows[1])
         #expect(SelectAction.coverPick(selection, in: rows) == nil, "two pictures chosen")
         #expect(SelectAction.useAsCover(count: selection.count, free: true) {}.disabled)
+    }
+}
+
+/// Trip or Album (MEMNG-803): the sheet's first step, the album form, the Album path's request
+/// and the Albums row, hosted over the real generated client with a scripted transport. A suite of
+/// its own, so a mutant of any of them is judged by these cases alone.
+@MainActor
+@Suite("Trip or Album", .serialized, .mediaGlobals)
+struct TripOrAlbumTests {
+    private let root = FileManager.default.temporaryDirectory
+        .appending(path: "trip-or-album").appending(path: UUID().uuidString)
+    private let alice = TimelineSnapshotIdentity(
+        server: URL(string: "https://memos.example.invalid")!, subject: "alice")
+
+    /// 2026-10-08T12:00:00Z.
+    private static let now = Date(timeIntervalSince1970: 1_791_460_800)
+
+    private func stores() -> (TripStore, TripMemberStore, LibraryTagStore) {
+        let trips = TripStore(identity: alice, root: root)
+        return (trips, TripMemberStore(trips: trips), LibraryTagStore())
+    }
+
+    private func screen(
+        _ stores: (TripStore, TripMemberStore, LibraryTagStore), _ wire: CollectionsWire,
+        years: LibraryBucketStore? = nil, months: LibraryBucketStore? = nil
+    ) -> some View {
+        let access = wire.access
+        return NavigationStack {
+            CollectionsScreen(
+                trips: stores.0, members: stores.1, tags: stores.2, years: years,
+                months: months, chosenCovers: nil, identity: alice, access: { access },
+                now: { Self.now })
+        }
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+    }
+
+    /// The accessibility value of the node labelled `title`: a card is one element whose label is
+    /// its title.
+    private static func value(of title: String, on screen: PressProbe.Screen) -> String? {
+        var stack: [Any] = [screen.window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.accessibilityLabel == title { return object.accessibilityValue ?? "" }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return nil
+    }
+
+    /// The on-screen frames of the nodes labelled `title`, one per place: the host exposes one
+    /// element through more than one node, each at the same frame.
+    private static func frames(of title: String, on screen: PressProbe.Screen) -> [CGRect] {
+        var found: [CGRect] = []
+        var stack: [Any] = [screen.window]
+        while let next = stack.popLast() {
+            guard let object = next as? NSObject else { continue }
+            if object.accessibilityLabel == title, !found.contains(object.accessibilityFrame) {
+                found.append(object.accessibilityFrame)
+            }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+        }
+        return found
+    }
+
+    @Test("the root stands Trips, Albums, Tags, Months and Years, in that order")
+    func theRowsOrder() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026", count: 3)
+        wire.transport.trips.seed("At the sea", count: 2, kind: "album")
+        wire.transport.answerMonths(
+            #"[{"key":"2026-10","count":12,"coverUid":"p0","tags":[],"#
+                + #""coverThumbnailUrl":"/api/attachments/p0/thumb"}]"#)
+        let view = screen(stores, wire, years: LibraryBucketStore(), months: LibraryBucketStore())
+        let headers = [
+            CollectionsScreen.tripsHeader, CollectionsScreen.albumsHeader,
+            CollectionsScreen.tagsHeader, CollectionsScreen.monthsHeader,
+            CollectionsScreen.yearsHeader,
+        ]
+        await CollectionsHost.with(view) { screen in
+            let all = await screen.until { headers.allSatisfy { screen.says($0) } }
+            #expect(all, "not every row stood: \(headers.filter { !screen.says($0) })")
+            let tops = headers.map { Self.frames(of: $0, on: screen).first?.minY ?? .nan }
+            #expect(!tops.contains { $0.isNaN } && tops == tops.sorted(), "rows at \(tops)")
+        }
+    }
+
+    @Test("with no album the Albums row is one New Album card, which opens the sheet on Album")
+    func noAlbumIsOneNewAlbumCard() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026", count: 3)
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            #expect(await screen.until { screen.says(CollectionsScreen.albumsHeader) })
+            // A card's own text reads its label too, inside the card: count the outermost.
+            let found = Self.frames(of: NewAlbumCard.title, on: screen)
+            let cards = found.filter { frame in
+                !found.contains { $0 != frame && $0.contains(frame) }
+            }
+            #expect(cards.count == 1, "the row held \(cards.count) New Album cards")
+            #expect(screen.press(NewAlbumCard.title), "New Album took no press")
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.create) != nil })
+            #expect(screen.says(NewTripSheet.albumTitleField), "the sheet did not open on Album")
+            #expect(screen.element(labelled: NewTripSheet.tripChoice) == nil, "it asked again")
+        }
+    }
+
+    @Test("with one album the Albums row holds it and no New Album card")
+    func anAlbumTakesThePlaceholdersPlace() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        wire.transport.trips.seed("At the sea", count: 2, kind: "album")
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            #expect(await screen.until { Self.value(of: "At the sea", on: screen) != nil })
+            #expect(Self.frames(of: NewAlbumCard.title, on: screen).isEmpty, "a New Album card")
+        }
+    }
+
+    @Test("the header carries the title and no count of trips")
+    func theHeaderHasNoCount() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        wire.transport.trips.seed("Portugal 2026", tag: "portugal2026", count: 3)
+        wire.transport.trips.seed("Lisbon", tag: "lisbon", count: 1)
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            #expect(await screen.until { Self.value(of: "Lisbon", on: screen) != nil })
+            #expect(screen.says(MainTab.collections.title), "no header title")
+            #expect(!screen.says("2 trips"), "the header still counts the trips")
+        }
+    }
+
+    @Test("a failed list with no trip says so in the trips section, over Try Again")
+    func aFailedListStillOffersTheRetry() async {
+        let wire = CollectionsWire()
+        wire.transport.trips.fail([TripRows.list])
+        let stores = stores()
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            let retry = CollectionsScreen.retryButton
+            #expect(await screen.until { screen.element(labelled: retry) != nil }, "no Try Again")
+            let said = stores.0.lastError ?? "?"
+            #expect(stores.0.lastError != nil, "precondition: the list failed")
+            #expect(screen.says(said), "the failure was not said")
+        }
+    }
+
+    private func sheet(
+        _ flow: NewTripFlow, _ stores: (TripStore, TripMemberStore, LibraryTagStore),
+        _ wire: CollectionsWire
+    ) -> some View {
+        NewTripSheet(
+            flow: flow, trips: stores.0, members: stores.1,
+            access: { [access = wire.access] in access }, now: { Self.now }
+        )
+        .environment(\.locale, Locale(identifier: "en_GB"))
+        .environment(\.timeZone, TimeZone(identifier: "UTC")!)
+    }
+
+    @Test("the sheet the + opens asks Trip or Album first, with nothing to create yet")
+    func theFirstStepAsks() async {
+        let wire = CollectionsWire()
+        await CollectionsHost.with(sheet(NewTripFlow(kind: nil), stores(), wire)) { screen in
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.tripChoice) != nil })
+            #expect(screen.element(labelled: NewTripSheet.albumChoice) != nil, "no Album choice")
+            #expect(screen.element(labelled: NewTripSheet.create) == nil, "Create before a kind")
+            #expect(!screen.says(NewTripSheet.allTagsHeader), "the tags before a kind")
+        }
+    }
+
+    @Test("choosing Album shows a title and Create, and no tag and no dates")
+    func choosingAlbumHidesTagAndDates() async {
+        let wire = CollectionsWire()
+        let flow = NewTripFlow(kind: nil)
+        await CollectionsHost.with(sheet(flow, stores(), wire)) { screen in
+            let album = NewTripSheet.albumChoice
+            #expect(await screen.until { screen.element(labelled: album) != nil })
+            #expect(screen.press(album), "Album took no press")
+            #expect(await screen.until { screen.element(labelled: NewTripSheet.create) != nil })
+            #expect(flow.kind == .album)
+            #expect(screen.says(NewTripSheet.albumTitleField), "no album title field")
+            #expect(!screen.says(NewTripSheet.datesHeader), "an album offered dates")
+            #expect(!screen.says(NewTripSheet.allTagsHeader), "an album offered tags")
+            #expect(!screen.says(NewTripSheet.addDates), "an album offered Add Dates")
+            #expect(screen.element(labelled: "portugal2026") == nil, "an album offered a tag")
+        }
+    }
+
+    @Test("an album in the list stands in an Albums row, and no Trips row without a trip")
+    func anAlbumGetsItsRow() async {
+        let wire = CollectionsWire()
+        let stores = stores()
+        wire.transport.trips.seed("At the sea", count: 2, kind: "album")
+        await CollectionsHost.with(screen(stores, wire)) { screen in
+            #expect(await screen.until { screen.says(CollectionsScreen.albumsHeader) })
+            // The card itself; its count is the scripted server's, which counts a tag's listing.
+            #expect(await screen.until { Self.value(of: "At the sea", on: screen) != nil })
+            #expect(!screen.says(CollectionsScreen.tripsHeader), "a Trips row for an album")
+            #expect(!screen.says(CollectionsScreen.emptyTitle), "the empty state over an album")
+        }
+    }
+
+    @Test("an album's Create is on with a title alone, and a flow that asks has none")
+    func anAlbumNeedsATitleAlone() {
+        let asking = NewTripFlow(kind: nil)
+        asking.title = "At the sea"
+        #expect(!asking.canCreate, "Create before Trip or Album was answered")
+        let album = NewTripFlow(kind: nil)
+        album.choose(kind: .album)
+        #expect(!album.canCreate, "Create with no title")
+        album.title = "  "
+        #expect(!album.canCreate, "Create with a blank title")
+        album.title = "At the sea"
+        #expect(album.canCreate)
+        album.choose(kind: .trip)
+        #expect(album.kind == .album, "a kind chosen was changed")
+    }
+
+    /// Audit B1: what the server was sent is read from the request the stub RECORDED, never from
+    /// the record it answered.
+    @Test("an album's Create posts kind album, no tag and no span, to /api/collections")
+    func anAlbumCreatePostsItsKind() async throws {
+        let wire = CollectionsWire()
+        let store = TripStore(identity: alice, root: root)
+        let flow = NewTripFlow(kind: .album)
+        flow.title = "At the sea"
+        let made = await flow.create(in: store, using: wire.access)
+
+        let posts = wire.transport.trips.calls(TripRows.create)
+        try #require(posts.count == 1, "the Create sent \(posts.count) POSTs")
+        #expect(posts[0].path == "/api/collections", "the POST went to \(posts[0].path)")
+        let sent = posts[0].object
+        #expect(sent["kind"] as? String == "album", "the body said \(sent)")
+        #expect(sent["title"] as? String == "At the sea")
+        for absent in ["tag", "spanStart", "spanEnd", "tz"] {
+            #expect(sent[absent] == nil, "the album's body carried \(absent)")
+        }
+        #expect(made?.kind == .album)
+        #expect(store.trips.map(\.kind) == [.album])
     }
 }

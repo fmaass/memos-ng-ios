@@ -10,7 +10,7 @@ import Testing
 /// assertion.
 @Suite("Collections contract")
 struct CollectionsContractTests {
-    @Test("the nine collection operations are generated under their server operationIds")
+    @Test("the ten collection operations are generated under their server operationIds")
     func collectionOperationsAreGenerated() {
         let generated: [(String, String)] = [
             (
@@ -44,6 +44,10 @@ struct CollectionsContractTests {
             (
                 Operations.ListMembersApiCollectionsUidAttachmentsGet.id,
                 "list_members_api_collections__uid__attachments_get"
+            ),
+            (
+                Operations.RemoveMemberApiCollectionsUidMembersAttachmentUidDelete.id,
+                "remove_member_api_collections__uid__members__attachment_uid__delete"
             ),
             (
                 Operations.UpdateCollectionApiCollectionsUidPatch.id,

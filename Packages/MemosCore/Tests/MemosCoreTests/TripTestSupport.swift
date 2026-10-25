@@ -34,6 +34,7 @@ enum TripWire {
     static func collection(
         _ uid: String,
         title: String = "Trip",
+        kind: String? = "trip",
         tag: String? = nil,
         spanStart: String? = nil,
         spanEnd: String? = nil,
@@ -43,7 +44,8 @@ enum TripWire {
         updatedAt: String = "2026-10-10T14:05:00Z"
     ) -> String {
         """
-        {"uid":"\(uid)","title":"\(title)","tag":\(quoted(tag)),\
+        {"uid":"\(uid)","title":"\(title)",\(kind.map { "\"kind\":\"\($0)\"," } ?? "")\
+        "tag":\(quoted(tag)),\
         "spanStart":\(quoted(spanStart)),"spanEnd":\(quoted(spanEnd)),"tz":\(quoted(tz)),\
         "cover":\(cover ?? "null"),"memberCount":\(memberCount),"createdBy":"owner",\
         "createdAt":"2026-10-10T14:05:00Z","updatedAt":"\(updatedAt)"}

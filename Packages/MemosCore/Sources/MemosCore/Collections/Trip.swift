@@ -6,8 +6,17 @@ import MemosAPI
 /// A trip is a household object: every signed-in member lists, opens and edits it, and the last
 /// write wins. Its identity is the server's `uid`.
 public struct Trip: Sendable, Equatable, Identifiable {
+    /// What a collection is made of, fixed when it is created (memos-ng 2.6.0).
+    public enum Kind: String, Sendable, Hashable, CaseIterable {
+        /// Its tag's and its span's pictures, less its exclusions.
+        case trip
+        /// No tag and no span: the pictures added to it one by one.
+        case album
+    }
+
     public var uid: String
     public var title: String
+    public var kind: Kind
     /// The tag whose pictures are members, or nil for a trip made of its span alone.
     public var tag: String?
     /// The window in time whose pictures are members, both ends included; both or neither.
@@ -28,6 +37,7 @@ public struct Trip: Sendable, Equatable, Identifiable {
     public init(
         uid: String,
         title: String,
+        kind: Kind = .trip,
         tag: String? = nil,
         spanStart: Date? = nil,
         spanEnd: Date? = nil,
@@ -40,6 +50,7 @@ public struct Trip: Sendable, Equatable, Identifiable {
     ) {
         self.uid = uid
         self.title = title
+        self.kind = kind
         self.tag = tag
         self.spanStart = spanStart
         self.spanEnd = spanEnd
@@ -51,11 +62,18 @@ public struct Trip: Sendable, Equatable, Identifiable {
         self.updatedAt = updatedAt
     }
 
-    /// The projection of the server's record.
+    /// The projection of the server's record. Its kind is the record's own: the contract always
+    /// sends one, and a record without it fails to decode rather than being taken for a trip.
     init(_ generated: Components.Schemas.CollectionOut, baseURL: URL) {
+        let kind: Kind =
+            switch generated.kind {
+            case .trip: .trip
+            case .album: .album
+            }
         self.init(
             uid: generated.uid,
             title: generated.title,
+            kind: kind,
             tag: generated.tag,
             spanStart: generated.spanStart,
             spanEnd: generated.spanEnd,
@@ -173,6 +191,9 @@ public struct NewTripRequest: Sendable, Hashable {
     public let scope: TimelineSnapshotIdentity
     public let idempotencyKey: String
     public let title: String
+    /// Part of the request's identity: the same key under another kind is another create, which
+    /// the store refuses while the first is out.
+    public let kind: Trip.Kind
     public let tag: String?
     public let spanStart: Date?
     public let spanEnd: Date?
@@ -181,6 +202,7 @@ public struct NewTripRequest: Sendable, Hashable {
     public init(
         scope: TimelineSnapshotIdentity,
         title: String,
+        kind: Trip.Kind = .trip,
         tag: String? = nil,
         spanStart: Date? = nil,
         spanEnd: Date? = nil,
@@ -190,15 +212,23 @@ public struct NewTripRequest: Sendable, Hashable {
         self.scope = scope
         self.idempotencyKey = idempotencyKey
         self.title = title
+        self.kind = kind
         self.tag = tag
         self.spanStart = spanStart
         self.spanEnd = spanEnd
         self.tz = tz
     }
 
+    /// The kind is always sent, a trip's too: the server's default is not relied on.
     var body: Components.Schemas.CollectionCreate {
-        .init(
+        let kind: Components.Schemas.CollectionCreate.KindPayload =
+            switch self.kind {
+            case .trip: .trip
+            case .album: .album
+            }
+        return .init(
             idempotencyKey: idempotencyKey,
+            kind: kind,
             spanEnd: spanEnd,
             spanStart: spanStart,
             tag: tag,
