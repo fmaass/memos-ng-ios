@@ -325,11 +325,18 @@ struct TripView: View {
     /// The delete dialog's question.
     static func deleteQuestion(_ title: String) -> String { "Delete “\(title)”?" }
 
-    /// The footer under the grid: the cap, only when the drain stopped at it.
-    static func capNote(_ state: TripMemberState, cap: Int = TripMemberStore.memberCap)
-        -> String?
-    {
-        state == .truncated ? "Showing the first \(cap) photos of this trip" : nil
+    /// The footer under the grid: the cap, only when the read stopped at it, and which end of the
+    /// pictures it kept — the read walks in `order`, so a cut one holds the oldest pictures under
+    /// oldest first and the newest under newest first (MEMNG-764).
+    static func capNote(
+        _ state: TripMemberState, order: MediaLibraryOrder,
+        cap: Int = TripMemberStore.memberCap
+    ) -> String? {
+        guard state == .truncated else { return nil }
+        switch order {
+        case .oldestFirst: return "Showing the first \(cap) photos of this trip"
+        case .newestFirst: return "Showing the newest \(cap) photos of this trip"
+        }
     }
 
     /// The footer of a journal that stopped at the cap: it counts memos, not photos.
@@ -1075,7 +1082,9 @@ struct TripView: View {
     private func footerText(_ shown: CollectionScope, state: TripMemberState, empty: Bool)
         -> String?
     {
-        if let note = Self.capNote(state, cap: memberStore.memberCap) { return note }
+        if let note = Self.capNote(state, order: readOrder, cap: memberStore.memberCap) {
+            return note
+        }
         let drained = state == .complete || state == .truncated
         return drained && empty && memberStore.lastError == nil ? Self.emptyTitle(for: shown) : nil
     }
@@ -1461,6 +1470,13 @@ struct TripView: View {
         let query = gridQuery
         if query.isUnfiltered { return true }
         return !scope.isTrip && query.isOrderOnly && shownMembers.summary?.complete == true
+    }
+
+    /// The order the read the grid draws walked in, which decides the end a cut one kept: the
+    /// drain's own (oldest first) whenever the grid draws the members, however they are turned
+    /// round on screen; the grid's read's otherwise.
+    private var readOrder: MediaLibraryOrder {
+        readsMembers ? TripMemberQuery.unfiltered.order : gridQuery.order
     }
 
     /// What the grid draws: `viewerRows`, narrowed to the chosen pictures while Show Selected is

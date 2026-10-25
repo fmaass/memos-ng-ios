@@ -396,6 +396,25 @@ struct CollectionScreenTests {
         }
     }
 
+    /// MEMNG-764: a collection that is no trip, sorted newest first by the device, reads its own
+    /// grid in `taken_desc` once the drain stopped at the cap: the newest pictures, and a footer
+    /// that says so.
+    @Test("a capped collection sorted newest first keeps the newest and says so")
+    func aCappedCollectionSortedNewestFirst() async {
+        let wire = TripWire()
+        let held = stores(memberCap: 3)
+        let preferences = Self.preferences(order: .newestFirst)
+        let host = screen(held, wire, Self.tag, preferences: preferences)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let kept = ["p4", "p3", "p2"]
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == kept }
+            #expect(grid, "the newest were not kept: \(TripProbe.tiles(in: screen.window))")
+            let note = "Showing the newest 3 photos of this trip"
+            #expect(await screen.until { screen.says(note) }, "no newest note on screen")
+            #expect(!screen.says("Showing the first 3 photos of this trip"))
+        }
+    }
+
     // MARK: - The line under the title
 
     @Test("a month says its period and the card's count, then span and count once complete")

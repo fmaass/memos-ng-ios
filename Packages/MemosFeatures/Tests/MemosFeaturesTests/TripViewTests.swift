@@ -90,13 +90,17 @@ struct TripManageTests {
         #expect(manage.question == nil)
     }
 
-    @Test("the footer names the cap only when the drain stopped at it")
-    func capNote() {
+    @Test(
+        "the footer names the cap only when the read stopped at it, and the end it kept",
+        arguments: MediaLibraryOrder.allCases)
+    func capNote(order: MediaLibraryOrder) {
+        let kept = order == .oldestFirst ? "first" : "newest"
         #expect(
-            TripView.capNote(.truncated, cap: 2000) == "Showing the first 2000 photos of this trip")
-        #expect(TripView.capNote(.complete, cap: 2000) == nil)
-        #expect(TripView.capNote(.draining, cap: 2000) == nil)
-        #expect(TripView.capNote(.notLoaded, cap: 2000) == nil)
+            TripView.capNote(.truncated, order: order, cap: 2000)
+                == "Showing the \(kept) 2000 photos of this trip")
+        #expect(TripView.capNote(.complete, order: order, cap: 2000) == nil)
+        #expect(TripView.capNote(.draining, order: order, cap: 2000) == nil)
+        #expect(TripView.capNote(.notLoaded, order: order, cap: 2000) == nil)
     }
 
     @Test("a trip that left the store leaves the stack, with everything pushed above it")
@@ -633,7 +637,8 @@ struct TripScreenRenderTests {
             let note = TripView.journalCapNote(.truncated, cap: 2) ?? "?"
             let said = await screen.until { screen.says(note) }
             #expect(said, "no memo cap note: \(TripProbe.labels(in: screen.window))")
-            #expect(!screen.says(TripView.capNote(.truncated, cap: 2) ?? "?"), "it counts photos")
+            let photos = TripView.capNote(.truncated, order: .oldestFirst, cap: 2) ?? "?"
+            #expect(!screen.says(photos), "it counts photos")
             #expect(stores.1.journalState(for: record) == .truncated)
         }
     }
@@ -776,9 +781,54 @@ struct TripScreenRenderTests {
         let stores = stores(memberCap: 3)
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
-            let note = TripView.capNote(.truncated, cap: 3) ?? "?"
+            let note = "Showing the first 3 photos of this trip"
+            #expect(TripView.capNote(.truncated, order: .oldestFirst, cap: 3) == note)
             #expect(await screen.until { screen.says(note) })
             #expect(stores.1.state(for: record) == .truncated)
+            let oldest = Array(Self.files.prefix(3))
+            let kept = await screen.until { TripProbe.tiles(in: screen.window) == oldest }
+            #expect(kept, "the oldest were not kept: \(TripProbe.tiles(in: screen.window))")
+            #expect(!screen.says("Showing the newest 3 photos of this trip"))
+        }
+    }
+
+    /// MEMNG-764: sorted newest first the trip's grid is its own read in `taken_desc`, so a read
+    /// that stops at the cap keeps the NEWEST pictures — and the footer says so, never "first".
+    /// A trip of exactly the cap is read whole and says nothing. Turned back to oldest first, the
+    /// grid is the drain again: the oldest pictures, and the "first" sentence.
+    @Test(
+        "a trip sorted newest first that stops at the cap keeps the newest and says so",
+        arguments: [3, 5])
+    func aCappedTripSortedNewestFirst(cap: Int) async {
+        let wire = TripWire()
+        let stores = stores(memberCap: cap)
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let manage = TripManage()
+        manage.query = TripMemberQuery(order: .newestFirst)
+        let newest = "Showing the newest \(cap) photos of this trip"
+        let first = "Showing the first \(cap) photos of this trip"
+        let host = trip(stores, wire, record, manage: manage)
+        await CollectionsHost.with(host, height: 3000) { screen in
+            let kept = Array(Self.files.reversed().prefix(cap))
+            let grid = await screen.until { TripProbe.tiles(in: screen.window) == kept }
+            #expect(grid, "the newest were not kept: \(TripProbe.tiles(in: screen.window))")
+            let truncated = cap < Self.files.count
+            let read = stores.1.filteredState(for: record, query: manage.query)
+            #expect(read == (truncated ? .truncated : .complete), "the read: \(read)")
+            if truncated {
+                #expect(await screen.until { screen.says(newest) }, "no newest note on screen")
+            } else {
+                await screen.settle(turns: 10)
+                #expect(!screen.says(newest), "a trip read whole says it was cut")
+            }
+            #expect(!screen.says(first), "the oldest-first sentence under a newest-first grid")
+            guard truncated else { return }
+            manage.query = .unfiltered
+            let oldest = Array(Self.files.prefix(cap))
+            let back = await screen.until { TripProbe.tiles(in: screen.window) == oldest }
+            #expect(back, "turned back, the grid: \(TripProbe.tiles(in: screen.window))")
+            #expect(await screen.until { screen.says(first) }, "no first note once turned back")
+            #expect(!screen.says(newest), "the newest sentence outlived the sort")
         }
     }
 
