@@ -14,6 +14,8 @@ struct LibraryHeader<MenuContent: View>: View {
     /// The Select capsule's action, or nil where there is nothing to select — Years and Months,
     /// whose tiles are days and years rather than files.
     var select: (() -> Void)?
+    /// Whether All's grid has scrolled off its top (MEMNG-676): the title collapses.
+    var collapsed = false
     /// Whether the grid is in select mode, which swaps the controls on the right.
     var selecting = false
     /// Select mode's actions menu: Add, which opens the Add to collection sheet (MEMNG-855).
@@ -22,7 +24,7 @@ struct LibraryHeader<MenuContent: View>: View {
     @ViewBuilder let menu: () -> MenuContent
 
     var body: some View {
-        ScreenHeader(title: "Library", subtitle: subtitle) {
+        ScreenHeader(title: "Library", subtitle: subtitle, collapsed: collapsed) {
             if selecting {
                 selectModeControls
             } else {
@@ -70,6 +72,12 @@ struct ScreenHeader<Trailing: View>: View {
     /// The line under the title, or nil for none. Its line stays reserved either way, so the
     /// title stands where every tab's does.
     let subtitle: String?
+    /// Whether the scroll under the header has left its top (MEMNG-676, the owner's answer A of
+    /// 2026-10-23): the large title gives way to a small centred one and the line under it goes,
+    /// as in Photos, so neither is drawn over the day headings and the date pill below. The large
+    /// pair keeps its room, unseen: the bar's height is the grid's top inset, and a bar that
+    /// shrank as it collapsed would move the grid under the reader and the scroll that decided it.
+    var collapsed = false
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
@@ -84,11 +92,32 @@ struct ScreenHeader<Trailing: View>: View {
                     .lineLimit(1)
                     .accessibilityHidden(subtitle == nil)
             }
+            .opacity(collapsed ? 0 : 1)
+            .accessibilityHidden(collapsed)
             Spacer(minLength: DesignTokens.Space.snug)
             trailing()
         }
         .padding(.horizontal, DesignTokens.Space.roomy)
         .padding(.vertical, DesignTokens.Space.snug)
+        // Over the whole bar, so the small title stands at the screen's centre, not the middle of
+        // what the controls leave.
+        .overlay {
+            if collapsed {
+                Text(title)
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: collapsed)
+    }
+}
+
+/// When a screen header collapses (MEMNG-676): once the scroll under it has moved more than a
+/// point off its top, so a layout's fraction of a point at rest leaves the large title standing.
+/// Nonisolated: it is asked from a scroll geometry reading, which may run off the main actor.
+nonisolated enum HeaderCollapse {
+    static func collapses(scrolledBy distance: Double) -> Bool {
+        distance > 1
     }
 }
 

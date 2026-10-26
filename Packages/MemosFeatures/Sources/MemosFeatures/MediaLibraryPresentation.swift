@@ -97,7 +97,9 @@ public struct LibraryDayGroup: Identifiable, Equatable, Sendable {
     public var id: String { key }
     /// What the scroll is brought to when a jump lands on this day: its heading (MEMNG-587, moved
     /// to the heading by decision 13).
-    public var headingID: String { "day:\(key)" }
+    public var headingID: String { Self.headingID(key) }
+    /// A day's heading id from its key alone, for what knows only the key (`DayMarkers`).
+    public static func headingID(_ key: String) -> String { "day:\(key)" }
     public var pictures: [LibraryDayPicture] { bands.flatMap(\.pictures) }
 }
 

@@ -25,6 +25,7 @@ Your correction of 2026-09-23 from the second set of screenshots. The Library he
 
 - Options button opens a glass dropdown under the buttons with three groups: sort ("Sort by Newest First" checked by default, "Sort by Oldest First"), kind ("All Items" checked by default, "Photos", "Videos") and tags ("All tags" checked by default, then every tag with its picture count). Each row carries a checkmark on the active choice; sort, kind and tag land in the URL. The Photos app's extra filters (Favorites, Edited, Screenshots, Shared) and view options are not part of this round.
 - Select enters select mode (section 7). The capsule is replaced by round glass buttons while selecting.
+- Scrolled, on All (your answer A of 2026-10-23, MEMNG-676): once the All grid leaves its top, the large "Library" shrinks to a small "Library" centred in the bar, as in Photos, and the "All Items · Newest First" line goes with it. The two glass buttons stay where they are, and the bar keeps its height, so the pictures under it do not jump as it collapses. Back at the top, the large title and its line return. Years and Months keep the large title while they scroll. The date pill stays top centre under the header, and steps aside while a day heading passes under it, so the title, the line, the day heading and the pill are never drawn on top of each other.
 - On Timeline the header is settings top-left and new-memo top-right, fixed while scrolling, as in the iOS app. Places keeps its own header.
 
 ## 3 · Finding a picture — By tag, from the options menu. No text search.

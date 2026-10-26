@@ -1048,7 +1048,9 @@ struct MediaLibraryRenderTests {
         let target = "Thu 17 Sep"
         let pillLabel = "Thu · 17 Sep 2026"
 
-        // Scroll down until the target heading is built, then put it 10 pt above the line.
+        // Scroll down until the target heading is built, then put it 40 pt above the line: past
+        // the line, so its day is the one at the top, and clear of the pill's place under it,
+        // where a heading still passing through sends the pill aside (MEMNG-676).
         var placed = false
         for _ in 0..<80 where !placed {
             try await Task.sleep(for: .milliseconds(50))
@@ -1062,7 +1064,7 @@ struct MediaLibraryRenderTests {
             if let heading = Self.element(target, in: window),
                 heading.accessibilityFrame.minY < top + 400
             {
-                let delta = heading.accessibilityFrame.minY - top + 10
+                let delta = heading.accessibilityFrame.minY - top + 40
                 scroll.setContentOffset(
                     CGPoint(x: 0, y: scroll.contentOffset.y + delta), animated: false)
                 placed = true

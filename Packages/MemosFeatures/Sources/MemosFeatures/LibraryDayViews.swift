@@ -77,6 +77,20 @@ final class DayMarkers {
     /// Where the element starts on the page, while it is built.
     func top(of id: String) -> Double? { byID[id]?.marker.top }
 
+    /// Whether a built day heading reaches into the page's span `top`..<`bottom` (MEMNG-676):
+    /// the date pill's place under the header, which a heading scrolling past would be drawn
+    /// beneath. A heading ends where the next built element starts, as `atLine()` reads it.
+    func headingCrosses(from top: Double, to bottom: Double) -> Bool {
+        let down = byID.map { (id: $0.key, marker: $0.value.marker) }
+            .sorted { $0.marker.top < $1.marker.top }
+        for (place, element) in down.enumerated()
+        where element.id == LibraryDayGroup.headingID(element.marker.key) {
+            let end = place + 1 < down.count ? down[place + 1].marker.top : .infinity
+            if element.marker.top < bottom, end > top { return true }
+        }
+        return false
+    }
+
     func place(_ id: String, day: String, order: Int, top: CGFloat) {
         byID[id] = (order, DayMarker(key: day, top: Double(top)))
     }
@@ -171,6 +185,11 @@ final class DatePillModel {
     private(set) var day: String?
     private(set) var shown = false
     private(set) var serial = 0
+    /// A day heading is passing under the pill (MEMNG-676): it steps aside, unanimated, so the
+    /// heading — which names a day itself — is never drawn beneath it, and returns once it is past.
+    var covered = false
+    /// The pill's drawn height, which `covered` is judged over.
+    var height: Double = 0
 
     /// A scroll moved the page; `top` is the day now at the top of the screen, or nil at the top
     /// of the page, where no heading has reached the line yet and the pill stays hidden.
@@ -197,10 +216,12 @@ struct DatePill: View {
 
     /// What a test and VoiceOver's rotor find the pill by.
     static let identifier = "date-pill"
+    /// How far under the header the pill stands.
+    static let gap = DesignTokens.Space.snug
 
     var body: some View {
         Group {
-            if model.shown, let day = model.day {
+            if model.shown, !model.covered, let day = model.day {
                 Button {
                     showMonth(String(day.prefix(7)))
                 } label: {
@@ -211,6 +232,11 @@ struct DatePill: View {
                 }
                 .buttonStyle(.plain)
                 .glassEffect(.regular.interactive(), in: .capsule)
+                .onGeometryChange(for: Double.self) {
+                    Double($0.size.height)
+                } action: {
+                    model.height = $0
+                }
                 .accessibilityIdentifier(Self.identifier)
                 .accessibilityHint("Opens Months at this month")
                 .transition(.opacity)

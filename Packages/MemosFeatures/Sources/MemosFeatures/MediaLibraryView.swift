@@ -53,6 +53,9 @@ struct MediaLibraryView: View {
     @State private var results = SelectResults()
     /// The Add to collection sheet is up (MEMNG-855).
     @State private var addingToCollection = false
+    /// Whether All's grid has left its top, which collapses the header (MEMNG-676). Only All's
+    /// grid reports it, and leaving All forgets it, so Years and Months keep the large title.
+    @State private var allScrolled = false
     private var deleting: LibraryDeleteFlow { results.deleting }
     /// Select mode's memo actions (MEMNG-788): Add (MEMNG-855) and the last run's banner.
     private var acting: MemoActionFlow { results.acting }
@@ -287,6 +290,8 @@ struct MediaLibraryView: View {
         // Select mode belongs to All: any way off it ends select mode.
         .onChange(of: choice.scope) { _, scope in
             if scope != .all { selection.close() }
+            // The grid this came from is gone, and the one All builds next starts at its top.
+            allScrolled = false
         }
         // Every way select mode ends comes through here — close, leaving All, another account —
         // and each one abandons a share still fetching, so it can never offer its files later.
@@ -502,6 +507,12 @@ struct MediaLibraryView: View {
         // The Library's scroll is what swaps the tab bar for the scope toolbar (MEMNG-679), on
         // each of its three scroll views.
         .feedsDock(dock)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            HeaderCollapse.collapses(
+                scrolledBy: Double(geometry.contentOffset.y + geometry.contentInsets.top))
+        } action: { _, collapsed in
+            allScrolled = collapsed
+        }
         .overlay {
             if library.isJumping {
                 ProgressView()
@@ -565,6 +576,7 @@ struct MediaLibraryView: View {
                 tag: library.tag
             ),
             select: choice.scope == .all ? { selection.begin() } : nil,
+            collapsed: allScrolled,
             selecting: selection.isActive,
             menuRows: selectRows,
             close: { selection.close() }
@@ -1182,6 +1194,8 @@ struct LibraryGrid: View {
                     markers.line = line
                     if drawn.key == drawnKey { drawn.atLine = markers.atLine() }
                     pill.scrolled(to: topDay(markers.inOrder, threshold: line.y + 1))
+                    let under = line.y + Double(DatePill.gap)
+                    pill.covered = markers.headingCrosses(from: under, to: under + pill.height)
                     // A landing still waiting asks again whenever the scroll moves: its heading is
                     // reached only once the scroll has actually brought it to the line.
                     bring(proxy)
@@ -1195,7 +1209,7 @@ struct LibraryGrid: View {
                 }
                 .overlay(alignment: .top) {
                     DatePill(model: pill, showMonth: showMonth)
-                        .padding(.top, DesignTokens.Space.snug)
+                        .padding(.top, DatePill.gap)
                 }
         }
     }

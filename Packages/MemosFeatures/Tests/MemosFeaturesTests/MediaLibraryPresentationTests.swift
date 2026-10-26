@@ -146,6 +146,38 @@ struct MediaLibraryPresentationTests {
         #expect(size.width == side)
         #expect(size.height == size.width, "a tile that is not square breaks the row it sits in")
     }
+
+    /// The header collapses once the scroll under it has moved more than a point off its top
+    /// (MEMNG-676): not at rest, not on a layout's fraction of a point, not pulled past the top.
+    @Test(
+        "the header collapses only past a point of scroll",
+        arguments: [
+            (-40.0, false), (0.0, false), (0.33, false), (1.0, false), (1.5, true),
+            (600.0, true),
+        ])
+    func headerCollapsesPastAPoint(distance: Double, collapses: Bool) {
+        #expect(HeaderCollapse.collapses(scrolledBy: distance) == collapses)
+    }
+
+    /// The date pill steps aside while a day heading passes under it (MEMNG-676): a heading
+    /// reaching into the pill's span, from either side, crosses it; one ending at its top, one
+    /// starting at its foot, and a band (a heading's day, not a heading) do not.
+    @Test("a day heading crosses the pill's span only where it reaches into it")
+    func headingCrossesThePill() {
+        let markers = DayMarkers()
+        let day = "2026-09-09"
+        markers.place(LibraryDayGroup.headingID(day), day: day, order: 0, top: 100)
+        markers.place("band-\(day)-0", day: day, order: 1, top: 120)
+        markers.place("band-\(day)-1", day: day, order: 2, top: 400)
+        #expect(markers.headingCrosses(from: 90, to: 110))
+        #expect(markers.headingCrosses(from: 110, to: 140))
+        #expect(markers.headingCrosses(from: 80, to: 101))
+        #expect(!markers.headingCrosses(from: 60, to: 100), "ends at the heading's top")
+        #expect(!markers.headingCrosses(from: 120, to: 160), "starts where the heading ends")
+        #expect(!markers.headingCrosses(from: 200, to: 240), "only a band there")
+        markers.remove(LibraryDayGroup.headingID(day))
+        #expect(!markers.headingCrosses(from: 90, to: 110), "a heading let go of is not drawn")
+    }
 }
 
 /// What the app's main navigation offers, as a list rather than as literals in a `TabView`.

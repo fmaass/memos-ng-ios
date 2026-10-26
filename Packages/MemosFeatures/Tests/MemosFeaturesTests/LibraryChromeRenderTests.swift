@@ -510,6 +510,228 @@ extension MediaImageLoaderTests {
         }
     }
 
+    /// The four layers at the top of a scrolled All grid, as drawn (MEMNG-676): the header's title
+    /// and its line, the day headings the reader can see below the header, and the date pill.
+    private struct TopLayers {
+        var title: [CGRect] = []
+        var line: [CGRect] = []
+        var headings: [(String, CGRect)] = []
+        var pill: [CGRect] = []
+        /// Where the header ends: the scroll view's top inset, in the window.
+        var barLine: CGFloat = 0
+
+        var described: String {
+            func row(_ name: String, _ frame: CGRect) -> String {
+                let across = "\(Int(frame.minX))…\(Int(frame.maxX))"
+                return "\(name) x=\(across) y=\(Int(frame.minY))…\(Int(frame.maxY))"
+            }
+            var rows = ["barLine=\(Int(barLine))"]
+            rows += title.map { row("title", $0) } + line.map { row("line", $0) }
+            rows += pill.map { row("pill", $0) } + headings.map { row("heading \($0.0)", $0.1) }
+            return rows.joined(separator: "; ")
+        }
+
+        /// Every pair of the four that overlap, named.
+        var overlaps: [String] {
+            let named: [(String, CGRect)] =
+                title.map { ("title", $0) } + line.map { ("line", $0) }
+                + pill.map { ("pill", $0) } + headings.map { ("heading \($0.0)", $0.1) }
+            var found: [String] = []
+            for (index, first) in named.enumerated() {
+                for second in named.dropFirst(index + 1)
+                where first.1.intersection(second.1).height > 0.5
+                    && first.1.intersection(second.1).width > 0.5
+                {
+                    found.append("\(first.0) × \(second.0)")
+                }
+            }
+            return found
+        }
+    }
+
+    /// The Library's header line for the default filter and order.
+    private static let allLine = MediaLibraryPresentation.subtitle(
+        filter: .all, order: .newestFirst, tag: nil)
+
+    private static func topLayers(in window: UIWindow) -> TopLayers {
+        var layers = TopLayers()
+        if let scroller = mainScroll(in: window) {
+            layers.barLine =
+                scroller.convert(scroller.bounds, to: window).minY
+                + scroller.adjustedContentInset.top
+        }
+        let top = window.bounds.height / 2
+        var stack: [Any] = [window]
+        // An element is reached both as a view's accessibility element and through its subviews.
+        var visited = Set<ObjectIdentifier>()
+        while let node = stack.popLast() {
+            guard let object = node as? NSObject, !(object is UITabBar) else { continue }
+            guard visited.insert(ObjectIdentifier(object)).inserted else { continue }
+            if let view = object as? UIView, view.isHidden || view.alpha < 0.01 { continue }
+            stack.append(contentsOf: object.accessibilityElements ?? [])
+            if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
+            let drawn = Self.frame(of: object)
+            guard drawn.width > 0, drawn.height > 0, drawn.minY < top else { continue }
+            let label = object.accessibilityLabel ?? ""
+            // SwiftUI's accessibility nodes answer the selector without declaring the protocol.
+            let identifier =
+                object.responds(to: Selector(("accessibilityIdentifier")))
+                ? object.value(forKey: "accessibilityIdentifier") as? String : nil
+            if identifier == DatePill.identifier {
+                layers.pill.append(drawn)
+            } else if label == "Library", object.accessibilityTraits.contains(.header) {
+                layers.title.append(drawn)
+            } else if label == allLine {
+                layers.line.append(drawn)
+            } else if object.accessibilityTraits.contains(.header), !label.isEmpty,
+                drawn.maxY > layers.barLine
+            {
+                layers.headings.append((label, drawn))
+            }
+        }
+        return layers
+    }
+
+    /// Waits for the date pill a scroll shows, and reads the top of the screen while it stands.
+    private func layersWithPill(_ window: UIWindow) async -> TopLayers {
+        var layers = Self.topLayers(in: window)
+        for _ in 0..<40 where layers.pill.isEmpty {
+            await chromeSettle(window)
+            layers = Self.topLayers(in: window)
+        }
+        return layers
+    }
+
+    /// A scrolled All grid collapses the header the way Photos does (MEMNG-676, owner's answer A
+    /// of 2026-10-23): the large title becomes a small centred "Library" and the line under it
+    /// goes, so the title, the line, the day headings and the date pill stop piling up at the top.
+    /// Read at a run of scroll positions, each just moved so the pill stands, from the frames as
+    /// drawn; at the top again, the large title and its line are back where they were.
+    @Test("a scrolled All grid collapses the header, and nothing at its top overlaps")
+    func scrolledAllCollapsesTheHeader() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let rest = Self.topLayers(in: window)
+            Attachment.record(rest.described, named: "676-rest")
+            let restTitle = rest.title.first ?? .zero
+            #expect(rest.title.count == 1, "at rest: \(rest.described)")
+            #expect(rest.line.count == 1, "at rest, the line is drawn: \(rest.described)")
+            #expect(abs(restTitle.minX - DesignTokens.Space.roomy) < 1, "\(rest.described)")
+
+            await scrollDown(window)
+            var seen: [String] = []
+            var withHeadings = 0
+            var withPill = 0
+            for step in 0..<40 {
+                await scrollFurther(window, by: 12)
+                let layers = await layersWithPill(window)
+                seen.append("step \(step): \(layers.described)")
+                if step == 0 {
+                    Self.shoot("676-all-scrolled", window)
+                    Attachment.record(layers.described, named: "676-scrolled")
+                }
+                let title = layers.title.first ?? .zero
+                #expect(layers.title.count == 1, "step \(step): \(layers.described)")
+                #expect(layers.line.isEmpty, "step \(step), the line stayed: \(layers.described)")
+                // The bar keeps its height, so the grid under it does not move as it collapses.
+                #expect(
+                    abs(layers.barLine - rest.barLine) < 1,
+                    "step \(step), the bar moved: \(layers.described)")
+                // The pill stands, or steps aside for a day heading passing through its place.
+                let place = layers.barLine...(layers.barLine + 2 * HeaderGlassCircle.control)
+                let passing = layers.headings.contains { place.overlaps($0.1.minY...$0.1.maxY) }
+                if !layers.pill.isEmpty { withPill += 1 }
+                #expect(
+                    !layers.pill.isEmpty || passing,
+                    "step \(step), no pill and no heading under it: \(layers.described)")
+                if !layers.headings.isEmpty { withHeadings += 1 }
+                #expect(
+                    abs(title.midX - window.bounds.midX) < 1,
+                    "step \(step), the title is not centred: \(layers.described)")
+                #expect(
+                    title.height < restTitle.height,
+                    "step \(step), the title did not shrink: \(layers.described)")
+                #expect(
+                    layers.overlaps.isEmpty,
+                    "step \(step): \(layers.overlaps) — \(layers.described)")
+            }
+            Attachment.record(seen.joined(separator: "\n"), named: "676-steps")
+            #expect(withHeadings > 0, "no day heading was ever on screen: \(seen)")
+            #expect(withPill > 0, "the pill never stood: \(seen)")
+
+            await dragToTop(window)
+            let back = Self.topLayers(in: window)
+            #expect(back.line.count == 1, "back at the top, no line: \(back.described)")
+            #expect(back.title.first == restTitle, "back at the top: \(back.described)")
+        }
+    }
+
+    /// Only All's header collapses (MEMNG-676): Months scrolled and Years keep the large title and
+    /// its line where they stood, and All chosen again is a grid at its top under the large title,
+    /// not the collapsed header the last All grid left behind.
+    @Test("Years and Months keep the large title, and All chosen again opens under it")
+    func onlyAllCollapsesTheHeader() async {
+        let media = PaintedMedia(palette: Self.palette())
+        await withTransport(media) {
+            let window = await chromeHost(opening: .library)
+            defer {
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+            await libraryServed(media, window)
+            let rest = Self.topLayers(in: window)
+            let restTitle = rest.title.first ?? .zero
+            #expect(rest.line.count == 1, "at rest: \(rest.described)")
+
+            await scrollDown(window)
+            await scopeStands(window)
+            let scrolled = Self.topLayers(in: window)
+            #expect(scrolled.line.isEmpty, "All scrolled, the line stayed: \(scrolled.described)")
+
+            let marks: [(LibraryScope, String)] = [(.months, "Sep 2026"), (.years, "48 items")]
+            for (scope, mark) in marks {
+                let live = await ScopeBarProbe.settledControl(in: window) {
+                    await chromeSettle(window)
+                }
+                if let live { ScopeBarProbe.choose(scope, in: live) }
+                var drawn: [NSObject] = []
+                for _ in 0..<200 where drawn.isEmpty {
+                    await chromeSettle(window)
+                    drawn = Self.elements(labelled: mark, in: window)
+                }
+                await chromeSettle(window, turns: 20)
+                #expect(!drawn.isEmpty, "\(scope.label) not drawn: \(Self.labels(in: window))")
+                if scope == .months { await scrollFurther(window, by: 240) }
+                let layers = Self.topLayers(in: window)
+                Self.shoot("676-\(scope.rawValue)", window)
+                #expect(layers.line.count == 1, "\(scope.label): no line: \(layers.described)")
+                #expect(
+                    layers.title.first == restTitle, "\(scope.label): \(layers.described)")
+            }
+
+            let live = await ScopeBarProbe.settledControl(in: window) {
+                await chromeSettle(window)
+            }
+            if let live { ScopeBarProbe.choose(.all, in: live) }
+            var back = Self.topLayers(in: window)
+            for _ in 0..<200 where back.line.isEmpty {
+                await chromeSettle(window)
+                back = Self.topLayers(in: window)
+            }
+            await chromeSettle(window, turns: 20)
+            back = Self.topLayers(in: window)
+            #expect(Self.scrolledBy(in: window).map { abs($0) < 1 } == true, "All not at its top")
+            #expect(back.line.count == 1, "All again, collapsed at its top: \(back.described)")
+            #expect(back.title.first == restTitle, "All again: \(back.described)")
+        }
+    }
+
     /// A press on the Library's item swaps the tab bar for the Library's scope toolbar — its
     /// icon, then Years | Months | All — whose control moves the Library in every scope; a scroll
     /// down keeps it, and the icon gives the bar back (MEMNG-604), as a scroll back to the top
