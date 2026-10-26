@@ -5,6 +5,11 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (69)
+
+- In Select, Add to Album replaces Show Selected: I pick an album or start a new one, and the chosen pictures go into it.
+- The viewer's ⋯ menu has Add to Album for the picture on screen.
+
 ## 2.4.0 (68)
 
 - Tapping a day far down All by day now opens it at once with a single request, instead of reading the whole library from the top.
