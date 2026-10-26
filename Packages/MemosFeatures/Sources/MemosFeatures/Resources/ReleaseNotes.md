@@ -5,6 +5,14 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (67)
+
+- Each month in the Library shows more day tiles by default, with two large hero tiles.
+- Year, Month and the Library show only my own pictures; family pictures appear inside trips.
+- Collections now lists Trips, Albums, Tags, Months and Years, and I can create an album from the New Album card or the +.
+- An album opens with its grid and map, and in Select I can remove pictures from it.
+- Adding pictures to an album comes in the next build.
+
 ## 2.4.0 (66)
 
 - A long trip that shows only part of its photos now says which part: the first photos for an oldest-first trip, the newest for a newest-first one.
