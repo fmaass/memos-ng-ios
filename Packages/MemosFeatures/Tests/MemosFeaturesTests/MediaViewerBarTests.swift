@@ -812,3 +812,92 @@ extension MediaImageLoaderTests {
         }
     }
 }
+
+/// MEMNG-930: Add to Album over a memo's own pictures. They are decoded inside the memo, so they
+/// carry no owner of their own (`MemoAttachment(_:baseURL:)`) — that is what keeps Show Memo off
+/// the memo's viewer — and the row has to come from the memo the viewer was opened over.
+@MainActor
+@Suite("Viewer — Add to Album over a memo's pictures")
+struct ViewerMemoAlbumTests {
+    private let trips = TripStore(
+        identity: TimelineSnapshotIdentity(
+            server: URL(string: "https://memos.example.invalid")!, subject: "alice"),
+        root: FileManager.default.temporaryDirectory)
+
+    /// Memo m1's five pictures, owned by nothing, exactly as a decoded memo holds them.
+    private static let five = memo(
+        "m1", mine: true, createdAt: memoDate, (0..<5).map { picture("p\($0)") })
+
+    private func drawn(
+        _ selection: MediaViewerSelection, _ source: MediaViewerSource, albums: Bool
+    ) -> [String] {
+        let viewer = MediaViewerView(selection: selection, source: source)
+        return albums
+            ? ScreenProbe.labels(of: viewer.environment(trips)) : ScreenProbe.labels(of: viewer)
+    }
+
+    @Test("picture 2 of a memo's five, in the memo's viewer, draws the menu and no Show Memo")
+    func memoViewerDrawsTheMenu() throws {
+        let memo = Self.five
+        #expect(memo.attachments.allSatisfy { $0.memoUID == nil }, "control: no page names a memo")
+        let opened = try #require(TimelineView.viewer(for: memo, startingAt: "p1"))
+        #expect(opened.startPage.id == "p1" && opened.pages.count == 5)
+        let source = MediaViewerSource.memo(resolve: { memo }, fallback: opened.pages)
+        let shown = drawn(opened, source, albums: true)
+        #expect(shown.contains("More"), "the memo's viewer offers no Add to Album: \(shown)")
+        #expect(!shown.contains(MediaTileAction.showMemo(uid: "m1").title), "Show Memo: \(shown)")
+        // Control: without the album stores the menu has nothing in it and is not drawn, so the ⋯
+        // above is Add to Album's.
+        let bare = drawn(opened, source, albums: false)
+        #expect(!bare.contains("More"), "a menu without the album stores: \(bare)")
+    }
+
+    @Test("the memo's viewer's row for picture 2 of five is Add to Album alone, never Show Memo")
+    func memoViewerRows() throws {
+        let memo = Self.five
+        let opened = try #require(TimelineView.viewer(for: memo, startingAt: "p1"))
+        let source = MediaViewerSource.memo(resolve: { memo }, fallback: opened.pages)
+        let page = opened.pages[1]
+        #expect(page.id == "p1")
+        #expect(
+            MediaViewerView.control(for: page, in: source, albums: true)
+                == .menu([.addToAlbum(uid: "p1")]))
+        #expect(MediaViewerView.control(for: page, in: source, albums: false) == .hidden)
+        #expect(MediaViewerView.control(for: nil, in: source, albums: true) == .hidden)
+    }
+
+    @Test("a page that names its memo, as the library's do, keeps Show Memo then Add to Album")
+    func libraryPageUnchanged() throws {
+        let opened = try #require(
+            MediaViewerPresentation.viewer(for: [picture("a", memoUID: "m7")], startingAt: "a"))
+        let source = MediaViewerSource.fixed(opened.pages)
+        #expect(
+            MediaViewerView.control(for: opened.pages[0], in: source, albums: true)
+                == .menu([.showMemo(uid: "m7"), .addToAlbum(uid: "a")]))
+        let shown = drawn(opened, source, albums: true)
+        #expect(shown.contains("More"), "the library's viewer lost its menu: \(shown)")
+    }
+
+    @Test("a picture on no memo, or one its memo has dropped, is offered no Add to Album")
+    func noMemoNoRow() throws {
+        let orphan = try #require(
+            MediaViewerPresentation.viewer(for: [picture("o")], startingAt: "o")
+        ).pages
+        #expect(
+            MediaViewerView.control(for: orphan[0], in: .fixed(orphan), albums: true) == .hidden)
+        // The pager keeps a page its memo has since dropped; that picture is on no memo now.
+        let memo = Self.five
+        let opened = try #require(TimelineView.viewer(for: memo, startingAt: "p1"))
+        var edited = memo
+        edited.attachments.removeAll { $0.uid == "p1" }
+        let after = edited
+        let dropped = MediaViewerSource.memo(resolve: { after }, fallback: opened.pages)
+        #expect(MediaViewerView.control(for: opened.pages[1], in: dropped, albums: true) == .hidden)
+        #expect(
+            MediaViewerView.control(for: opened.pages[2], in: dropped, albums: true)
+                == .menu([.addToAlbum(uid: "p2")]), "control: a page still on the memo")
+        // Nobody holds the memo any more: the viewer carries none and offers no row.
+        let gone = MediaViewerSource.memo(resolve: { nil }, fallback: opened.pages)
+        #expect(MediaViewerView.control(for: opened.pages[1], in: gone, albums: true) == .hidden)
+    }
+}

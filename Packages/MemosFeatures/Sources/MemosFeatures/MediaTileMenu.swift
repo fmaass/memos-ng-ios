@@ -187,14 +187,18 @@ extension MediaTileMenu {
     /// (`MediaViewerBar`), and Add to Album after Show Memo where the viewer can add (`albums`) and
     /// the picture hangs on a memo — one on none cannot be an album's member (MEMNG-805). The
     /// tile's own list is unchanged.
+    ///
+    /// A memo's own pictures name no memo (`MemoAttachment(_:baseURL:)`), which is what keeps Show
+    /// Memo off the screen it would only lead back to; `inMemo` is the viewer saying it was opened
+    /// over the memo that holds this picture, so it hangs on one all the same (MEMNG-930).
     static func viewerActions(
-        for attachment: MemoAttachment, albums: Bool = false
+        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false
     ) -> [MediaTileAction] {
         var rows = actions(for: attachment).filter { action in
             if case .share = action { return false }
             return true
         }
-        if albums, attachment.memoUID != nil {
+        if albums, inMemo || attachment.memoUID != nil {
             let after = rows.firstIndex { if case .showMemo = $0 { true } else { false } }
             rows.insert(.addToAlbum(uid: attachment.uid), at: after.map { $0 + 1 } ?? 0)
         }
@@ -206,9 +210,9 @@ extension MediaTileMenu {
     /// break that row's shape. The tile's direct-versus-menu rule (`control(of:)`, MEMNG-213) is
     /// the tile's and stays as it is.
     static func viewerControl(
-        for attachment: MemoAttachment, albums: Bool = false
+        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false
     ) -> MediaActionControl {
-        let actions = viewerActions(for: attachment, albums: albums)
+        let actions = viewerActions(for: attachment, albums: albums, inMemo: inMemo)
         return actions.isEmpty ? .hidden : .menu(actions)
     }
 

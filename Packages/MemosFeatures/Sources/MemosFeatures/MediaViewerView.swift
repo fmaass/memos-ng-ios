@@ -390,9 +390,7 @@ struct MediaViewerView: View {
         let page = pages.first { $0.id == currentPage }
         HStack(spacing: 0) {
             MediaViewerActions(
-                control: page.map {
-                    MediaTileMenu.viewerControl(for: $0.attachment, albums: trips != nil)
-                } ?? .hidden,
+                control: Self.control(for: page, in: source, albums: trips != nil),
                 showMemo: { uid in
                     // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
                     // presented by the tab being left would be a black screen over the memo.
@@ -415,6 +413,18 @@ struct MediaViewerView: View {
                 }
             )
         }
+    }
+
+    /// The ⋯ control for the page on screen. Whether its picture hangs on a memo — the one thing
+    /// Add to Album asks of it — is the page's own memo uid where it names one, and otherwise the
+    /// memo this viewer carries (MEMNG-930): a memo's pictures name none, so that Show Memo stays
+    /// off.
+    static func control(
+        for page: MediaPage?, in source: MediaViewerSource, albums: Bool
+    ) -> MediaActionControl {
+        guard let page else { return .hidden }
+        return MediaTileMenu.viewerControl(
+            for: page.attachment, albums: albums, inMemo: source.carries(page.attachment.uid))
     }
 
     /// What a refused delete says, on the one screen with nowhere else to say it.

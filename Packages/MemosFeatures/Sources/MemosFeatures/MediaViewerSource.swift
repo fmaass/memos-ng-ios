@@ -53,6 +53,13 @@ enum MediaViewerSource {
         return resolve()
     }
 
+    /// Whether the memo this source carries holds the picture `uid` NOW — never, for a source that
+    /// carries none. Now, because the pager keeps a page its source has dropped
+    /// (`MediaViewerPager.extended`), and a picture taken off the memo is on no memo (MEMNG-930).
+    func carries(_ uid: String) -> Bool {
+        carriedMemo?.attachments.contains { $0.uid == uid } ?? false
+    }
+
     static func lookahead(pageSize: Int) -> Int {
         max(1, pageSize / 2)
     }
