@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (71)
+
+- A picture I put back into an album stays on the album's screen even when the refresh after it fails.
+- The album picker now lists albums made on another phone.
+- On an album, renaming and deleting say Rename Album and Delete Album.
+- Add to Album shows up in a memo's viewer even when that memo has scrolled out of the loaded timeline.
+
 ## 2.4.0 (70)
 
 - In a memo's viewer, from the Timeline or a memo's own screen, I can add the picture on screen to an album.
