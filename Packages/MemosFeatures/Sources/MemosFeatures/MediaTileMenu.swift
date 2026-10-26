@@ -25,12 +25,16 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
     /// from it — where the original is, what it is, and what to call it — and a case that carried
     /// only the URL would have the two surfaces reassembling the other two for themselves.
     case saveOriginal(MemoAttachment)
+    /// Open the album picker for this picture (MEMNG-805). The viewer's alone: a tile's long press
+    /// does not offer it.
+    case addToAlbum(uid: String)
 
     var id: String {
         switch self {
         case .showMemo(let uid): "show-memo:\(uid)"
         case .share(let attachment): "share:\(attachment.uid)"
         case .saveOriginal(let attachment): "save-original:\(attachment.uid)"
+        case .addToAlbum(let uid): "add-to-album:\(uid)"
         }
     }
 
@@ -44,6 +48,7 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
         // a Share that sends something else — a clip's derived mp4 — so this name is the whole
         // difference between the two rows.
         case .saveOriginal: "Save Original"
+        case .addToAlbum: AlbumPicker.title
         }
     }
 
@@ -52,6 +57,7 @@ enum MediaTileAction: Equatable, Sendable, Identifiable {
         case .showMemo: "note.text"
         case .share: "square.and.arrow.up"
         case .saveOriginal: "square.and.arrow.down"
+        case .addToAlbum: "rectangle.stack.badge.plus"
         }
     }
 }
@@ -178,20 +184,31 @@ enum MediaTileMenu {
 
 extension MediaTileMenu {
     /// The viewer's ⋯ rows: the tile's list less Share, which the viewer's bar holds instead
-    /// (`MediaViewerBar`). The tile's own list is unchanged.
-    static func viewerActions(for attachment: MemoAttachment) -> [MediaTileAction] {
-        actions(for: attachment).filter { action in
+    /// (`MediaViewerBar`), and Add to Album after Show Memo where the viewer can add (`albums`) and
+    /// the picture hangs on a memo — one on none cannot be an album's member (MEMNG-805). The
+    /// tile's own list is unchanged.
+    static func viewerActions(
+        for attachment: MemoAttachment, albums: Bool = false
+    ) -> [MediaTileAction] {
+        var rows = actions(for: attachment).filter { action in
             if case .share = action { return false }
             return true
         }
+        if albums, attachment.memoUID != nil {
+            let after = rows.firstIndex { if case .showMemo = $0 { true } else { false } }
+            rows.insert(.addToAlbum(uid: attachment.uid), at: after.map { $0 + 1 } ?? 0)
+        }
+        return rows
     }
 
     /// The viewer's top-right control: ALWAYS the ⋯ menu when there is anything in it, even one
     /// row — the viewer's top row is close, date, ⋯, and a lone action drawn as its own glyph would
     /// break that row's shape. The tile's direct-versus-menu rule (`control(of:)`, MEMNG-213) is
     /// the tile's and stays as it is.
-    static func viewerControl(for attachment: MemoAttachment) -> MediaActionControl {
-        let actions = viewerActions(for: attachment)
+    static func viewerControl(
+        for attachment: MemoAttachment, albums: Bool = false
+    ) -> MediaActionControl {
+        let actions = viewerActions(for: attachment, albums: albums)
         return actions.isEmpty ? .hidden : .menu(actions)
     }
 

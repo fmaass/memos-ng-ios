@@ -30,7 +30,7 @@ struct MediaLibraryRenderTests {
 
         var body: some View {
             LibraryGrid(
-                items: selection.visible(in: items),
+                items: items,
                 errorText: nil,
                 loadingMore: false,
                 zoom: zoom,
@@ -851,51 +851,6 @@ struct MediaLibraryRenderTests {
         return nil
     }
 
-    @Test("a day heading reads its weekday, its date and the whole day's count")
-    func dayHeadingReadsWeekdayDateCount() async throws {
-        let items = Self.day("mon", 3, at: Self.noon(14))
-        let bucket = LibraryBucket(
-            key: "2026-09-14", count: 12, coverUID: "mon-0", coverThumbnailURL: nil)
-        let window = Self.show(Harness(items: items, dayBuckets: [bucket]))
-        let bare = Self.show(Harness(items: items))
-        defer {
-            window.isHidden = true
-            bare.isHidden = true
-        }
-        var heading: NSObject?
-        var unread: NSObject?
-        for _ in 0..<60 where heading == nil || unread == nil {
-            try await Task.sleep(for: .milliseconds(50))
-            window.layoutIfNeeded()
-            bare.layoutIfNeeded()
-            heading = Self.element("Mon 14 Sep", in: window)
-            unread = Self.element("Mon 14 Sep", in: bare)
-        }
-        let row = try #require(heading, "no day heading reads Mon 14 Sep")
-        #expect(row.accessibilityTraits.contains(.header), "the day heading is not a heading")
-        // The bucket's 12, not the 3 of the day that are loaded.
-        #expect(row.accessibilityValue == "12 items")
-        let pending = try #require(unread, "no day heading without buckets")
-        #expect((pending.accessibilityValue ?? "").isEmpty, "a count drawn with no bucket read")
-    }
-
-    // MARK: - MEMNG-819: Show Selected from deep in the grid
-
-    /// Twelve days of eight pictures, newest first: a page several screens tall.
-    private static var deepLibrary: [LibraryRow] {
-        (1...12).reversed().flatMap { Self.day("d\($0)", 8, at: Self.noon($0)) }
-    }
-
-    /// The grid's elements as `grouping` lays `items` out.
-    private static func layoutRows(
-        _ items: [LibraryRow], _ grouping: LibraryGridGrouping
-    ) -> [LibraryAllRow] {
-        switch grouping {
-        case .byDay: MediaLibraryPresentation.daySections(for: items).flatMap(\.rows)
-        case .flat: MediaLibraryPresentation.flatRows(for: items)
-        }
-    }
-
     /// Where the tile showing `uid` is drawn, in window points, or nil where none is built — found
     /// by the identifier each tile carries (`LibraryGrid.tileIdentifier`), since no label says
     /// which file it shows.
@@ -922,160 +877,32 @@ struct MediaLibraryRenderTests {
         return found
     }
 
-    /// Whether a tile is built, has a size, and its centre lies inside the window.
-    private static func onScreen(_ frame: CGRect?, in window: UIWindow) -> Bool {
-        guard let frame, frame.width > 0, frame.height > 0 else { return false }
-        return window.bounds.contains(CGPoint(x: frame.midX, y: frame.midY))
-    }
-
-    /// Lays the window out until `holds` has been true for three passes in a row, or 4 s pass;
-    /// whether it then holds.
-    private static func settle(_ window: UIWindow, until holds: () -> Bool) async -> Bool {
-        var steady = 0
-        for _ in 0..<80 where steady < 3 {
-            try? await Task.sleep(for: .milliseconds(50))
+    @Test("a day heading reads its weekday, its date and the whole day's count")
+    func dayHeadingReadsWeekdayDateCount() async throws {
+        let items = Self.day("mon", 3, at: Self.noon(14))
+        let bucket = LibraryBucket(
+            key: "2026-09-14", count: 12, coverUID: "mon-0", coverThumbnailURL: nil)
+        let window = Self.show(Harness(items: items, dayBuckets: [bucket]))
+        let bare = Self.show(Harness(items: items))
+        defer {
+            window.isHidden = true
+            bare.isHidden = true
+        }
+        var heading: NSObject?
+        var unread: NSObject?
+        for _ in 0..<60 where heading == nil || unread == nil {
+            try await Task.sleep(for: .milliseconds(50))
             window.layoutIfNeeded()
-            steady = holds() ? steady + 1 : 0
+            bare.layoutIfNeeded()
+            heading = Self.element("Mon 14 Sep", in: window)
+            unread = Self.element("Mon 14 Sep", in: bare)
         }
-        return steady >= 3
-    }
-
-    /// Scrolls the grid well down its page, then names a picture on screen that is NOT its band's
-    /// first: a band is named by its first file, so a press could otherwise pass by accident.
-    private static func deepPick(
-        _ items: [LibraryRow], _ grouping: LibraryGridGrouping, in window: UIWindow
-    ) async throws -> String {
-        _ = await settle(window) { Self.visibleTop(in: window) != nil }
-        let scroll = try #require(Self.visibleTop(in: window)?.scroll, "no scroll view")
-        let page = window.bounds.height
-        // 3000 pt is well inside the page, which runs to some 5800. Taken 300 pt a pass, as the
-        // date pill's test does: the lazy stack reports a page only as long as it has measured,
-        // and takes back an offset past that end.
-        let deep: CGFloat = 3000
-        _ = await settle(window) {
-            let there = scroll.contentOffset.y >= deep - 1
-            if !there {
-                let next = min(deep, scroll.contentOffset.y + 300)
-                scroll.setContentOffset(CGPoint(x: 0, y: next), animated: false)
-            }
-            return there
-        }
-        let seconds = layoutRows(items, grouping).compactMap { row -> String? in
-            guard case .band(let band, _) = row, band.pictures.count > 1 else { return nil }
-            return band.pictures[1].id
-        }
-        var pick: String?
-        _ = await settle(window) {
-            pick = seconds.last { uid in
-                tileFrame(uid, in: window).map { $0.midY > 150 && $0.midY < page - 150 } ?? false
-            }
-            return pick != nil
-        }
-        #expect(scroll.contentOffset.y > page, "control: the scroll did not go deep")
-        return try #require(pick, "control: no band's second picture on screen at \(deep) pt")
-    }
-
-    /// MEMNG-819: a picture chosen far down the grid, then "Show Selected": the narrowed grid is a
-    /// band at the top of a page still scrolled to where it was chosen, which showed nothing at all
-    /// (black, in dark mode, on the device). The chosen picture is on screen once the grid narrows
-    /// and once it widens, and the widened grid shows the pictures around it again. One hosting
-    /// controller throughout, so the grid keeps its identity and its scroll, as in the Library.
-    @Test(
-        "Show Selected from deep in the grid keeps the chosen picture on screen, both ways",
-        arguments: [LibraryGridGrouping.byDay, .flat])
-    func showSelectedKeepsTheChosenOnScreen(_ grouping: LibraryGridGrouping) async throws {
-        let items = Self.deepLibrary
-        let window = Self.show(Harness(items: items, grouping: grouping))
-        defer { window.isHidden = true }
-        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
-        let pick = try await Self.deepPick(items, grouping, in: window)
-        var selection = LibrarySelection()
-        selection.begin()
-        selection.toggle(try #require(items.first { $0.id == pick }))
-        host.rootView = Harness(items: items, selection: selection, grouping: grouping)
-        let before = await Self.settle(window) {
-            Self.onScreen(Self.tileFrame(pick, in: window), in: window)
-        }
-        #expect(before, "control: the chosen \(pick) left the screen before the press")
-
-        selection.toggleNarrowed()
-        host.rootView = Harness(items: items, selection: selection, grouping: grouping)
-        let narrowed = await Self.settle(window) {
-            Self.onScreen(Self.tileFrame(pick, in: window), in: window)
-        }
-        #expect(narrowed, "narrowed: \(pick) is not on screen (\(Self.scrollState(window)))")
-
-        selection.toggleNarrowed()
-        host.rootView = Harness(items: items, selection: selection, grouping: grouping)
-        let widened = await Self.settle(window) {
-            Self.onScreen(Self.tileFrame(pick, in: window), in: window)
-                && Self.tileFrames(in: window).contains { uid, frame in
-                    uid != pick && Self.onScreen(frame, in: window)
-                }
-        }
-        #expect(
-            widened,
-            "widened: \(pick) or an unchosen picture is off screen (\(Self.scrollState(window)))"
-        )
-    }
-
-    /// A landing's heading is held at the line after the jump; a press of "Show Selected" is a
-    /// later move of the reader's, and the hold must not pull the page back over the band it
-    /// brought up. The landing is still reported scrolled to exactly once.
-    @Test("a held landing does not pull the page back over what Show Selected brought into view")
-    func heldLandingYieldsToShowSelected() async throws {
-        let items = Self.deepLibrary
-        let landing = LibraryLanding(day: "2026-09-08", rowID: "d8-0", serial: 1)
-        let consumed = LockedLandings()
-        let window = Self.show(
-            Harness(items: items, landing: landing, landed: { consumed.append($0) }))
-        defer { window.isHidden = true }
-        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
-        let held = await Self.settle(window) {
-            guard let heading = Self.element("Tue 8 Sep", in: window),
-                let visible = Self.visibleTop(in: window)
-            else { return false }
-            return abs(heading.accessibilityFrame.minY - visible.top) <= 2 && !consumed.all.isEmpty
-        }
-        try #require(held, "control: the landing never reached its heading")
-        let page = window.bounds.height
-        let seconds = Self.layoutRows(items, .byDay).compactMap { row -> String? in
-            guard case .band(let band, _) = row, band.pictures.count > 1 else { return nil }
-            return band.pictures[1].id
-        }
-        // The lowest one on screen: the furthest from the held heading.
-        let pick = try #require(
-            seconds.last { uid in
-                Self.tileFrame(uid, in: window).map { $0.midY > 150 && $0.midY < page - 100 }
-                    ?? false
-            }, "control: no band's second picture on screen under the landing")
-        var selection = LibrarySelection()
-        selection.begin()
-        selection.toggle(try #require(items.first { $0.id == pick }))
-        @MainActor func redraw() {
-            host.rootView = Harness(
-                items: items, landing: landing, landed: { consumed.append($0) },
-                selection: selection)
-        }
-        redraw()
-        selection.toggleNarrowed()
-        redraw()
-        let narrowed = await Self.settle(window) {
-            Self.onScreen(Self.tileFrame(pick, in: window), in: window)
-        }
-        #expect(narrowed, "narrowed: \(pick) is not on screen (\(Self.scrollState(window)))")
-
-        selection.toggleNarrowed()
-        redraw()
-        // Its band's top at the line, not the held heading's.
-        let atLine = await Self.settle(window) {
-            guard let frame = Self.tileFrame(pick, in: window),
-                let visible = Self.visibleTop(in: window)
-            else { return false }
-            return abs(frame.minY - visible.top) <= 2
-        }
-        #expect(atLine, "widened: \(pick)'s band is not at the top (\(Self.scrollState(window)))")
-        #expect(consumed.all == [landing], "the landing was not reported scrolled to exactly once")
+        let row = try #require(heading, "no day heading reads Mon 14 Sep")
+        #expect(row.accessibilityTraits.contains(.header), "the day heading is not a heading")
+        // The bucket's 12, not the 3 of the day that are loaded.
+        #expect(row.accessibilityValue == "12 items")
+        let pending = try #require(unread, "no day heading without buckets")
+        #expect((pending.accessibilityValue ?? "").isEmpty, "a count drawn with no bucket read")
     }
 
     /// The scroll's offset and content height, for a failure's message.

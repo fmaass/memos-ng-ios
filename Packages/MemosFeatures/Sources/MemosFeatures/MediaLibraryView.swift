@@ -56,6 +56,8 @@ struct MediaLibraryView: View {
     private var deleting: LibraryDeleteFlow { results.deleting }
     /// Select mode's memo actions (MEMNG-788): Add (MEMNG-855) and the last run's banner.
     private var acting: MemoActionFlow { results.acting }
+    /// Select mode's Add to Album (MEMNG-805): the picker and its sentence.
+    private var albumAdd: AlbumAddFlow { results.albums }
     @Environment(MemoActionStore.self) private var actions: MemoActionStore?
     @Environment(TripStore.self) private var trips: TripStore?
     /// This Library's claim on the dock while select mode's toolbar stands in its place.
@@ -130,11 +132,12 @@ struct MediaLibraryView: View {
                                 deleting.claim(
                                     LibraryDeleteFlow.tap(selection, in: library?.items ?? []))
                             },
-                            // Narrows the grid to the chosen pictures and back (MEMNG-779).
-                            showSelected: { selection.toggleNarrowed() },
-                            narrowed: selection.narrowed
+                            // The picker for the chosen pictures (MEMNG-805).
+                            addToAlbum: { albumAdd.open(selection.uids) }
                         )
                         .sharingFiles(sharing)
+                        // Its own view: the toolbar carries the share sheet, the stack the alert.
+                        .background { albumPicker }
                     }
                     // On the stack around the toolbar, not on the toolbar that carries the share
                     // sheet: two presentations on one view is how one of them stops appearing.
@@ -294,6 +297,7 @@ struct MediaLibraryView: View {
                 abandonShare()
                 deleting.abandon()
                 acting.abandon()
+                albumAdd.abandon()
                 addingToCollection = false
                 dock?.release(dockClaim)
             }
@@ -307,8 +311,34 @@ struct MediaLibraryView: View {
             abandonShare()
             deleting.abandon()
             acting.abandon()
+            albumAdd.abandon()
             dock?.release(dockClaim)
         }
+    }
+
+    /// The album picker over the chosen pictures, frozen when the bar opened it (MEMNG-805).
+    private var albumPicker: some View {
+        Color.clear.sheet(item: pickingBinding) { picking in
+            if let trips {
+                AlbumPickerSheet(trips: trips, members: tripMembers, access: { access }) { album in
+                    Task {
+                        await albumAdd.add(picking.uids, to: album, trips: trips, access: access)
+                    }
+                }
+            }
+        }
+    }
+
+    private var pickingBinding: Binding<AlbumAddFlow.Picking?> {
+        Binding(get: { albumAdd.picking }, set: { albumAdd.picking = $0 })
+    }
+
+    /// The session's handle and server now, or nil when there is none.
+    private var access: CollectionsAccess? {
+        guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
+            return nil
+        }
+        return CollectionsAccess(handle: handle, baseURL: baseURL)
     }
 
     /// What the full-screen viewer reads. `.fixed` only when there is no store yet, which is a
@@ -435,20 +465,17 @@ struct MediaLibraryView: View {
     @ViewBuilder
     private func grid(_ library: MediaLibraryStore) -> some View {
         LibraryGrid(
-            // While "Show Selected" is on, only the chosen pictures, in the grid's order — the
-            // months and days they fall in keep their headings (MEMNG-779).
-            items: selection.visible(in: library.items),
+            items: library.items,
             errorText: library.lastError,
             loadingMore: library.isLoadingMore,
             zoom: mediaZoom,
-            // An index into the narrowed list is no position in the store's: no paging from it.
-            wantsMore: { !selection.narrowed && library.shouldLoadMore(after: $0) },
+            wantsMore: { library.shouldLoadMore(after: $0) },
             open: { open($0) },
             fetch: { file, rendition in await fetch(file, rendition) },
             loadMore: { await loadMore() },
             // The rows above a day a jump opened the list at (MEMNG-636), read as the reader comes
-            // up to the top; never from a narrowed list, for `wantsMore`'s reason.
-            wantsEarlier: { !selection.narrowed && library.shouldLoadEarlier(before: $0) },
+            // up to the top.
+            wantsEarlier: { library.shouldLoadEarlier(before: $0) },
             loadEarlier: { await loadEarlier() },
             landing: library.landing,
             landed: { library.consumeLanding($0) },
@@ -470,7 +497,6 @@ struct MediaLibraryView: View {
                 )
             },
             showMonth: { choice.showMonth($0) },
-            // Select mode and Show Selected draw the same tiles in the same cut (MEMNG-818).
             grouping: preferences.allGrouping
         )
         // The Library's scroll is what swaps the tab bar for the scope toolbar (MEMNG-679), on
@@ -985,15 +1011,14 @@ struct KeptLineAnchor: View {
     }
 }
 
-/// What `keepAbove` compares across a change of the list: its ends, its length, its generation
-/// and whether Show Selected narrows it. Any change of one re-reads the list as drawn, so a next
-/// page appended, a jump that installed nothing or the same first row all leave it current.
+/// What `keepAbove` compares across a change of the list: its ends, its length and its
+/// generation. Any change of one re-reads the list as drawn, so a next page appended, a jump
+/// that installed nothing or the same first row all leave it current.
 struct DrawnKey: Equatable {
     let first: String?
     let last: String?
     let count: Int
     let generation: Int
-    let narrowed: Bool
 }
 
 /// What a `LibraryGrid` is drawn in: its grouping and the device's tile layout, re-cut together.
@@ -1123,10 +1148,6 @@ struct LibraryGrid: View {
     /// Where each built heading and band starts on the page, for the pill. A reference for the
     /// reason `onScreen` is one.
     @State private var markers = DayMarkers()
-    /// A "Show Selected" press still bringing the chosen pictures into view (MEMNG-819): the first
-    /// chosen file in the grid's order, and which way the press went. A file, not a band: a band
-    /// is named by its first file, so the band holding it is another one on each side of the press.
-    @State private var revealing: (fileID: String, narrowed: Bool)?
 
     var body: some View {
         // Hoisted because the measuring closure below is `Sendable` and may run off the main
@@ -1142,19 +1163,6 @@ struct LibraryGrid: View {
                 // the picture at the top of the screen is the one the reader is shown after it.
                 .onChange(of: wantedCut, initial: true) { _, new in recut(to: new, proxy) }
                 .onChange(of: drawnKey, initial: true) { old, new in keepAbove(old, new, proxy) }
-                // Narrowing leaves a band or two at the top of a page still scrolled to where the
-                // pictures were chosen, which then shows nothing; widening puts back everything
-                // above them. Either way the chosen pictures are brought into view (MEMNG-819).
-                .onChange(of: selection.narrowed) { _, narrowed in
-                    revealing = items.first { selection.contains($0.id) }.map { ($0.id, narrowed) }
-                    // A landing's held heading would pull the page back over them.
-                    holding = nil
-                    // A band the wide grid had built may keep its identity in the narrowed one,
-                    // so whether it is built does not say the page can reach it: the gallery's top
-                    // first, every time, where the narrowed grid's first band is.
-                    if narrowed { proxy.scrollTo(Self.galleryID, anchor: .top) }
-                    reveal(proxy)
-                }
                 // And again each time the rows are laid out anew: a scroll to a row the lazy stack
                 // has not built goes where its estimate puts it, which moves as rows are measured.
                 // No delay stands in for this: the layout, and the rows built, say when to ask.
@@ -1162,7 +1170,6 @@ struct LibraryGrid: View {
                     geometry.contentSize.height
                 } action: { _, laid in
                     hold(proxy)
-                    reveal(proxy)
                     guard landing != nil, landing != scrolledTo else { return }
                     laidOut = laid
                 }
@@ -1179,13 +1186,11 @@ struct LibraryGrid: View {
                     // reached only once the scroll has actually brought it to the line.
                     bring(proxy)
                     hold(proxy)
-                    reveal(proxy)
                 }
                 // The reader's own scroll lets go of the landing's heading.
                 .onScrollPhaseChange { _, phase in
                     if phase == .tracking || phase == .interacting || phase == .decelerating {
                         holding = nil
-                        revealing = nil
                     }
                 }
                 .overlay(alignment: .top) {
@@ -1211,9 +1216,8 @@ struct LibraryGrid: View {
             case .flat: tileID(holding: landing.rowID, in: cut)
             }
         guard let heading = target else { return }
-        // A new landing takes over from the one held before it, and from a press's reveal.
+        // A new landing takes over from the one held before it.
         holding = nil
-        revealing = nil
         // The app's own jump, not the layout's: the dock counts the move it makes. `hold` below
         // does not tell it, because it only answers a layout that moved the scroll.
         dock?.askedToJump()
@@ -1298,20 +1302,20 @@ struct LibraryGrid: View {
     private var drawnKey: DrawnKey {
         DrawnKey(
             first: items.first?.id, last: items.last?.id, count: items.count,
-            generation: listGeneration(), narrowed: selection.narrowed)
+            generation: listGeneration())
     }
 
     /// Rows put above the list (MEMNG-636) keep what the reader had at the line where it was: the
     /// heading or band reaching below the line at the last scroll (`DrawnList.atLine`) is found in
     /// the rows as last drawn, and that heading — or the band holding that band's first file now —
     /// is held as far past the line as it was. Only for rows put above the SAME
-    /// list: its generation unchanged, Show Selected unchanged, and the list as drawn the new
-    /// list's tail. A jump, a pull, a filter or Show Selected is another list, not kept in.
+    /// list: its generation unchanged and the list as drawn the new list's tail. A jump, a pull
+    /// or a filter is another list, not kept in.
     private func keepAbove(_ old: DrawnKey, _ new: DrawnKey, _ proxy: ScrollViewProxy) {
         let before = drawn.items
         drawn.items = items
         drawn.key = new
-        guard old.generation == new.generation, old.narrowed == new.narrowed,
+        guard old.generation == new.generation,
             old.first != nil, new.first != old.first, items.count > before.count,
             items.suffix(before.count).map(\.id) == before.map(\.id)
         else { return }
@@ -1326,7 +1330,6 @@ struct LibraryGrid: View {
         guard let file else { return }
         let byHeading = if case .heading = element { true } else { false }
         // What the reader had at the line is the one kept now, over whatever was held.
-        revealing = nil
         let held = HeldFile(
             file: file, byHeading: byHeading, listGeneration: new.generation,
             // At the top of the page the first element starts below the line; it is kept AT it.
@@ -1378,37 +1381,6 @@ struct LibraryGrid: View {
             }
         }
         return nil
-    }
-
-    /// Brings the band holding the press's file to the top, again as the lazy stack measures, until
-    /// it is built and at the line — or the page can scroll no further, or the reader scrolls.
-    private func reveal(_ proxy: ScrollViewProxy) {
-        guard let revealing else { return }
-        // Another press, or the file gone from the list: this one is over.
-        guard revealing.narrowed == selection.narrowed,
-            let band = bandID(holding: revealing.fileID)
-        else {
-            self.revealing = nil
-            return
-        }
-        // The gallery is ONE child of the page's lazy stack: narrowed, it is a band or two above
-        // the screen, which the page has not built, so no row inside it can be scrolled to yet.
-        // Its own top first — the narrowed grid's first band holds the file — then the band.
-        if revealing.narrowed, !onScreen.rows.contains(band) {
-            proxy.scrollTo(Self.galleryID, anchor: .top)
-            return
-        }
-        proxy.scrollTo(band, anchor: .top)
-        if onScreen.rows.contains(band), markers.reached(band) {
-            self.revealing = nil
-        }
-    }
-
-    /// The band of the grid as drawn now that holds `fileID`: in a flat grid as in a grid by day.
-    /// Read from the cut the stack is drawn in, its tile layout included — under Square Grid the
-    /// bands are rows of three, so the mixed layout's bands name rows that are not drawn.
-    private func bandID(holding fileID: String) -> String? {
-        tileID(holding: fileID, in: cut)
     }
 
     /// The landing's heading is built and scrolled to: the landing is done with, here and in the

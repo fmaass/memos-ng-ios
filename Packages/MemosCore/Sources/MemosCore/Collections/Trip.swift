@@ -255,6 +255,41 @@ public struct TripBatchOutcome: Sendable, Equatable {
     }
 }
 
+/// What one Add to Album did (`TripStore.addMembers`), summed over its chunks: the server's
+/// answer per picture, and what stopped the chunks that were never answered.
+public struct AlbumAddOutcome: Sendable, Equatable {
+    /// How many pictures were asked for.
+    public var asked: Int
+    /// Members now, by this add.
+    public var added: [String] = []
+    /// Members already; nothing was written.
+    public var alreadyMember: [String] = []
+    /// Answered but not added: not visible to the caller, on no memo, or a write that failed.
+    public var notAdded: [String] = []
+    /// Why the chunks after the last answered one were not, or nil when every chunk was.
+    public var stopped: TripStore.Failure?
+
+    public init(asked: Int) { self.asked = asked }
+
+    /// How many pictures the server answered for.
+    public var answered: Int { added.count + alreadyMember.count + notAdded.count }
+    /// How many were never answered, because a chunk failed or the add lost its authority.
+    public var unanswered: Int { max(0, asked - answered) }
+
+    /// Whether the outcome leaves the picture a member of the album.
+    static func isMember(_ outcome: String) -> Bool {
+        outcome == "added" || outcome == "alreadyMember"
+    }
+
+    mutating func apply(_ outcome: String, to uid: String) {
+        switch outcome {
+        case "added": added.append(uid)
+        case "alreadyMember": alreadyMember.append(uid)
+        default: notAdded.append(uid)
+        }
+    }
+}
+
 /// Where a trip's members stand on this device.
 public enum TripMemberState: Sendable, Equatable {
     case notLoaded

@@ -198,9 +198,11 @@ class Driver:
             self.tap_at(x, y, "tile %r" % tile.get("AXLabel"))
             time.sleep(1)
         time.sleep(1.5)
-        self.tap("Show Selected", prefix=True)
+        # Add to Album replaced Show Selected (MEMNG-805): the picker opens over the three, and
+        # Cancel leaves the selection as it was.
+        self.tap("Add to Album")
         time.sleep(3)
-        self.tap("Show Selected", prefix=True)
+        self.tap("Cancel")
         time.sleep(2.5)
         self.tap("Close")
         time.sleep(2)

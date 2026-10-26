@@ -340,7 +340,7 @@ struct CollectionScreenTests {
                 #expect(reached7, "no toolbar")
                 let photos = TripProbe.photos(in: screen.window)
                 #expect(photos.count == 5 && TripProbe.pressAtOnce(photos[0]), "p0 took no press")
-                let bar = await screen.until { screen.says("Show Selected (1)") }
+                let bar = await screen.until { screen.says("1 Item Selected") }
                 #expect(bar, "control: nothing was chosen")
                 // The trip's Remove is its actions menu's row (MEMNG-780); a month has no menu.
                 let rows = TripMenuProbe.rows(of: SelectChrome.moreLabel, in: screen.window)

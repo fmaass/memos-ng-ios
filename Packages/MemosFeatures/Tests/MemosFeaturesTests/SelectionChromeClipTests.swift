@@ -43,7 +43,7 @@ extension MediaImageLoaderTests {
     }
 
     @Test(
-        "clip 779: the Library's filter menu, Sort By and Show Selected, touched for real",
+        "clip 779: the Library's filter menu, Sort By and Add to Album, touched for real",
         .enabled(if: ClipStage.required != nil, "a clip run sets MEMNG_CLIP_REQUIRE")
     )
     func clipLibraryFilterMenu() async {

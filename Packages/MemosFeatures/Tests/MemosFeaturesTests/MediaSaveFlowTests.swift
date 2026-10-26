@@ -284,7 +284,7 @@ struct MediaSaveFlowTests {
             let carried: MemoAttachment
             switch action {
             case .share(let attachment), .saveOriginal(let attachment): carried = attachment
-            case .showMemo: continue
+            case .showMemo, .addToAlbum: continue
             }
             // Where each file is, what it is, and what to call it — all of it comes off the
             // attachment, so neither surface has to reassemble any of it for itself.

@@ -17,6 +17,8 @@ enum TripWire {
     static let include =
         "include_attachment_api_collections__uid__exclusions__attachment_uid__delete"
     static let library = "list_attachments_api_attachments_get"
+    /// The batch inclusion route: an album's Add to Album (MEMNG-805).
+    static let add = "include_attachments_api_collections__uid__attachments_post"
 
     static let alice = TimelineSnapshotIdentity(
         server: URL(string: "https://memos.example.org")!, subject: "alice")

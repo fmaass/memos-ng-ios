@@ -25,13 +25,15 @@ struct LibrarySelectionPresentationTests {
         #expect(LibrarySelectionPresentation.countText(120) == "120 Items Selected")
     }
 
-    /// MEMNG-779: the Library's centre is a button — "Select Items", looking disabled, before
-    /// anything is chosen, and "Show Selected (N)" after.
-    @Test("the centre button says Select Items with nothing chosen, Show Selected (N) after")
-    func showSelectedText() {
-        #expect(LibrarySelectionPresentation.showSelectedText(0) == "Select Items")
-        #expect(LibrarySelectionPresentation.showSelectedText(1) == "Show Selected (1)")
-        #expect(LibrarySelectionPresentation.showSelectedText(3) == "Show Selected (3)")
+    /// MEMNG-805: the bar's middle is Add to Album over a selection, which replaced Show
+    /// Selected, and "Select Items" before one.
+    @Test("the bar's middle is Add to Album over a selection and Select Items before one")
+    func addToAlbumNeedsASelection() {
+        #expect(!LibrarySelectionPresentation.showsAddToAlbum(count: 0))
+        #expect(LibrarySelectionPresentation.showsAddToAlbum(count: 1))
+        #expect(LibrarySelectionPresentation.showsAddToAlbum(count: 501))
+        #expect(LibrarySelectionPresentation.selectItems == "Select Items")
+        #expect(AlbumPicker.title == "Add to Album")
     }
 
     @Test("outside select mode every tile opens, mine or not")

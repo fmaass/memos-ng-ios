@@ -150,6 +150,8 @@ struct TripView: View {
     /// Select mode's Delete, around the result banner select mode shows (`SelectResults`).
     @State private var results = SelectResults()
     private var deleting: LibraryDeleteFlow { results.deleting }
+    /// Select mode's Add to Album (MEMNG-805): the picker and its sentence.
+    private var albumAdd: AlbumAddFlow { results.albums }
     /// This screen's claim on the dock while select mode's toolbar stands in the main bar's place.
     @State private var dockClaim = UUID()
     /// The members last shown while they were settled, kept while a re-read is on the wire.
@@ -1186,10 +1188,12 @@ struct TripView: View {
                     guard rowsSettled else { return }
                     deleting.claim(LibraryDeleteFlow.tap(selection, in: currentMembers))
                 },
-                showSelected: { selection.toggleNarrowed() },
-                narrowed: selection.narrowed
+                // The picker for the chosen pictures (MEMNG-805), on a trip and an album alike.
+                addToAlbum: { albumAdd.open(selection.uids) }
             )
             .sharingFiles(sharing)
+            // Its own view: the toolbar carries the share sheet, the stack the alert.
+            .background { albumPicker }
         }
         // On the stack around the toolbar, not on the toolbar that carries the share sheet: two
         // presentations on one view is how one of them stops appearing.
@@ -1203,6 +1207,21 @@ struct TripView: View {
         } message: {
             Text(LibraryDeleteFlow.explanation)
         }
+    }
+
+    /// The album picker over the chosen pictures, frozen when the bar opened it (MEMNG-805).
+    private var albumPicker: some View {
+        Color.clear.sheet(item: pickingBinding) { picking in
+            AlbumPickerSheet(trips: trips, members: memberStore, access: access) { album in
+                Task {
+                    await albumAdd.add(picking.uids, to: album, trips: trips, access: access())
+                }
+            }
+        }
+    }
+
+    private var pickingBinding: Binding<AlbumAddFlow.Picking?> {
+        Binding(get: { albumAdd.picking }, set: { albumAdd.picking = $0 })
     }
 
     /// A delete run is out — this screen's, or one an abandoned select mode left running.
@@ -1345,6 +1364,7 @@ struct TripView: View {
         shareTask?.cancel()
         shareTask = nil
         deleting.abandon()
+        albumAdd.abandon()
         removing = nil
         dock?.release(dockClaim)
     }
@@ -1508,11 +1528,8 @@ struct TripView: View {
         readsMembers ? drainQuery.order : gridQuery.order
     }
 
-    /// What the grid draws: `viewerRows`, narrowed to the chosen pictures while Show Selected is
-    /// pressed.
-    private var gridRows: [LibraryRow] {
-        selection.visible(in: viewerRows.rows)
-    }
+    /// What the grid draws: `viewerRows`.
+    private var gridRows: [LibraryRow] { viewerRows.rows }
 
     /// Whether `viewerRows` is a reading: unfiltered, once a drain has settled — drained whole,
     /// not pages still arriving (`settled(of:in:under:)` holds members only at `.complete` or
@@ -1520,9 +1537,9 @@ struct TripView: View {
     /// then nothing is pruned against it and no action acts on it.
     private var rowsSettled: Bool { viewerRows.loaded }
 
-    /// The grid's rows before Show Selected narrows them — the members, or the trip's filtered
-    /// read while a filter is chosen — and whether they are a reading: what a tap opens the
-    /// viewer over and pages through, and what the selection is kept within. Under a filter a
+    /// The grid's rows — the members, or the trip's filtered read while a filter is chosen — and
+    /// whether they are a reading: what a tap opens the viewer over and pages through, and what
+    /// the selection is kept within. Under a filter a
     /// picture of the filtered read is there even when the capped drain never reached it.
     private var viewerRows: (rows: [LibraryRow], loaded: Bool) {
         let query = gridQuery

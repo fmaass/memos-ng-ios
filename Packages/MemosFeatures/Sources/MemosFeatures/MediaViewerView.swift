@@ -41,7 +41,7 @@ struct MediaViewerView: View {
     let delete: (@MainActor (String) async -> Bool)?
     /// One more thing the presenting screen lets the reader do with the page on screen, or nil —
     /// which is every viewer but a trip's ("Use as Cover", MEMNG-720). Passed in, as `delete` is:
-    /// the viewer knows nothing of trips, only that a host handed it an action.
+    /// the viewer knows nothing of a trip's cover, only that a host handed it an action.
     let hostAction: MediaViewerHostAction?
     /// The pages deleted elsewhere while this viewer is open, handed in by a screen that holds the
     /// pictures Delete took. Each leaves as a page this viewer deleted itself does (`remove`): the
@@ -65,6 +65,11 @@ struct MediaViewerView: View {
     /// Where the Info sheet's Open in Places sends a picture's place (MEMNG-869). Optional: a host
     /// without one draws no Open in Places.
     @Environment(PlacesFocus.self) private var placesFocus: PlacesFocus?
+    /// The albums the menu's Add to Album adds to (MEMNG-805); the row is offered only with them.
+    @Environment(TripStore.self) private var trips: TripStore?
+    @Environment(TripMemberStore.self) private var tripMembers: TripMemberStore?
+    /// Add to Album from the menu: the picker for the picture on screen, and its sentence.
+    @State private var albumAdd = AlbumAddFlow()
     /// The place names the Info sheet has looked up, one lookup per file while the viewer is up.
     @State private var places = PlaceNameCache()
     /// The download the menu's slow action starts, and the sheet it ends in.
@@ -134,6 +139,10 @@ struct MediaViewerView: View {
         .overlay(alignment: .top) { topRow }
         .overlay(alignment: .bottom) {
             VStack(spacing: 0) {
+                if let message = albumAdd.message {
+                    LibraryDeleteToast(text: message) { albumAdd.message = nil }
+                        .padding(.bottom, DesignTokens.Space.snug)
+                }
                 failureNotice
                 // Above the bar, over the reconciled pages the pager renders (MEMNG-861).
                 MediaViewerFilmstrip(
@@ -148,6 +157,8 @@ struct MediaViewerView: View {
         .sheet(item: $inspecting) { subject in
             infoSheet(for: subject)
         }
+        // On a view of its own: this one carries the info sheet and the delete alert.
+        .background { albumPicker }
         // Another account — or none — while the viewer is up: the Info sheet's memo and record
         // were read as the one before. The store also refuses a handle of another generation on
         // its own (`MediaContextStore.adopt`); this is the viewer's notice of the same change.
@@ -299,6 +310,29 @@ struct MediaViewerView: View {
         openInfo(page)
     }
 
+    /// The album picker over the picture the menu was opened on (MEMNG-805).
+    private var albumPicker: some View {
+        Color.clear.sheet(item: $albumAdd.picking) { picking in
+            if let trips {
+                AlbumPickerSheet(
+                    trips: trips, members: tripMembers, access: { albumAccess }
+                ) { album in
+                    Task {
+                        await albumAdd.add(
+                            picking.uids, to: album, trips: trips, access: albumAccess)
+                    }
+                }
+            }
+        }
+    }
+
+    private var albumAccess: CollectionsAccess? {
+        guard let session, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return nil }
+        return CollectionsAccess(handle: handle, baseURL: baseURL)
+    }
+
     private func openInfo(_ page: MediaPage) {
         let store: MediaContextStore
         if let context {
@@ -356,7 +390,9 @@ struct MediaViewerView: View {
         let page = pages.first { $0.id == currentPage }
         HStack(spacing: 0) {
             MediaViewerActions(
-                control: page.map { MediaTileMenu.viewerControl(for: $0.attachment) } ?? .hidden,
+                control: page.map {
+                    MediaTileMenu.viewerControl(for: $0.attachment, albums: trips != nil)
+                } ?? .hidden,
                 showMemo: { uid in
                     // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
                     // presented by the tab being left would be a black screen over the memo.
@@ -366,6 +402,7 @@ struct MediaViewerView: View {
                 fetch: { attachment, rendition in
                     Task { await fetch(attachment, rendition) }
                 },
+                addToAlbum: { albumAdd.open([$0]) },
                 // Handed to the menu here and never to `MediaTileMenu`'s list: only the host that
                 // injected it offers it, so a library tile never grows a trip's row (MEMNG-768).
                 // The same host hands it to its grid's long press too (`LibraryGrid.hostAction`).
@@ -514,6 +551,8 @@ struct MediaViewerActions: View {
     /// Defaulted for the same reason the row's is: a surface that cannot download still builds the
     /// control rather than being handed a different one.
     var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
+    /// Add to Album's row (MEMNG-805).
+    var addToAlbum: (String) -> Void = { _ in }
     /// The presenting screen's own row, drawn LAST in the menu, or nil — every viewer but a trip's
     /// (MEMNG-768). It is appended here rather than to `MediaTileMenu`'s list, which the library
     /// tiles share.
@@ -560,7 +599,8 @@ struct MediaViewerActions: View {
 
     /// The row, whichever shape it ends up drawn in — a menu item, or the button itself.
     private func row(_ action: MediaTileAction) -> MediaTileActionItem {
-        MediaTileActionItem(action: action, showMemo: showMemo, fetch: fetch)
+        MediaTileActionItem(
+            action: action, showMemo: showMemo, fetch: fetch, addToAlbum: addToAlbum)
     }
 
     /// The overlay's one glyph, so the direct button and the menu are the same target in the same
@@ -587,6 +627,8 @@ struct MediaTileActionItem: View {
     /// cannot download — a preview, a fitting test — still builds the row rather than being handed
     /// a different menu.
     var fetch: (MemoAttachment, AttachmentRendition) -> Void = { _, _ in }
+    /// Add to Album's row: opens the picker for the picture (MEMNG-805).
+    var addToAlbum: (String) -> Void = { _ in }
 
     /// Everything a tap on this row does — the button's whole action, and the only thing it does.
     ///
@@ -606,6 +648,7 @@ struct MediaTileActionItem: View {
         // which is exactly how the value it was holding came to be a URL.
         case .share(let attachment): fetch(attachment, .shared)
         case .saveOriginal(let attachment): fetch(attachment, .original)
+        case .addToAlbum(let uid): addToAlbum(uid)
         }
     }
 

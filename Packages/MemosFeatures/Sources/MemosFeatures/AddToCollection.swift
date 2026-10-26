@@ -6,8 +6,8 @@ import SwiftUI
 /// the chosen pictures can go to, one section per kind, and a row sends them to its collection in
 /// one inclusion, as the submenu's trip rows did.
 ///
-/// Trips alone for now: an album's member route is live on the server only from memos-ng v2.6.0,
-/// and this app vendors v2.5.0, so the album section joins as a second `Kind` with WPN-29.
+/// Trips alone: albums take pictures through the select bar's Add to Album and its picker
+/// (`AlbumPicker`, MEMNG-805), which adds the pictures themselves rather than tagging their memos.
 ///
 /// Functions of their inputs, as `MediaLibraryView.selectRows` is, so a test reads the rows and
 /// what a row sends without hosting the sheet.

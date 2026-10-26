@@ -49,9 +49,12 @@ final class SelectResults {
     let banner = SelectBanner()
     let deleting: LibraryDeleteFlow
     let acting: MemoActionFlow
+    /// Add to Album (MEMNG-805), whose sentence is an action's.
+    let albums: AlbumAddFlow
 
     init() {
         deleting = LibraryDeleteFlow(banner: banner)
         acting = MemoActionFlow(banner: banner)
+        albums = AlbumAddFlow(banner: banner)
     }
 }

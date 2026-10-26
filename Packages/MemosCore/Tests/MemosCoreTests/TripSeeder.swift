@@ -7,9 +7,10 @@ import OpenAPIRuntime
 /// A scripted memos-ng that KEEPS its trips (MEMNG-754): the suites adapted from the device-local
 /// trip store read their result back through a SECOND `TripStore` refreshing from the same server,
 /// the way they once read it back through a second store over the same file. It answers list,
-/// create, get, patch, delete, the member listing, the exclusion PUT/DELETE and a picture's DELETE
-/// from its own rows. `answer`, when given, is asked first for every request and stands in for the
-/// server wherever it returns a response; anything nobody answers is a 404. Every request is
+/// create, get, patch, delete, the member listing, the exclusion PUT/DELETE, an album's batch add
+/// and a picture's DELETE from its own rows. `answer`, when given, is asked first for every
+/// request and stands in for the server wherever it returns a response; anything nobody answers is
+/// a 404. Every request is
 /// recorded in `calls`.
 final class TripServer: @unchecked Sendable {
     struct Row: Equatable {
@@ -199,6 +200,28 @@ final class TripServer: @unchecked Sendable {
                 stored[at].exclusions.removeAll { $0 == picture }
                 if operation == TripWire.exclude { stored[at].exclusions.append(picture) }
                 return Stub.empty(.noContent)
+            }
+        case TripWire.add:
+            // An album's add: a picture it lists is `alreadyMember`, any other one is `added`.
+            return lock.withLock {
+                guard let at = stored.firstIndex(where: { $0.uid == uid }) else {
+                    return Stub.detail("Not Found", status: .notFound)
+                }
+                let named = sent["attachmentUids"] as? [String] ?? []
+                var results: [String] = []
+                for picture in named {
+                    let listed = Self.visible(stored[at]).contains { TripWire.uid($0) == picture }
+                    if !listed, let index = Int(picture.dropFirst()) {
+                        stored[at].exclusions.removeAll { $0 == picture }
+                        if !stored[at].pictures.contains(index) {
+                            stored[at].pictures.append(index)
+                        }
+                    }
+                    let outcome = listed ? "alreadyMember" : "added"
+                    results.append(
+                        "{\"attachmentUid\":\"\(picture)\",\"outcome\":\"\(outcome)\"}")
+                }
+                return Stub.json("{\"results\":[\(results.joined(separator: ","))]}")
             }
         case Self.removeMember:
             return lock.withLock {

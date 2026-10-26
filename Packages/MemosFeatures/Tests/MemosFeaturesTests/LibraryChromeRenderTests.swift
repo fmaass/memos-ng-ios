@@ -914,8 +914,8 @@ extension MediaImageLoaderTests {
     }
 
     /// MEMNG-684, the owner's first sentence: in select mode a tap on one of my own pictures
-    /// chooses it — "Show Selected (1)" — and a second tap lets it go again. The fixture's pictures
-    /// are all the signed-in account's (`mine`), across twelve day bands.
+    /// chooses it — Add to Album stands in the bar — and a second tap lets it go again. The
+    /// fixture's pictures are all the signed-in account's (`mine`), across twelve day bands.
     ///
     /// The tap goes through the tile's own accessibility activation, which SwiftUI answers with
     /// the tile's button action — the same closure a finger's tap runs (`tapped`), never `toggle`
@@ -952,12 +952,11 @@ extension MediaImageLoaderTests {
 
             let tile = Self.photoTile(near: centre, in: window)
             let took = tile?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
-            {
+            for _ in 0..<200 where Self.elements(labelled: AlbumPicker.title, in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            let chosen = !Self.elements(labelled: AlbumPicker.title, in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             Self.shoot("684-tap-selected", window)
@@ -983,8 +982,7 @@ extension MediaImageLoaderTests {
 
             // Chosen again, then Close: nothing stays chosen and select mode's toolbar goes.
             _ = Self.photoTile(near: centre, in: window)?.accessibilityActivate()
-            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
-            {
+            for _ in 0..<200 where Self.elements(labelled: AlbumPicker.title, in: window).isEmpty {
                 await chromeSettle(window)
             }
             await closeSelect(window)
@@ -1026,12 +1024,11 @@ extension MediaImageLoaderTests {
             let dimmed = zip(browsing, selecting).contains { abs($0 - $1) > 0.08 }
 
             let took = Self.photoTile(near: centre, in: window)?.accessibilityActivate() ?? false
-            for _ in 0..<200 where Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
-            {
+            for _ in 0..<200 where Self.elements(labelled: AlbumPicker.title, in: window).isEmpty {
                 await chromeSettle(window)
             }
             await chromeSettle(window, turns: 5)
-            let chosen = !Self.elements(labelled: "Show Selected (1)", in: window).isEmpty
+            let chosen = !Self.elements(labelled: AlbumPicker.title, in: window).isEmpty
             let traits = Self.photoTile(near: centre, in: window)?.accessibilityTraits ?? []
             let marked = traits.contains(.selected)
             let share = Self.elements(labelled: "Share", in: window).first
@@ -1102,200 +1099,6 @@ extension MediaImageLoaderTests {
             if let view = object as? UIView { stack.append(contentsOf: view.subviews) }
         }
         return candidates.contains { $0.accessibilityActivate() }
-    }
-
-    /// MEMNG-779 (WPN-12 phase 1): select mode's centre is a button. With 3 of 20 pictures chosen
-    /// it reads "Show Selected (3)", and a press through the host narrows the grid to those 3 in
-    /// the grid's own order; a second press gives the 20 back; and leaving select mode while
-    /// narrowed shows the 20 too. A line of text in the button's place takes no press, and fails
-    /// here. The window is tall enough for the lazy grid to build all twenty tiles.
-    @Test("Show Selected (3) narrows the grid to the chosen three in order, and back to twenty")
-    func showSelectedNarrowsTheGrid() async {
-        let media = PaintedMedia(palette: Self.palette())
-        await withTransport(media) {
-            let window = await chromeHost(opening: .library, days: 1...5, height: 2600)
-            defer {
-                window.isHidden = true
-                window.rootViewController = nil
-            }
-            await libraryServed(media, window, pictures: 20)
-            var all = TripProbe.tiles(in: window)
-            for _ in 0..<200 where all.count < 20 {
-                await chromeSettle(window)
-                all = TripProbe.tiles(in: window)
-            }
-            guard all.count == 20 else {
-                Issue.record("the grid did not draw its twenty pictures: \(all)")
-                return
-            }
-
-            let select = Self.elements(labelled: "Select", in: window)
-            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "Share", in: window).isEmpty {
-                await chromeSettle(window)
-            }
-            await chromeSettle(window, turns: 20)
-            let chosen = [all[15], all[2], all[9]]
-            for uid in chosen {
-                #expect(Self.pressTile(uid, in: window), "no tile \(uid) took the press")
-                await chromeSettle(window, turns: 5)
-            }
-            let button = "Show Selected (3)"
-            for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
-                await chromeSettle(window)
-            }
-            @MainActor func press(_ label: String) -> Bool {
-                Self.elements(labelled: label, in: window).contains {
-                    $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
-                }
-            }
-            @MainActor func settled(on count: Int) async -> [String] {
-                var tiles = TripProbe.tiles(in: window)
-                for _ in 0..<200 where tiles.count != count {
-                    await chromeSettle(window)
-                    tiles = TripProbe.tiles(in: window)
-                }
-                await chromeSettle(window, turns: 10)
-                return TripProbe.tiles(in: window)
-            }
-            let whole = Self.headings(in: window)
-            let selectedLines = Self.labels(in: window).filter { $0.contains("Select") }
-
-            #expect(press(button), "no \(button) button took the press: \(selectedLines)")
-            let narrowed = await settled(on: 3)
-            #expect(
-                narrowed == all.filter(chosen.contains),
-                "narrowed to \(narrowed), wanted \(all.filter(chosen.contains))")
-            // The month and the days the three were taken on keep their headings; the days with
-            // none of them chosen lose theirs.
-            let days = Set(chosen.compactMap(Self.day(ofTile:)))
-            let kept = Self.headings(in: window)
-            #expect(
-                kept == whole.filter { Self.day(ofHeading: $0).map(days.contains) ?? true },
-                "headings narrowed: \(kept), whole grid: \(whole)")
-            #expect(
-                kept.compactMap(Self.day(ofHeading:)).count == days.count,
-                "not one heading per chosen day: \(kept)")
-            Self.shoot("779-narrowed", window)
-
-            // A tile of the narrowed grid resolves to ITS file: the tap lets that one go, and the
-            // other two stay (an index read against the whole list would find no row, or another).
-            guard narrowed.count == 3 else { return }
-            let middle = narrowed[1]
-            #expect(Self.pressTile(middle, in: window), "the narrowed tile \(middle) took no press")
-            let two = await settled(on: 2)
-            #expect(two == narrowed.filter { $0 != middle }, "after the tap: \(two)")
-            let button2 = "Show Selected (2)"
-            for _ in 0..<200 where Self.elements(labelled: button2, in: window).isEmpty {
-                await chromeSettle(window)
-            }
-
-            #expect(press(button2), "the second press found no \(button2) button")
-            let widened = await settled(on: 20)
-            #expect(widened == all, "the second press gave back \(widened.count) tiles")
-
-            // Narrowed again, then Close: leaving select mode shows the whole grid.
-            #expect(press(button2), "the third press found no \(button2) button")
-            _ = await settled(on: 2)
-            await closeSelect(window)
-            let closed = await settled(on: 20)
-            #expect(closed == all, "leaving select mode left \(closed.count) tiles")
-        }
-    }
-
-    /// MEMNG-819: pictures chosen far down the grid, then "Show Selected" — the narrowed grid is a
-    /// few bands at the top of the page while the scroll stays where the reader chose them, so the
-    /// screen shows nothing at all (black, in dark mode, on the device). The chosen pictures must
-    /// be on screen once the grid narrows, and still on screen once the same press widens it. The
-    /// window is a phone's height, so the lazy grid builds only what is near the scroll.
-    @Test("Show Selected from deep in the grid keeps the chosen pictures on screen")
-    func showSelectedFromDeepKeepsTheChosenOnScreen() async {
-        let media = PaintedMedia(palette: Self.palette())
-        await withTransport(media) {
-            let window = await chromeHost(opening: .library)
-            defer {
-                window.isHidden = true
-                window.rootViewController = nil
-            }
-            await libraryServed(media, window)
-            guard let scroller = Self.mainScroll(in: window) else {
-                Issue.record("no scroll view holds the grid")
-                return
-            }
-            // Deep into the page, short of its end: where a reader scrolls to find a picture.
-            let page = window.bounds.height
-            for _ in 0..<200 where scroller.contentSize.height < 4 * page {
-                await chromeSettle(window)
-            }
-            let deep = min(3000, scroller.contentSize.height - 2 * page)
-            scroller.setContentOffset(CGPoint(x: 0, y: deep), animated: false)
-            await chromeSettle(window, turns: 20)
-            let onScreen = Self.tileFrames(in: window).filter { _, frame in
-                frame.minY >= 150 && frame.maxY <= window.bounds.height - 150
-            }.sorted { ($0.value.minY, $0.value.minX) < ($1.value.minY, $1.value.minX) }
-            guard let first = onScreen.first?.key,
-                let second = onScreen.dropFirst().first(where: {
-                    Self.day(ofTile: $0.key) == Self.day(ofTile: first)
-                })?.key ?? onScreen.dropFirst().first?.key
-            else {
-                Issue.record("control: fewer than two tiles on screen at \(deep) pt: \(onScreen)")
-                return
-            }
-            // Deeper than a screen: a narrowed grid of a band or two lies wholly above it.
-            #expect(scroller.contentOffset.y > page, "control: the scroll did not go deep")
-
-            let select = Self.elements(labelled: "Select", in: window)
-            #expect(select.contains { $0.accessibilityActivate() }, "Select took no press")
-            for _ in 0..<200 where Self.elements(labelled: "Share", in: window).isEmpty {
-                await chromeSettle(window)
-            }
-            await chromeSettle(window, turns: 20)
-            for uid in [first, second] {
-                #expect(Self.pressTile(uid, in: window), "no tile \(uid) took the press")
-                await chromeSettle(window, turns: 5)
-            }
-            let button = "Show Selected (2)"
-            for _ in 0..<200 where Self.elements(labelled: button, in: window).isEmpty {
-                await chromeSettle(window)
-            }
-            @MainActor func press() -> Bool {
-                Self.elements(labelled: button, in: window).contains {
-                    $0.accessibilityTraits.contains(.button) && $0.accessibilityActivate()
-                }
-            }
-            // Where each chosen picture is drawn once the grid has settled, absent where none is.
-            @MainActor func chosenFrames() async -> [String: CGRect] {
-                await chromeSettle(window, turns: 40)
-                return Self.tileFrames(in: window).filter { [first, second].contains($0.key) }
-            }
-
-            #expect(press(), "no \(button) button took the press")
-            let narrowed = await chosenFrames()
-            Self.shoot("819-narrowed", window)
-            for uid in [first, second] {
-                let frame = narrowed[uid]
-                #expect(
-                    frame.map { window.bounds.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true,
-                    """
-                    narrowed: the chosen \(uid) is not on screen (frame \(String(describing: frame)), \
-                    offset \(scroller.contentOffset.y), content \(scroller.contentSize.height))
-                    """)
-            }
-
-            #expect(press(), "the second press found no \(button) button")
-            let widened = await chosenFrames()
-            Self.shoot("819-widened", window)
-            for uid in [first, second] {
-                let frame = widened[uid]
-                #expect(
-                    frame.map { window.bounds.contains(CGPoint(x: $0.midX, y: $0.midY)) } == true,
-                    """
-                    widened: the chosen \(uid) is not on screen (frame \(String(describing: frame)), \
-                    offset \(scroller.contentOffset.y), content \(scroller.contentSize.height))
-                    """)
-            }
-            await closeSelect(window)
-        }
     }
 
     /// Every built tile's file and where it is drawn, in window points.

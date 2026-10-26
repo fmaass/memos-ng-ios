@@ -78,6 +78,7 @@ public final class TripStore {
         case delete
         case exclude(Set<String>)
         case include(Set<String>)
+        case add([String])
         case removeMember(Set<String>)
     }
 
@@ -91,6 +92,7 @@ public final class TripStore {
         case trip(Trip)
         case deleted
         case batch(TripBatchOutcome)
+        case added(AlbumAddOutcome)
         case failed(Failure)
     }
 
@@ -329,7 +331,7 @@ public final class TripStore {
         switch result {
         case .deleted: return
         case .failed(let failure): throw failure
-        case .trip, .batch: throw Failure.superseded
+        case .trip, .batch, .added: throw Failure.superseded
         }
     }
 
@@ -408,7 +410,7 @@ public final class TripStore {
         switch result {
         case .batch(let outcome): return outcome
         case .failed(let failure): throw failure
-        case .trip, .deleted: throw Failure.superseded
+        case .trip, .deleted, .added: throw Failure.superseded
         }
     }
 
@@ -457,6 +459,74 @@ public final class TripStore {
         }
         for reconcile in onReconcile { await reconcile(authority.uid, handle, baseURL) }
         return .batch(outcome)
+    }
+
+    /// The batch route's request limit (`CollectionInclusion.attachmentUids.maxItems`).
+    public nonisolated static let addChunk = 500
+
+    /// Adds the pictures to the album on the server (MEMNG-805), under the album's slot: the same
+    /// uids again JOIN the add on the wire, any other write on the album meanwhile — another add
+    /// included — is refused `.busy` and sends nothing. One POST per chunk of `addChunk`, in
+    /// order, the authority asked again before each; a failed chunk stops the rest. Each chunk's
+    /// `added` and `alreadyMember` answers end the app's record of having taken that picture out of
+    /// THIS album (MEMNG-793) as the chunk is applied, before any drain, so a reconciliation that
+    /// fails cannot leave a member hidden. Whatever was sent, the revision moves, the record is
+    /// read again and the members are drained, still inside the slot. Throws when the first chunk
+    /// fails: nothing was answered, so there is nothing to sum.
+    @discardableResult
+    public func addMembers(
+        _ uids: [String], to album: Trip, using handle: SessionHandle, baseURL: URL
+    ) async throws -> AlbumAddOutcome {
+        let result = await write(uid: album.uid, .add(uids), handle: handle) { authority in
+            await self.runAdd(uids, authority, handle, baseURL)
+        }
+        switch result {
+        case .added(let outcome):
+            if let stopped = outcome.stopped, outcome.answered == 0 { throw stopped }
+            return outcome
+        case .failed(let failure): throw failure
+        case .trip, .deleted, .batch: throw Failure.superseded
+        }
+    }
+
+    private func runAdd(
+        _ uids: [String], _ authority: Authority, _ handle: SessionHandle, _ baseURL: URL
+    ) async -> WriteResult {
+        var outcome = AlbumAddOutcome(asked: uids.count)
+        var sent = false
+        for start in stride(from: 0, to: uids.count, by: Self.addChunk) {
+            guard writeStillOwned(authority), slotOwned(authority) else {
+                outcome.stopped = .superseded
+                break
+            }
+            let chunk = Array(uids[start..<min(start + Self.addChunk, uids.count)])
+            sent = true
+            do {
+                let results = try await Self.add(handle.client, uid: authority.uid, chunk)
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                guard writeStillOwned(authority) else { return .failed(.superseded) }
+                for result in results {
+                    outcome.apply(result.outcome.rawValue, to: result.attachmentUid)
+                    guard AlbumAddOutcome.isMember(result.outcome.rawValue) else { continue }
+                    for note in onAcknowledged {
+                        note(.include, authority.uid, result.attachmentUid)
+                    }
+                }
+            } catch {
+                outcome.stopped = await failure(error, scope: authority.scope, handle: handle)
+                break
+            }
+        }
+        guard writeStillOwned(authority), slotOwned(authority) else { return .failed(.superseded) }
+        // A chunk that failed may still have been written: the drain shows the truth either way.
+        if sent { bump(authority.uid) }
+        do {
+            try await reload(uid: authority.uid, using: handle, baseURL: baseURL)
+        } catch {
+            guard writeStillOwned(authority) else { return .failed(.superseded) }
+        }
+        for reconcile in onReconcile { await reconcile(authority.uid, handle, baseURL) }
+        return .added(outcome)
     }
 
     /// Pictures joined trip `uid` (or, for nil, changed in ways any trip's reads may show) through
@@ -528,7 +598,7 @@ public final class TripStore {
         switch result {
         case .trip(let trip): return trip
         case .failed(let failure): throw failure
-        case .deleted, .batch: throw Failure.superseded
+        case .deleted, .batch, .added: throw Failure.superseded
         }
     }
 
@@ -738,6 +808,23 @@ public final class TripStore {
         switch try await client.deleteCollectionApiCollectionsUidDelete(input) {
         case .noContent: return
         case .notFound: throw APIError.notFound
+        case .unprocessableContent: throw APIError.server(status: 422)
+        case .serviceUnavailable: throw APIError.fromStatus(503)
+        case .undocumented(let status, _): throw APIError.fromStatus(status)
+        default: throw StoreFailure.documentedRefusal
+        }
+    }
+
+    /// ONE request of the batch route; the server's answer per distinct uid, in the order named.
+    static func add(
+        _ client: any APIProtocol, uid: String, _ attachments: [String]
+    ) async throws -> [Components.Schemas.InclusionResult] {
+        let response = try await client.includeAttachmentsApiCollectionsUidAttachmentsPost(
+            .init(path: .init(uid: uid), body: .json(.init(attachmentUids: attachments))))
+        switch response {
+        case .ok(let ok): return try ok.body.json.results
+        case .notFound: throw APIError.notFound
+        case .conflict: throw APIError.server(status: 409)
         case .unprocessableContent: throw APIError.server(status: 422)
         case .serviceUnavailable: throw APIError.fromStatus(503)
         case .undocumented(let status, _): throw APIError.fromStatus(status)

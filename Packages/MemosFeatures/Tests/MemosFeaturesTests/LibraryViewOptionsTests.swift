@@ -26,7 +26,7 @@ struct LibraryViewOptionsTests {
 
         var body: some View {
             LibraryGrid(
-                items: selection.visible(in: items),
+                items: items,
                 errorText: nil,
                 loadingMore: false,
                 zoom: zoom,
@@ -451,10 +451,10 @@ struct LibraryViewOptionsTests {
         #expect(consumed.landings == [landing], "the landing was consumed again")
     }
 
-    // MARK: - Select and Show Selected
+    // MARK: - Select
 
-    @Test("Select mode and Show Selected draw the chosen tiles with grouping off")
-    func selectAndShowSelectedWhileFlat() async throws {
+    @Test("Select mode draws the chosen tiles with grouping off")
+    func selectWhileFlat() async throws {
         let items = Self.library(days: 3)
         let wanted = Self.headingLabels(items)
         let chosen = [items[1], items[7]]
@@ -466,37 +466,20 @@ struct LibraryViewOptionsTests {
         let selecting = Self.show(
             Harness(items: items, preferences: scratch.preferences, selection: selection),
             height: 2000)
-        var narrowed = selection
-        narrowed.toggleNarrowed()
-        let showing = Self.show(
-            Harness(items: items, preferences: scratch.preferences, selection: narrowed),
-            height: 2000)
-        defer {
-            selecting.isHidden = true
-            showing.isHidden = true
-        }
+        defer { selecting.isHidden = true }
 
         var all: [String: NSObject] = [:]
-        var few: [String: NSObject] = [:]
-        for _ in 0..<80 where all.count < items.count || few.count < chosen.count {
+        for _ in 0..<80 where all.count < items.count {
             try await Task.sleep(for: .milliseconds(50))
             selecting.layoutIfNeeded()
-            showing.layoutIfNeeded()
             all = Self.tiles(in: selecting)
-            few = Self.tiles(in: showing)
         }
         let picked = Set(chosen.map(\.id))
         #expect(Set(all.keys) == Set(items.map(\.id)), "select mode drew \(all.keys.sorted())")
         let marked = all.filter { $0.value.accessibilityTraits.contains(.selected) }.keys
         #expect(Set(marked) == picked, "select mode marked \(marked.sorted())")
-        #expect(Set(few.keys) == picked, "Show Selected drew \(few.keys.sorted())")
-        #expect(
-            few.values.allSatisfy { $0.accessibilityTraits.contains(.selected) },
-            "Show Selected drew a chosen tile unmarked")
-        for window in [selecting, showing] {
-            let headings = Self.labels(in: window).filter(wanted.contains)
-            #expect(headings.isEmpty, "a grid with grouping off drew \(headings)")
-        }
+        let headings = Self.labels(in: selecting).filter(wanted.contains)
+        #expect(headings.isEmpty, "a grid with grouping off drew \(headings)")
     }
 
     // MARK: - Hosting and reading

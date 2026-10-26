@@ -27,11 +27,12 @@ enum LibrarySelectionPresentation {
         count == 1 ? "1 Item Selected" : "\(count) Items Selected"
     }
 
-    /// The Library's centre button (MEMNG-779): "Select Items", drawn disabled, before anything is
-    /// chosen, and "Show Selected (N)" after — the Photos app's words.
-    static func showSelectedText(_ count: Int) -> String {
-        count == 0 ? "Select Items" : "Show Selected (\(count))"
-    }
+    /// What the bar's middle says before anything is chosen, where Add to Album stands after.
+    static let selectItems = "Select Items"
+
+    /// Whether the bar's middle is Add to Album (MEMNG-805): only over a selection — there is
+    /// nothing to add before a picture is chosen.
+    static func showsAddToAlbum(count: Int) -> Bool { count > 0 }
 
     /// The row a placed picture was drawn from: the list entry at its index, when that entry is
     /// still the same file. A grid drawn between two lists must not let a tap choose the wrong one.
@@ -92,9 +93,10 @@ struct SelectableTile: ViewModifier {
 
 /// Select mode's bottom bar, in the dock's place (plan page 3929 decision 6): a flat toolbar, as
 /// in the Photos app, with a round glass share button on the left, the middle, and a round glass
-/// delete button on the right. The middle is a button, "Show Selected (N)", that narrows the grid
-/// to the chosen pictures and back (MEMNG-779), on the Library and on a trip alike (MEMNG-780). A
-/// trip's Remove is its actions menu's row, asked first, not a button here.
+/// delete button on the right. The middle is Add to Album (MEMNG-805), which replaced Show Selected
+/// and its narrowed grid (the owner, 2026-10-14), on the Library, a trip and an album alike, and
+/// absent while nothing is chosen. A trip's Remove is its actions menu's row, asked first, not a
+/// button here.
 struct LibrarySelectToolbar: View {
     let count: Int
     /// How many of the chosen pictures are mine, the only ones Delete may take (MEMNG-684).
@@ -105,11 +107,9 @@ struct LibrarySelectToolbar: View {
     let isDeleting: Bool
     let share: () -> Void
     let delete: () -> Void
-    /// "Show Selected (N)" (MEMNG-779): every screen passes it and the middle is that button; nil
-    /// draws the count line.
-    var showSelected: (() -> Void)? = nil
-    /// Whether the grid is narrowed to the selection: the button is drawn tinted, and selected.
-    var narrowed = false
+    /// Add to Album (MEMNG-805): every screen passes it and the middle is that button over a
+    /// selection; nil draws the count line.
+    var addToAlbum: (() -> Void)? = nil
 
     /// The smallest target a finger is promised, the header's round controls' size.
     private static var control: CGFloat { 44 }
@@ -174,23 +174,27 @@ struct LibrarySelectToolbar: View {
 }
 
 extension LibrarySelectToolbar {
-    /// The middle: the Show Selected button, or the count line where none is passed.
+    /// The middle: Add to Album over a selection, "Select Items" before one, or the count line
+    /// where no Add to Album is passed.
     @ViewBuilder
     private var centre: some View {
-        if let showSelected {
-            Button(action: showSelected) {
-                Text(LibrarySelectionPresentation.showSelectedText(count))
+        if let addToAlbum {
+            if LibrarySelectionPresentation.showsAddToAlbum(count: count) {
+                Button(action: addToAlbum) {
+                    Text(AlbumPicker.title)
+                        .font(.headline)
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.primary)
+                .disabled(!enabled)
+                // The count the bar no longer draws, still said: "2 Items Selected".
+                .accessibilityValue(LibrarySelectionPresentation.countText(count))
+            } else {
+                Text(LibrarySelectionPresentation.selectItems)
                     .font(.headline)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            // Tinted while narrowed; the system's disabled look before anything is chosen.
-            .foregroundStyle(
-                narrowed
-                    ? AnyShapeStyle(.tint)
-                    : count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
-            )
-            .disabled(count == 0)
-            .accessibilityAddTraits(narrowed ? .isSelected : [])
         } else {
             Text(LibrarySelectionPresentation.countText(count))
                 .font(.headline)

@@ -24,26 +24,6 @@ public struct LibrarySelection: Sendable, Equatable {
 
     public var count: Int { uids.count }
 
-    /// Whether the grid shows only the chosen pictures — the toolbar's "Show Selected (N)"
-    /// (MEMNG-779). Never true over an empty selection: a grid narrowed to nothing would leave the
-    /// button that widens it reading "Select Items", disabled, with nothing to tap.
-    public private(set) var narrowed = false
-
-    /// The toolbar's "Show Selected (N)": narrows the grid to the chosen pictures, and the same
-    /// press again gives the whole grid back. Refused outside select mode, and with nothing chosen.
-    public mutating func toggleNarrowed() {
-        guard isActive, narrowed || !uids.isEmpty else { return }
-        narrowed.toggle()
-    }
-
-    /// The rows the grid draws out of `rows`: all of them, or while narrowed the chosen ones — in
-    /// the GRID's order, not the order they were chosen (`rows(in:)` is that), so a narrowed grid
-    /// keeps its months and days in place.
-    public func visible(in rows: [LibraryRow]) -> [LibraryRow] {
-        guard narrowed else { return rows }
-        return rows.filter { members.contains($0.id) }
-    }
-
     public func contains(_ uid: String) -> Bool { members.contains(uid) }
 
     /// The header's Select capsule.
@@ -58,7 +38,6 @@ public struct LibrarySelection: Sendable, Equatable {
         guard isActive else { return }
         if members.remove(row.id) != nil {
             uids.removeAll { $0 == row.id }
-            if uids.isEmpty { narrowed = false }
         } else {
             members.insert(row.id)
             uids.append(row.id)
@@ -69,11 +48,10 @@ public struct LibrarySelection: Sendable, Equatable {
     public mutating func clear() {
         uids = []
         members = []
-        narrowed = false
     }
 
-    /// The header's close button: select mode ends and nothing stays chosen — nor narrowed — so
-    /// opening it again starts from nothing, over the whole grid.
+    /// The header's close button: select mode ends and nothing stays chosen, so opening it again
+    /// starts from nothing.
     public mutating func close() {
         isActive = false
         clear()
@@ -88,7 +66,6 @@ public struct LibrarySelection: Sendable, Equatable {
         guard !members.isSubset(of: kept) else { return }
         uids.removeAll { !kept.contains($0) }
         members = Set(uids)
-        if uids.isEmpty { narrowed = false }
     }
 
     /// The chosen rows out of `rows`, in selection order. A uid whose row is not in `rows` is left
