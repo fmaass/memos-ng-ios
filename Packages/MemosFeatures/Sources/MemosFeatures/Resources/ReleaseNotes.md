@@ -5,6 +5,11 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (68)
+
+- Tapping a day far down All by day now opens it at once with a single request, instead of reading the whole library from the top.
+- The pictures above that day load as I scroll up, and the grid keeps my place while they fill in.
+
 ## 2.4.0 (67)
 
 - Each month in the Library shows more day tiles by default, with two large hero tiles.
