@@ -81,7 +81,8 @@ public final class FavoriteStore {
     private var nextToken = 0
     private var detailGeneration = 0
     private var observers: [@MainActor (FavoriteCommit) async -> Void] = []
-    private var invalidations: [@MainActor (String) -> Void] = []
+    private var invalidations: [InvalidationObservation: @MainActor (String) -> Void] = [:]
+    private var nextObservation = 0
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
@@ -105,9 +106,25 @@ public final class FavoriteStore {
     /// it said: on a commit, and the moment a write's outcome turns out unknown — whether or not
     /// the reconciling read that follows lands (MEMNG-869). A store that keeps a picture's record
     /// forgets it here, so its next read asks the server again.
-    public func observeInvalidations(_ observer: @escaping @MainActor (String) -> Void) {
-        invalidations.append(observer)
+    ///
+    /// The observer stays until `endObserving(_:)` is handed what this returns (MEMNG-906): an
+    /// observer whose owner has gone is still called on every write until then.
+    public func observeInvalidations(
+        _ observer: @escaping @MainActor (String) -> Void
+    ) -> InvalidationObservation {
+        nextObservation += 1
+        let observation = InvalidationObservation(id: nextObservation)
+        invalidations[observation] = observer
+        return observation
     }
+
+    /// Removes the invalidation observer `observation` names; one already removed is a no-op.
+    public func endObserving(_ observation: InvalidationObservation) {
+        invalidations[observation] = nil
+    }
+
+    /// How many invalidation observers are registered.
+    var invalidationObserverCount: Int { invalidations.count }
 
     // MARK: - Reading
 
@@ -303,7 +320,7 @@ public final class FavoriteStore {
     }
 
     private func invalidate(_ uid: String) {
-        for observer in invalidations { observer(uid) }
+        for observer in invalidations.values { observer(uid) }
     }
 
     private func owns(_ uid: String, _ token: Int) -> Bool { flights[uid]?.token == token }
@@ -370,4 +387,9 @@ public final class FavoriteStore {
         case .undocumented(let status, _): throw APIError.fromStatus(status)
         }
     }
+}
+
+/// One registration of `FavoriteStore.observeInvalidations`, which ends it.
+public struct InvalidationObservation: Hashable, Sendable {
+    let id: Int
 }

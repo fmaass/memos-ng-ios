@@ -353,4 +353,35 @@ extension MediaInfoRecordReadTests {
             transport.count(record) == before + 1,
             "a write with an unknown outcome left the old record cached")
     }
+
+    @Test("following again keeps what is held; a write made while nothing followed reads again")
+    func unfollowForgetsWhatItHeld() async throws {
+        let transport = GatedRecordTransport()
+        transport.release()
+        let session = handle(transport)
+        let favorites = FavoriteStore()
+        let store = MediaContextStore()
+        let page = try #require(MediaViewerPresentation.pages(for: [file("a")]).first)
+        let context = MediaViewerContext.resolve(page, carried: nil)
+        func openAndClose() async {
+            // The viewer follows on every opening (MEMNG-906).
+            store.follow(favorites)
+            let opening = store.open("a")
+            await MediaInfoSheet.opened(
+                opening, context: context, store: store, handle: session, baseURL: base)
+            store.close(opening)
+        }
+
+        await openAndClose()
+        await openAndClose()
+        #expect(transport.count(record) == 1, "following again forgot the record held")
+
+        // The viewer goes; a write lands while this store hears nothing; the viewer comes back.
+        store.unfollow()
+        await favorites.setFavorite(
+            uid: "a", to: true, shownTags: [], using: session, baseURL: base
+        ).value
+        await openAndClose()
+        #expect(transport.count(record) == 2, "a write made while unfollowed left the record held")
+    }
 }

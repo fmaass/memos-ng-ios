@@ -1,12 +1,12 @@
 import Foundation
 import HTTPTypes
 import MemosAPI
-import MemosCore
 import OpenAPIRuntime
 import SwiftUI
 import Testing
 import UIKit
 
+@testable import MemosCore
 @testable import MemosFeatures
 
 /// MEMNG-860, viewer chrome 1/3: the bottom bar, the date capsule, hide-on-tap and the context
@@ -754,6 +754,36 @@ extension MediaImageLoaderTests {
             #expect(handed == substituted, "the viewer's still bypasses MediaImageLoader.transport")
         }
     }
+
+    /// MEMNG-906: the favorites store outlives every viewer, so a viewer's Info sheet must not
+    /// leave an observer behind each time it opens, nor one when the viewer itself has gone.
+    @Test("however often Info opens, a viewer is one favorites observer, and none once it has gone")
+    func oneFavoritesObserverPerLiveViewer() async throws {
+        let scripted = ScriptedTransport(payload: MediaFixture.png(.red))
+        let favorites = FavoriteStore()
+        let page = try #require(MediaViewerPresentation.pages(for: [picture("seen")]).first)
+        let selection = MediaViewerSelection(pages: [page], startIndex: 0)
+        await withTransport(scripted) {
+            let viewer = MediaViewerView(selection: selection, source: .fixed([page]))
+                .environment(favorites)
+            await CollectionsHost.with(viewer) { screen in
+                for opening in 1...3 {
+                    #expect(screen.press("Info"), "opening \(opening): no Info button")
+                    let shown = await eventually { screen.host.presentedViewController != nil }
+                    #expect(shown, "opening \(opening): no sheet")
+                    #expect(
+                        favorites.invalidationObserverCount == 1,
+                        "opening \(opening): \(favorites.invalidationObserverCount) observers")
+                    screen.host.presentedViewController?.dismiss(animated: false)
+                    _ = await eventually { screen.host.presentedViewController == nil }
+                }
+            }
+            let ended = await eventually { favorites.invalidationObserverCount == 0 }
+            #expect(
+                ended,
+                "the gone viewer left \(favorites.invalidationObserverCount) observers behind")
+        }
+    }
 }
 
 /// A grid's host cut down to the one call under test: `gridViewer` with its own defaults, opened
@@ -817,7 +847,7 @@ extension MediaImageLoaderTests {
 /// carry no owner of their own (`MemoAttachment(_:baseURL:)`) — that is what keeps Show Memo off
 /// the memo's viewer — and the row has to come from the memo the viewer was opened over.
 @MainActor
-@Suite("Viewer — Add to Album over a memo's pictures")
+@Suite("Viewer — Add to Album over a memo's pictures", .mediaGlobals)
 struct ViewerMemoAlbumTests {
     private let trips = TripStore(
         identity: TimelineSnapshotIdentity(

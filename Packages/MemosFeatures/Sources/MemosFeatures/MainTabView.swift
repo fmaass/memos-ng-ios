@@ -183,7 +183,7 @@ struct MainTabView: View {
         }
         // And for a picture's place asked for from the Info sheet: Places moves its map there.
         .onChange(of: placesFocus.pending) { _, pending in
-            selection = PlacesFocusRouting.tab(showing: selection, whenFocusing: pending)
+            selection = PlacesFocusRouting.tab(showing: selection, whenFocusing: pending?.request)
         }
     }
 

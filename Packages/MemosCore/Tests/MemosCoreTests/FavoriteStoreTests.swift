@@ -283,3 +283,45 @@ struct FavoriteStoreTests {
         #expect(Self.operations(log) == [Self.put], "a refusal was reconciled: \(log.get())")
     }
 }
+
+/// MEMNG-906: the favorites store outlives every viewer, so each registration it takes has to
+/// end, or every write runs through the observers of viewers long gone.
+@MainActor
+@Suite("Favorite store — invalidation observers")
+struct FavoriteInvalidationObserverTests {
+    @Test("a context store is one observer however often it follows, and none once it stops")
+    func observersAreBalanced() {
+        let favorites = FavoriteStore()
+        let first = MediaContextStore()
+        for _ in 0..<5 { first.follow(favorites) }
+        #expect(favorites.invalidationObserverCount == 1, "five follows, one store")
+
+        let second = MediaContextStore()
+        second.follow(favorites)
+        #expect(favorites.invalidationObserverCount == 2, "control: another viewer's store counts")
+
+        first.unfollow()
+        #expect(favorites.invalidationObserverCount == 1)
+        first.unfollow()
+        #expect(favorites.invalidationObserverCount == 1, "a second unfollow took another's")
+        second.unfollow()
+        #expect(favorites.invalidationObserverCount == 0)
+    }
+
+    @Test("an ended observation is called no more, and the others still are")
+    func anEndedObserverHearsNothing() async {
+        let favorites = FavoriteStore()
+        let heard = LockedValue<[String]>([])
+        let ended = favorites.observeInvalidations { heard.set(heard.get() + ["ended \($0)"]) }
+        let kept = favorites.observeInvalidations { heard.set(heard.get() + ["kept \($0)"]) }
+        favorites.endObserving(ended)
+        favorites.endObserving(ended)
+        let client = Stub.client { _, _, _ in Stub.empty(.noContent) }
+        await favorites.setFavorite(
+            uid: "p1", to: true, shownTags: [], using: client.handle, baseURL: Stub.baseURL
+        ).value
+        #expect(heard.get() == ["kept p1"])
+        favorites.endObserving(kept)
+        #expect(favorites.invalidationObserverCount == 0)
+    }
+}

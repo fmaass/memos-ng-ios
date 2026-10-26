@@ -138,6 +138,41 @@ struct MediaViewerFilmstripTests {
         #expect(MediaViewerFilmstrip.scrubbed(from: 5, translation: -pitch * 40, count: 10) == 9)
     }
 
+    @Test("a delete landing mid-drag keeps the scrub on the page it began on")
+    func aDeleteMidDragDoesNotJump() throws {
+        let pitch = MediaViewerFilmstrip.pitch
+        let ten = (0..<10).map { "s\($0)" }
+        func page(_ ids: [MediaPage.ID], _ step: (scrub: FilmstripScrub, reached: Int)) -> String {
+            ids[step.reached]
+        }
+
+        // The finger goes down on s5 and moves one page on.
+        let first = MediaViewerFilmstrip.dragged(nil, to: -pitch, over: ten, current: 5)
+        #expect(page(ten, first) == "s6")
+
+        // s1 is deleted under the finger: every later page moves one place down.
+        let nine = ten.filter { $0 != "s1" }
+        let current = try #require(nine.firstIndex(of: "s6"))
+        let second = MediaViewerFilmstrip.dragged(
+            first.scrub, to: -pitch * 2, over: nine, current: current)
+        #expect(page(nine, second) == "s7", "two pages on from s5 is s7, not \(page(nine, second))")
+
+        // The anchor itself is deleted: the scrub starts again from the page on screen, at the
+        // finger's present travel, and the next page on is the one after it.
+        let gone = nine.filter { $0 != "s5" }
+        let onScreen = try #require(gone.firstIndex(of: "s7"))
+        let rebased = MediaViewerFilmstrip.dragged(
+            second.scrub, to: -pitch * 2, over: gone, current: onScreen)
+        #expect(page(gone, rebased) == "s7", "the anchor's delete moved the strip")
+        let onward = MediaViewerFilmstrip.dragged(
+            rebased.scrub, to: -pitch * 3, over: gone, current: onScreen)
+        #expect(page(gone, onward) == "s8")
+
+        // Control: with nothing deleted, the same travel from s5 reaches s7.
+        let still = MediaViewerFilmstrip.dragged(first.scrub, to: -pitch * 2, over: ten, current: 6)
+        #expect(page(ten, still) == "s7")
+    }
+
     @Test("the strip hides with the chrome")
     func theStripHidesWithTheChrome() async {
         var chrome = MediaViewerChrome()

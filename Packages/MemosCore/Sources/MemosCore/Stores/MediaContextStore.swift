@@ -160,6 +160,8 @@ public final class MediaContextStore {
     private var nextToken = 0
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
+    /// The favorites store followed, and the registration that ends it.
+    private var following: (store: FavoriteStore, observation: InvalidationObservation)?
 
     private struct Flight {
         let token: Int
@@ -177,9 +179,24 @@ public final class MediaContextStore {
     public func reports(to session: any SessionReporting) { self.session = session }
 
     /// Forgets the record held for each file a favorites write commits, or leaves with an unknown
-    /// outcome, so the next opening of it reads again.
+    /// outcome, so the next opening of it reads again. Idempotent for the store it follows: the
+    /// viewer asks on every Info opening, and one store is one observer (MEMNG-906).
     public func follow(_ favorites: FavoriteStore) {
-        favorites.observeInvalidations { [weak self] uid in self?.forget(uid) }
+        if let following, following.store === favorites { return }
+        unfollow()
+        let observation = favorites.observeInvalidations { [weak self] uid in self?.forget(uid) }
+        following = (favorites, observation)
+    }
+
+    /// Stops following the favorites store, when the viewer that holds this one goes. What is held
+    /// is forgotten with it — the reads in the air included — because a write made while nothing
+    /// was listening could otherwise leave a record that no longer says what the file says.
+    public func unfollow() {
+        guard let following else { return }
+        following.store.endObserving(following.observation)
+        self.following = nil
+        for uid in records.keys { forget(uid) }
+        if let factFlight { forget(factFlight.opening.uid) }
     }
 
     /// The record held for `uid` is no longer this file's truth: the next opening reads again, and

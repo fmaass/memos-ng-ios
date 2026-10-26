@@ -43,6 +43,66 @@ struct PlacesFocusTests {
         #expect(focus.pending == nil)
     }
 
+    @Test("asking again for the same picture is a new request, and still puts the app on Places")
+    func aRepeatedRequestIsAChange() {
+        let focus = PlacesFocus()
+        focus.request(lisbon)
+        let first = focus.pending
+        // Places never took the first (its first read had no session to go out on): the same
+        // picture asked for again has to be a change, or the tab bar never sees it.
+        focus.request(lisbon)
+        #expect(focus.pending != first, "the second request was the same value as the first")
+        #expect(focus.pending?.request == lisbon)
+        let tab = PlacesFocusRouting.tab(showing: .library, whenFocusing: focus.pending?.request)
+        #expect(tab == .places)
+    }
+
+    @Test("a request made while Places is still loading waits, and lands once the map is there")
+    func aRequestWaitsForTheMap() {
+        let focus = PlacesFocus()
+        focus.request(lisbon)
+        #expect(focus.answer(given: .pending) == nil)
+        #expect(focus.pending?.request == lisbon, "a request was dropped while Places loaded")
+        #expect(focus.answer(given: .ready) == .focus(lisbon))
+        #expect(focus.pending == nil, "a request applied once is still pending")
+        #expect(focus.declined == nil)
+        #expect(focus.answer(given: .ready) == nil, "a request was applied twice")
+    }
+
+    @Test(
+        "a request Places has no map for is answered with why, never taken in silence",
+        arguments: [PlacesStatus.empty, .error])
+    func aRequestWithNoMapSaysWhy(_ status: PlacesStatus) throws {
+        let focus = PlacesFocus()
+        focus.request(lisbon)
+        let answer = try #require(focus.answer(given: status), "\(status): no answer")
+        guard case .declined(let decline) = answer else {
+            Issue.record("\(status): focused a map that is not there")
+            return
+        }
+        #expect(focus.declined == decline, "\(status): the notice is not shown")
+        #expect(!decline.message.isEmpty)
+        #expect(focus.pending == nil)
+        focus.dismissDecline()
+        #expect(focus.declined == nil)
+        // Control: the same request over a map that is there is taken without a notice.
+        focus.request(lisbon)
+        #expect(focus.answer(given: .ready) == .focus(lisbon))
+        #expect(focus.declined == nil)
+    }
+
+    @Test("the two notices say which of the two it is")
+    func theNoticesDiffer() {
+        let focus = PlacesFocus()
+        focus.request(lisbon)
+        _ = focus.answer(given: .empty)
+        let empty = focus.declined?.message
+        focus.request(lisbon)
+        _ = focus.answer(given: .error)
+        let failed = focus.declined?.message
+        #expect(empty != nil && failed != nil && empty != failed)
+    }
+
     @Test("the map centres on the picture's own pin when it holds one, else on the record's place")
     func centrePrefersThePin() {
         let pin = PlaceMarker(

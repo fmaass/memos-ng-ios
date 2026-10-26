@@ -44,8 +44,8 @@ struct MediaViewerFilmstrip: View {
     /// Goes to the page with this id.
     let select: (MediaPage.ID) -> Void
 
-    /// Where a drag began and how far it has gone; nil while no finger is on the strip.
-    @State private var scrub: (start: Int, translation: CGFloat)?
+    /// The page a drag is anchored on and how far it has gone; nil while no finger is on the strip.
+    @State private var scrub: FilmstripScrub?
 
     /// A thumbnail's width, the current one's, and the row's height.
     static let thumbWidth: CGFloat = 30
@@ -72,13 +72,14 @@ struct MediaViewerFilmstrip: View {
     }
 
     private func row(position: Int, width: CGFloat) -> some View {
-        let anchor = scrub?.start ?? position
+        let ids = pages.map(\.id)
+        // Until the next drag update rebases it, a scrub whose anchor has left the pages is drawn
+        // as no scrub at all: the current page in the middle, where the finger is.
+        let held = scrub.flatMap { scrub in scrub.start(in: ids).map { (scrub, $0) } }
+        let anchor = held?.1 ?? position
         let offset = Self.rowOffset(
-            width: width, anchor: anchor, translation: scrub?.translation ?? 0)
-        let focus =
-            scrub.map {
-                Self.scrubbed(from: $0.start, translation: $0.translation, count: pages.count)
-            } ?? position
+            width: width, anchor: anchor, translation: held?.0.travelled ?? 0)
+        let focus = held.flatMap { $0.0.reached(in: ids) } ?? position
         let window = Self.window(count: pages.count, around: focus, width: width)
         let placed = window.map { (index: $0, page: pages[$0]) }
         return ZStack(alignment: .topLeading) {
@@ -119,11 +120,10 @@ struct MediaViewerFilmstrip: View {
     private func drag(from position: Int) -> some Gesture {
         DragGesture(minimumDistance: 4)
             .onChanged { value in
-                let start = scrub?.start ?? position
-                scrub = (start, value.translation.width)
-                let next = Self.scrubbed(
-                    from: start, translation: value.translation.width, count: pages.count)
-                if pages[next].id != current { select(pages[next].id) }
+                let step = Self.dragged(
+                    scrub, to: value.translation.width, over: pages.map(\.id), current: position)
+                scrub = step.scrub
+                if pages[step.reached].id != current { select(pages[step.reached].id) }
             }
             .onEnded { _ in
                 withAnimation(.snappy) { scrub = nil }
@@ -134,6 +134,26 @@ struct MediaViewerFilmstrip: View {
     /// reason `MediaPage.accessibilityLabel` gives.
     static func label(for page: MediaPage) -> String {
         "\(page.accessibilityLabel) thumbnail"
+    }
+
+    /// One update of a drag over the pages as they stand NOW: the scrub it leaves, and the index
+    /// of the page under the middle.
+    ///
+    /// The scrub is anchored on a page id, never an index (MEMNG-901). A delete that lands while
+    /// the finger is down takes a page out from under the strip; an index saved when the drag began
+    /// would then name the page after the one it meant, and the next update would jump. Looked up
+    /// by id, the anchor moves with its page. When the anchor itself is what went, the scrub starts
+    /// again from the page on screen, at the finger's present travel, so nothing jumps either.
+    static func dragged(
+        _ scrub: FilmstripScrub?, to translation: CGFloat, over ids: [MediaPage.ID], current: Int
+    ) -> (scrub: FilmstripScrub, reached: Int) {
+        if var scrub, scrub.start(in: ids) != nil {
+            scrub.translation = translation
+            return (scrub, scrub.reached(in: ids) ?? current)
+        }
+        let fresh = FilmstripScrub(
+            anchor: ids[current], origin: scrub == nil ? 0 : translation, translation: translation)
+        return (fresh, fresh.reached(in: ids) ?? current)
     }
 
     /// The page a drag that began on `start` has reached after `translation` points: a drag to the
@@ -166,5 +186,29 @@ struct MediaViewerFilmstrip: View {
         let lower = max(0, focus - reach)
         let upper = min(count, focus + reach + 1)
         return lower < upper ? lower..<upper : 0..<0
+    }
+}
+
+/// A drag on the filmstrip: the page it is anchored on, by id, and how far the finger has gone.
+struct FilmstripScrub: Equatable {
+    /// The page that sat in the middle when the anchor was taken.
+    let anchor: MediaPage.ID
+    /// The drag's translation when the anchor was taken: zero for a fresh drag, the travel so far
+    /// for one that had to start again from another page.
+    let origin: CGFloat
+    /// The drag's translation now.
+    var translation: CGFloat
+
+    /// How far the row has moved since the anchor was taken.
+    var travelled: CGFloat { translation - origin }
+
+    /// Where the anchor stands among `ids`; nil once it has left them.
+    func start(in ids: [MediaPage.ID]) -> Int? { ids.firstIndex(of: anchor) }
+
+    /// The page the drag has reached over `ids`; nil once the anchor has left them.
+    func reached(in ids: [MediaPage.ID]) -> Int? {
+        start(in: ids).map {
+            MediaViewerFilmstrip.scrubbed(from: $0, translation: travelled, count: ids.count)
+        }
     }
 }

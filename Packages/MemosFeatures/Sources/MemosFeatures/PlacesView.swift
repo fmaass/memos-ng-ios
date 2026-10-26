@@ -94,6 +94,16 @@ private struct PlacesScreen: View {
             applyFocus()
         }
         .onChange(of: focus?.pending) { _, _ in applyFocus() }
+        // A request that came while the first read was still out is answered when it settles,
+        // whichever load that turns out to be (MEMNG-906).
+        .onChange(of: places.map { PlacesPresentation.state(of: $0) }) { _, _ in applyFocus() }
+        .alert(
+            PlacesFocus.Decline.title, isPresented: declineShown, presenting: focus?.declined
+        ) { _ in
+            Button("OK", role: .cancel) { focus?.dismissDecline() }
+        } message: { decline in
+            Text(decline.message)
+        }
         .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
     }
 
@@ -143,11 +153,18 @@ private struct PlacesScreen: View {
         { await load() }
     }
 
-    /// Takes a pending focus and hands it to the map once the markers have been read, so the
-    /// picture's own pin can be the centre; the map holds it until it has had its opening view.
+    private var declineShown: Binding<Bool> {
+        Binding(
+            get: { focus?.declined != nil },
+            set: { shown in if !shown { focus?.dismissDecline() } })
+    }
+
+    /// Answers a pending focus (`PlacesFocus.answer(given:)`) and hands a taken one to the map once
+    /// the markers have been read, so the picture's own pin can be the centre; the map holds it
+    /// until it has had its opening view.
     private func applyFocus() {
-        guard let places, PlacesPresentation.state(of: places) != .pending,
-            let request = focus?.take()
+        guard let places,
+            case .focus(let request)? = focus?.answer(given: PlacesPresentation.state(of: places))
         else { return }
         let center = PlacesFocusRouting.center(for: request, in: places.markers)
         map.focus(

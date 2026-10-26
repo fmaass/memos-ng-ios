@@ -219,7 +219,11 @@ struct MediaViewerView: View {
         // The way out is not only the close button: the zoom transition dismisses on a drag, and
         // a video that went on playing behind a dismissed viewer would be a voice in an empty
         // room. Every exit lands here.
-        .onDisappear { playback.advance(.dismissed) }
+        .onDisappear {
+            playback.advance(.dismissed)
+            // One observer per live viewer: the favorites store outlives every viewer.
+            context?.unfollow()
+        }
     }
 
     private var pager: some View {
@@ -341,10 +345,12 @@ struct MediaViewerView: View {
             store = MediaContextStore(
                 onUnauthorized: { [session] refusal in await session.handle(refusal) })
             store.reports(to: session)
-            if let favorites { store.follow(favorites) }
         } else {
             store = MediaContextStore()
         }
+        // On every opening and idempotent: the viewer's disappearance ends it, and a viewer that
+        // comes back takes it up again here (MEMNG-906).
+        if let favorites { store.follow(favorites) }
         context = store
         inspecting = MediaInfoSubject(page: page, store: store, opening: store.open(page.id))
     }

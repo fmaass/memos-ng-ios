@@ -40,7 +40,7 @@ private func marker(_ uid: String, mine: Bool) -> PlaceMarker {
 }
 
 @MainActor
-@Suite("Viewer bin per page")
+@Suite("Viewer bin per page", .mediaGlobals)
 struct ViewerBinTests {
     /// The bar's answer for the page showing `uid`, with the host's delete handed in.
     private func bin(_ selection: MediaViewerSelection?, on uid: String) throws -> Bool {
