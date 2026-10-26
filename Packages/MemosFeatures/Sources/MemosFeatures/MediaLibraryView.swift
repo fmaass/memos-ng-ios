@@ -446,6 +446,10 @@ struct MediaLibraryView: View {
             open: { open($0) },
             fetch: { file, rendition in await fetch(file, rendition) },
             loadMore: { await loadMore() },
+            // The rows above a day a jump opened the list at (MEMNG-636), read as the reader comes
+            // up to the top; never from a narrowed list, for `wantsMore`'s reason.
+            wantsEarlier: { !selection.narrowed && library.shouldLoadEarlier(before: $0) },
+            loadEarlier: { await loadEarlier() },
             landing: library.landing,
             landed: { library.consumeLanding($0) },
             // Asked where it is acted on, never remembered from the last drawing: the store can
@@ -872,6 +876,13 @@ struct MediaLibraryView: View {
         await library.loadMore(using: handle, baseURL: baseURL)
     }
 
+    private func loadEarlier() async {
+        guard let library, let handle = session.activeHandle,
+            let baseURL = session.serverBaseURL
+        else { return }
+        await library.loadEarlier(using: handle, baseURL: baseURL)
+    }
+
     private func jump(_ library: MediaLibraryStore, toDay day: String, in zone: String) async {
         guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else { return }
         await library.jump(toDay: day, in: zone, using: handle, baseURL: baseURL)
@@ -931,6 +942,60 @@ final class RowsOnScreen {
     var rows: Set<String> = []
 }
 
+/// The list a grid last drew its rows for, kept out of SwiftUI's observation for `RowsOnScreen`'s
+/// reason. The element at the line is read from the rows as they were drawn: the rows put above
+/// can cut the days below them into other bands (MEMNG-607's mosaic).
+final class DrawnList {
+    var items: [LibraryRow] = []
+    /// The list `items` was drawn as (`DrawnKey`).
+    var key: DrawnKey?
+    /// The heading or band reaching below the line at the last scroll of the list as drawn, and
+    /// how far the line is past its top. Read at the scroll, where the markers are that list's:
+    /// by the time a change of the list is told, the stack has laid out the new one — and may
+    /// have scrolled it, a held landing for one — so a scroll of a list not yet told is not read.
+    var atLine: (id: String, offset: Double)?
+}
+
+/// The row held partly past the line and by how much (`HeldFile.offset`). Observed only by each
+/// row's `KeptLineAnchor`, so moving it re-draws one anchor and never the library.
+@MainActor
+@Observable
+final class KeptLine {
+    var row: String?
+    var offset: Double = 0
+}
+
+/// A point drawn `offset` below the top of the held row, under an identity a scroll can reach: a
+/// proxy brings a row's top to the line, so the row is kept partly past it by bringing this
+/// point there instead. Nothing on any other row.
+struct KeptLineAnchor: View {
+    let kept: KeptLine
+    let row: String
+
+    var body: some View {
+        // A spacer, not an alignment guide: a guide moved inside an overlay did not move the point
+        // a scroll reaches. A row kept with its top below the line keeps its top at it instead.
+        if kept.row == row {
+            VStack(spacing: 0) {
+                Color.clear.frame(height: max(kept.offset, 0))
+                Color.clear.frame(height: 1).id(LibraryGrid.keptLineID)
+            }
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+/// What `keepAbove` compares across a change of the list: its ends, its length, its generation
+/// and whether Show Selected narrows it. Any change of one re-reads the list as drawn, so a next
+/// page appended, a jump that installed nothing or the same first row all leave it current.
+struct DrawnKey: Equatable {
+    let first: String?
+    let last: String?
+    let count: Int
+    let generation: Int
+    let narrowed: Bool
+}
+
 /// What a `LibraryGrid` is drawn in: its grouping and the device's tile layout, re-cut together.
 struct LibraryGridCut: Equatable {
     let grouping: LibraryGridGrouping
@@ -939,11 +1004,14 @@ struct LibraryGridCut: Equatable {
 
 /// The file a grid keeps at the line until the reader's hand moves: a landing's, held by its day's
 /// heading in a grouped grid and by its band in a flat one, or the picture a re-cut kept, by its
-/// band. `listGeneration` is the list it was taken in.
+/// band. `listGeneration` is the list it was taken in. `offset` is how far above the line the
+/// row's top is kept: rows put above the list keep the heading or band the reader had at the
+/// line exactly where it was, partly scrolled past or not (MEMNG-636).
 struct HeldFile: Equatable {
     let file: String
     let byHeading: Bool
     let listGeneration: Int
+    var offset: Double = 0
 }
 
 /// How a `LibraryGrid` cuts its list (MEMNG-740).
@@ -972,6 +1040,10 @@ struct LibraryGrid: View {
     /// closure, because they differ only in which file they ask for.
     let fetch: (MemoAttachment, AttachmentRendition) async -> Void
     let loadMore: () async -> Void
+    /// Whether the file at this index is near enough the TOP to fetch the rows above it — a list
+    /// opened at a day (MEMNG-636). The store's rule, as `wantsMore` is; none by default.
+    var wantsEarlier: (Int) -> Bool = { _ in false }
+    var loadEarlier: () async -> Void = {}
     /// The row a jump to a day landed on, which the scroll is brought to each time a jump lands.
     /// The store takes it down with the list it belongs to, so an abandoned jump never lands here.
     var landing: LibraryLanding?
@@ -1036,6 +1108,10 @@ struct LibraryGrid: View {
     /// than observed state on purpose: it changes with every row scrolled past, and observing it
     /// would re-solve the whole library each time.
     @State private var onScreen = RowsOnScreen()
+    /// The list the rows were last drawn for (`keepAbove`).
+    @State private var drawn = DrawnList()
+    /// The point a row held partly past the line is scrolled to (`HeldFile.offset`, `KeptLine`).
+    @State private var kept = KeptLine()
     /// The height the rows were last laid out to, kept only while a landing waits to be reached,
     /// so the library is not re-solved for every layout after that.
     @State private var laidOut: CGFloat = 0
@@ -1065,6 +1141,7 @@ struct LibraryGrid: View {
                 // Group by Day re-cuts the rows in place: the store's list and cursor stay, and
                 // the picture at the top of the screen is the one the reader is shown after it.
                 .onChange(of: wantedCut, initial: true) { _, new in recut(to: new, proxy) }
+                .onChange(of: drawnKey, initial: true) { old, new in keepAbove(old, new, proxy) }
                 // Narrowing leaves a band or two at the top of a page still scrolled to where the
                 // pictures were chosen, which then shows nothing; widening puts back everything
                 // above them. Either way the chosen pictures are brought into view (MEMNG-819).
@@ -1096,6 +1173,7 @@ struct LibraryGrid: View {
                     PageLine(geometry)
                 } action: { _, line in
                     markers.line = line
+                    if drawn.key == drawnKey { drawn.atLine = markers.atLine() }
                     pill.scrolled(to: topDay(markers.inOrder, threshold: line.y + 1))
                     // A landing still waiting asks again whenever the scroll moves: its heading is
                     // reached only once the scroll has actually brought it to the line.
@@ -1160,7 +1238,7 @@ struct LibraryGrid: View {
             self.holding = nil
             return
         }
-        guard !markers.reached(row) else { return }
+        guard !markers.reached(row, above: holding.offset) else { return }
         // Judged against the list it was taken in, asked of the store here, with nothing between
         // the question and the scroll: after a filter, tag or order change the store has dropped
         // the landing, and the same day in the new list is not the reader's to be brought back to.
@@ -1168,7 +1246,23 @@ struct LibraryGrid: View {
             self.holding = nil
             return
         }
-        proxy.scrollTo(row, anchor: .top)
+        // A row kept partly past the line is put there by a point drawn inside it at that
+        // distance (`KeptLine`), once the row is built and the point is drawn; until then the row
+        // is brought to the line, which builds it — and that move asks again.
+        if holding.offset != 0, kept.row == row, kept.offset == holding.offset,
+            markers.top(of: row) != nil
+        {
+            proxy.scrollTo(Self.keptLineID, anchor: .top)
+        } else {
+            proxy.scrollTo(row, anchor: .top)
+            // The point is drawn with the next pass, which a scroll that has already settled would
+            // not ask for again: the ask after it is made here.
+            if holding.offset != 0, kept.row != row || kept.offset != holding.offset {
+                kept.row = row
+                kept.offset = holding.offset
+                Task { hold(proxy) }
+            }
+        }
     }
 
     /// The row a held file is kept at in the cut drawn now: its day's heading, or its band.
@@ -1200,6 +1294,56 @@ struct LibraryGrid: View {
         proxy.scrollTo(row, anchor: .top)
     }
 
+    /// The list as `keepAbove` compares it.
+    private var drawnKey: DrawnKey {
+        DrawnKey(
+            first: items.first?.id, last: items.last?.id, count: items.count,
+            generation: listGeneration(), narrowed: selection.narrowed)
+    }
+
+    /// Rows put above the list (MEMNG-636) keep what the reader had at the line where it was: the
+    /// heading or band reaching below the line at the last scroll (`DrawnList.atLine`) is found in
+    /// the rows as last drawn, and that heading — or the band holding that band's first file now —
+    /// is held as far past the line as it was. Only for rows put above the SAME
+    /// list: its generation unchanged, Show Selected unchanged, and the list as drawn the new
+    /// list's tail. A jump, a pull, a filter or Show Selected is another list, not kept in.
+    private func keepAbove(_ old: DrawnKey, _ new: DrawnKey, _ proxy: ScrollViewProxy) {
+        let before = drawn.items
+        drawn.items = items
+        drawn.key = new
+        guard old.generation == new.generation, old.narrowed == new.narrowed,
+            old.first != nil, new.first != old.first, items.count > before.count,
+            items.suffix(before.count).map(\.id) == before.map(\.id)
+        else { return }
+        guard let at = drawn.atLine,
+            let element = rows(in: cut, of: before).first(where: { $0.id == at.id })
+        else { return }
+        let file: String?
+        switch element {
+        case .heading(let day): file = day.pictures.first?.id
+        case .band(let band, _): file = band.id
+        }
+        guard let file else { return }
+        let byHeading = if case .heading = element { true } else { false }
+        // What the reader had at the line is the one kept now, over whatever was held.
+        revealing = nil
+        let held = HeldFile(
+            file: file, byHeading: byHeading, listGeneration: new.generation,
+            // At the top of the page the first element starts below the line; it is kept AT it.
+            offset: max(at.offset, 0))
+        guard let row = heldRow(held) else { return }
+        holding = held
+        // The point is drawn with the rows this change lays out, before any pass that asks for it.
+        kept.row = row
+        kept.offset = held.offset
+        // The app's own move, as a landing's is: the dock counts it as no reader's scroll.
+        dock?.askedToJump()
+        // To the row first, by its identity, built or not: its marker still says where it stood
+        // before the rows above, which `hold` would read as already reached. Once it is built at
+        // the line, `hold` brings the point drawn in it there.
+        proxy.scrollTo(row, anchor: .top)
+    }
+
     /// The cut asked for now: the host's grouping and the device's tile layout.
     private var wantedCut: LibraryGridCut {
         LibraryGridCut(grouping: grouping, tiles: preferences.tileLayout)
@@ -1209,11 +1353,13 @@ struct LibraryGrid: View {
     private var cut: LibraryGridCut { drawnCut ?? wantedCut }
 
     /// The lazy stack's rows in a cut, its tile layout included: a band's files depend on it.
-    private func rows(in cut: LibraryGridCut) -> [LibraryAllRow] {
+    private func rows(in cut: LibraryGridCut) -> [LibraryAllRow] { rows(in: cut, of: items) }
+
+    private func rows(in cut: LibraryGridCut, of list: [LibraryRow]) -> [LibraryAllRow] {
         switch cut.grouping {
         case .byDay:
-            MediaLibraryPresentation.daySections(for: items, tiles: cut.tiles).flatMap(\.rows)
-        case .flat: MediaLibraryPresentation.flatRows(for: items, tiles: cut.tiles)
+            MediaLibraryPresentation.daySections(for: list, tiles: cut.tiles).flatMap(\.rows)
+        case .flat: MediaLibraryPresentation.flatRows(for: list, tiles: cut.tiles)
         }
     }
 
@@ -1370,6 +1516,7 @@ struct LibraryGrid: View {
             )
             .padding(.horizontal, DesignTokens.Space.roomy)
             .padding(.bottom, DesignTokens.Space.snug)
+            .overlay(alignment: .top) { KeptLineAnchor(kept: kept, row: row.id) }
             .id(row.id)
             .modifier(marker(row.id, day: day.key, order: 2 * day.dayIndex))
         case .band(let band, let place):
@@ -1380,6 +1527,7 @@ struct LibraryGrid: View {
                     .bottom,
                     place.last ? LibraryDayHeading.air : DesignTokens.Space.hair
                 )
+                .overlay(alignment: .top) { KeptLineAnchor(kept: kept, row: row.id) }
                 .id(row.id)
                 .modifier(marker(row.id, day: place.day, order: 2 * place.dayIndex + 1))
         }
@@ -1397,6 +1545,7 @@ struct LibraryGrid: View {
                         at: placed.index, uid: placed.id, in: items)
                 )
                 .onAppear {
+                    if wantsEarlier(placed.index) { Task { await loadEarlier() } }
                     guard wantsMore(placed.index) else { return }
                     Task { await loadMore() }
                 }
@@ -1429,6 +1578,9 @@ struct LibraryGrid: View {
 
     /// The gallery's identity in the page, for a scroll to reach it while the page has not built it.
     static let galleryID = "library-gallery"
+
+    /// The point a row held partly past the line is scrolled to (`KeptLineAnchor`).
+    static let keptLineID = "library-kept-line"
 
     /// What a test finds a loaded tile by: the file it shows, which its label does not say.
     static func tileIdentifier(_ uid: String) -> String { "library-tile:\(uid)" }

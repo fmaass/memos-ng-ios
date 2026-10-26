@@ -348,8 +348,9 @@ struct LibraryDeleteTests {
         return (response, HTTPBody("[\(body)]"))
     }
 
-    /// A jump gathers its pages before it installs them. A picture it gathered from the first page
-    /// and deleted while the second is still out must not ride back in when the jump lands.
+    /// A jump's page is read before it is installed (MEMNG-636: one page, opened at the day). A
+    /// picture deleted while that page is still out, and listed on it, must not ride back in when
+    /// the jump lands.
     @Test("a jump that gathered a picture before its delete landed does not bring it back")
     func aJumpCannotResurrect() async {
         let secondPageOut = LockedValue<Bool>(false)
@@ -358,13 +359,14 @@ struct LibraryDeleteTests {
         let client = Stub.client { request, _, operation in
             guard operation == listOperation else { return Stub.empty(.noContent) }
             let query = URLComponents(string: request.path ?? "")?.queryItems ?? []
-            guard query.contains(where: { $0.name == "cursor" && $0.value == "c2" }) else {
+            guard query.contains(where: { $0.name == "bucket" && $0.value == "2026-09-13" }) else {
                 let day = "2026-09-20T10:00:00Z"
-                return Self.datedPage([("x", day), ("y", day)], nextCursor: "c2")
+                return Self.datedPage([("x", day), ("y", day)])
             }
             secondPageOut.set(true)
             try await Self.hold(until: release)
-            return Self.datedPage([("z", "2026-09-13T10:00:00Z")])
+            let day = "2026-09-13T10:00:00Z"
+            return Self.datedPage([("x", day), ("z", day)])
         }
         let store = await Self.loaded(client)
         let handle = client.handle
@@ -378,14 +380,14 @@ struct LibraryDeleteTests {
                 baseURL: Stub.baseURL
             )
         }
-        #expect(await Self.arrived(secondPageOut), "the jump never asked for its second page")
+        #expect(await Self.arrived(secondPageOut), "the jump never asked for its day")
         let outcome = await store.delete(["x"], using: handle)
         #expect(outcome?.deleted == ["x"])
         release.set(true)
         await jump.value
 
         #expect(store.landing != nil, "control: the jump landed")
-        #expect(store.items.map(\.id) == ["y", "z"], "the jump put a deleted picture back")
+        #expect(store.items.map(\.id) == ["z"], "the jump put a deleted picture back")
     }
 
     /// The session changes while the run's LAST request is out. No further send is asked about,

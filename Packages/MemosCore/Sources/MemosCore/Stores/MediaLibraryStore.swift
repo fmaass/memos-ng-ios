@@ -264,15 +264,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         generation += 1
     }
 
-    // MARK: - Jumping to a day (MEMNG-587)
-
-    /// How many rows each page of a jump asks for, its first and every continuation after it.
-    ///
-    /// The server has no cursor that starts at a date, so a day is reached by reading from the
-    /// top. Pages of the grid's own size would make that one round trip per sixty pictures; this
-    /// makes it one per five hundred, and the list the jump leaves keeps the size its cursor was
-    /// minted under (`nextCursorLimit`) until a reload starts a list of the ordinary size.
-    public static let jumpPageSize = 500
+    // MARK: - Jumping to a day (MEMNG-587, MEMNG-636)
 
     /// Where the last jump landed: the row the grid scrolls to. Nil unless the list on screen is
     /// still the one that jump loaded — any change of lineage takes it down with the list, so a
@@ -295,6 +287,10 @@ public final class MediaLibraryStore: MediaLibraryPaging {
 
     private var landed: (lineage: Lineage, landing: LibraryLanding)?
 
+    /// Counts every landing this store has named, so the same day jumped to twice is two landings
+    /// and the grid scrolls to each.
+    private var landings = 0
+
     /// The jump reading pages now: the lineage it owns and the day it is looking for.
     private struct Jump: Equatable {
         var lineage: Lineage
@@ -304,23 +300,37 @@ public final class MediaLibraryStore: MediaLibraryPaging {
 
     private var jumping: Jump?
 
-    /// Reads the library from its first page, in the grid's own direction, until a page brings a
-    /// row taken on `day` in `timeZone` — the zone the day bucket was counted in — and then shows
-    /// that list with the row as `landing`.
+    /// The day bucket a list was opened at, in the zone that bucket was counted in. The listing
+    /// takes its filters back with every cursor — the cursor does not carry them — so a list
+    /// opened at a bucket is continued, and walked again for fresh signatures, with it. Nil for a
+    /// list read from the top. It goes with the list (`forgetPages`).
+    private struct ListStart: Equatable {
+        let bucket: String
+        let timeZone: String
+    }
+
+    private var start: ListStart?
+
+    /// Opens the list at `day` — a day bucket's key in `timeZone`, the zone that bucket was counted
+    /// in — with ONE listing request, `bucket` and `tz` naming where it starts, and shows that page
+    /// with the day's first row as `landing`. The rows above the day are read when the reader
+    /// comes up to them (`loadEarlier`).
     ///
-    /// Nothing reaches the grid before the day is found: the pages are gathered here and applied
-    /// together, so a list that runs out without the day leaves the grid exactly as it was, and a
-    /// jump that is abandoned leaves nothing behind.
+    /// Nothing reaches the grid unless the page holds the day: the listing opens an empty bucket
+    /// at the next row beyond it, and a list landed on a row of another day would name the reader
+    /// a place it is not, so such a page leaves the grid exactly as it was. A jump that is
+    /// abandoned leaves nothing behind.
     ///
-    /// A jump is a list of its own from its first request, so it moves the generation BEFORE it
-    /// asks: whatever else is in flight — an earlier jump, a refresh, a continuation — then answers
-    /// a list that has moved on, and so does this jump the moment a later tap, a tab, a direction,
+    /// A jump is a list of its own from its request, so it moves the generation BEFORE it asks:
+    /// whatever else is in flight — an earlier jump, a refresh, a continuation — then answers a
+    /// list that has moved on, and so does this jump the moment a later tap, a tab, a direction,
     /// a tag, `abandonJump` or a subject change moves it in turn. The same day asked for again
     /// while it is being read is refused, not reissued: the answer on its way is the one that
     /// lands.
     ///
     /// The direction is the grid's own. Both directions the grid offers are orders of when a
-    /// picture was taken, so the jump pages in taken order without turning the library round.
+    /// picture was taken — the only orders the listing opens a bucket under — so the day's first
+    /// row is its newest under newest-first and its oldest under oldest-first.
     public func jump(
         toDay day: String,
         in timeZone: String,
@@ -336,76 +346,62 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         defer {
             if jumping == jump { jumping = nil }
         }
-        let limit = Self.jumpPageSize
-        var rows: [LibraryRow] = []
-        var rowPages: [String: Int] = [:]
-        var pagesRead = 0
-        var cursor: String?
-        // Taken once, at the jump's start: its pages pile up here before any of them is shown, so
-        // a commit landing between two of them is newer than every row piled so far.
+        let limit = pageSize
         let issued = favoriteStamp
-        while true {
-            do {
-                let page = try await Self.page(
-                    client,
-                    filter: lineage.filter,
-                    order: lineage.order,
-                    tag: lineage.tag,
-                    mine: lineage.mine,
-                    visibility: lineage.visibility,
-                    cursor: cursor,
-                    limit: limit,
-                    baseURL: baseURL
-                )
-                guard lineage == self.lineage else {
-                    MemosLog.api.info("a jump's page answered for a list that has moved on")
-                    return
-                }
-                guard sessionStillCurrent(handle) else {
-                    MemosLog.api.info("a jump's page for a session that has ended is not applied")
-                    return
-                }
-                session?.noteTransportSuccess(issuedUnder: handle.generation)
-                rows = Self.merged(
-                    rows,
-                    with: fenced(page.items, issued),
-                    filter: lineage.filter,
-                    dropping: removed
-                )
-                for row in rows where rowPages[row.id] == nil { rowPages[row.id] = pagesRead }
-                pagesRead += 1
-                if let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) {
-                    items = fenced(rows, issued)
-                    forgetPages()
-                    pageOf = rowPages
-                    pagesHeld = pagesRead
-                    nextCursor = page.nextCursor
-                    nextCursorLimit = limit
-                    hasMore = page.nextCursor != nil
-                    lastError = nil
-                    // A new lineage again, for the reason `refresh` takes one: a continuation that
-                    // set out before this list was applied must not be merged into it.
-                    generation += 1
-                    landed = (
-                        self.lineage,
-                        LibraryLanding(day: day, rowID: rows[index].id, serial: generation)
-                    )
-                    return
-                }
-                guard let next = page.nextCursor else {
-                    MemosLog.api.info("a jump read the whole list without finding its day")
-                    return
-                }
-                cursor = next
-            } catch {
-                guard lineage == self.lineage else {
-                    MemosLog.api.info("a jump's page failed for a list that has moved on")
-                    return
-                }
-                await report(error, issuedUnder: handle)
+        do {
+            let page = try await Self.page(
+                client,
+                filter: lineage.filter,
+                order: lineage.order,
+                tag: lineage.tag,
+                mine: lineage.mine,
+                visibility: lineage.visibility,
+                bucket: day,
+                timeZone: timeZone,
+                cursor: nil,
+                limit: limit,
+                baseURL: baseURL
+            )
+            guard lineage == self.lineage else {
+                MemosLog.api.info("a jump's page answered for a list that has moved on")
                 return
             }
+            guard sessionStillCurrent(handle) else {
+                MemosLog.api.info("a jump's page for a session that has ended is not applied")
+                return
+            }
+            session?.noteTransportSuccess(issuedUnder: handle.generation)
+            let rows = Self.merged(
+                [], with: fenced(page.items, issued), filter: lineage.filter, dropping: removed)
+            guard let index = firstRowIndex(onDay: day, in: rows, timeZone: timeZone) else {
+                MemosLog.api.info("a jump's bucket held no row on its day")
+                return
+            }
+            items = rows
+            forgetPages()
+            recordPage(items)
+            start = ListStart(bucket: day, timeZone: timeZone)
+            earlier = Earlier()
+            nextCursor = page.nextCursor
+            nextCursorLimit = limit
+            hasMore = page.nextCursor != nil
+            lastError = nil
+            // A new lineage again, for the reason `refresh` takes one: a continuation that set out
+            // before this list was applied must not be merged into it.
+            generation += 1
+            land(on: rows[index], day: day)
+        } catch {
+            guard lineage == self.lineage else {
+                MemosLog.api.info("a jump's page failed for a list that has moved on")
+                return
+            }
+            await report(error, issuedUnder: handle)
         }
+    }
+
+    private func land(on row: LibraryRow, day: String) {
+        landings += 1
+        landed = (lineage, LibraryLanding(day: day, rowID: row.id, serial: landings))
     }
 
     /// Marks `landing` as scrolled to, so a grid built again later, or measured again, does not
@@ -422,6 +418,172 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     public func abandonJump() {
         guard isJumping else { return }
         generation += 1
+    }
+
+    // MARK: - The rows above a day (MEMNG-636)
+
+    /// The rows above a list opened at a day, read on demand; nil once they are all held, and for
+    /// a list read from the top, which has none.
+    ///
+    /// They are read with the listing's own bucket start in the OPPOSITE direction: from the same
+    /// bucket the day's own rows come first — those are the list's, below, and are passed over —
+    /// and then every row beyond the day, nearest first.
+    private struct Earlier {
+        /// The continuation of the rows above, nil before the first of their pages is read.
+        var cursor: String?
+        /// Rows read, not shown yet: those of the farthest day read, which can go on in the next
+        /// page. A page of rows is put above the list a whole day at a time, so a day the reader
+        /// already sees never grows rows above its own first — the row the scroll is kept at.
+        var carried: [Carried] = []
+    }
+
+    private struct Carried {
+        let row: LibraryRow
+        /// Which page of the rows above it was read on: the map a reissue walks.
+        let page: Int
+        /// The favorites ledger's stamp when that page was asked for (`fenced`).
+        let issued: FavoriteStamp
+    }
+
+    private var earlier: Earlier?
+    /// Which page of the rows above each row put there was read on, and how many such pages are
+    /// held: the second map a reissue walks (`pageOf`'s twin).
+    private var earlierPageOf: [String: Int] = [:]
+    private var earlierPagesHeld = 0
+
+    /// The rows above the list are being read.
+    public private(set) var isLoadingEarlier = false
+
+    /// Whether rows above the list remain to be read: a list opened at a day until its first
+    /// day has been reached.
+    public var hasEarlier: Bool { earlier != nil }
+
+    /// True once the reader is close enough to the TOP of a list opened at a day that the rows
+    /// above it should be on their way. Pure, like `shouldLoadMore`.
+    public func shouldLoadEarlier(before index: Int, lookahead: Int = 12) -> Bool {
+        guard earlier != nil, !isLoadingEarlier, !isJumping, !refreshing else { return false }
+        return index < lookahead
+    }
+
+    /// Reads the rows above a list opened at a day and puts them above it, whole days at a time.
+    /// Where the reader stays is the grid's to keep: the rows on screen do not move in the list,
+    /// and this names no landing.
+    ///
+    /// It reads on until it has a whole day to show, or the rows above run out: the read is asked
+    /// for when the first tiles appear, and a tile already on screen does not appear a second
+    /// time, so a call that came back with nothing shown would leave the reader at the top. For
+    /// the same reason a page that answers a list that has moved on is read again for the list on
+    /// screen now — as `loadMore` does — under the same session: the tiles of a list a later jump
+    /// landed asked while this call was out, were refused, and will not ask again. While a jump or
+    /// a pull of the list on screen is still reading it stops: the list it lands is asked for by
+    /// its own tiles.
+    ///
+    /// Serialised by REFUSAL: a second call while one is out sends nothing — the rows on their way
+    /// are the ones it would ask for, or the call that is out reads them next. Every answer is
+    /// judged against the list that asked for it (the lineage, the session that issued it, the
+    /// favorites stamp at its issue and the files seen deleted), as every other page this store
+    /// reads.
+    public func loadEarlier(using handle: SessionHandle, baseURL: URL) async {
+        let client = handle.client
+        guard !isLoadingEarlier, earlier != nil else { return }
+        isLoadingEarlier = true
+        defer { isLoadingEarlier = false }
+        // The list, its bucket, its size and its rows above are re-read on every pass: after a
+        // drop, the page that comes next is the CURRENT list's.
+        while !isJumping, !refreshing, let chain = earlier, let start {
+            let lineage = self.lineage
+            let limit = nextCursorLimit
+            let order = Self.opposite(of: lineage.order)
+            let issued = favoriteStamp
+            do {
+                let page = try await Self.page(
+                    client,
+                    filter: lineage.filter,
+                    order: order,
+                    tag: lineage.tag,
+                    mine: lineage.mine,
+                    visibility: lineage.visibility,
+                    bucket: start.bucket,
+                    timeZone: start.timeZone,
+                    cursor: chain.cursor,
+                    limit: limit,
+                    baseURL: baseURL
+                )
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("rows above a day answered for a list that has moved on")
+                    // Never read again with a client whose session is over.
+                    guard sessionStillCurrent(handle) else { return }
+                    continue
+                }
+                guard sessionStillCurrent(handle) else {
+                    MemosLog.api.info("rows above a day for a session that has ended are not shown")
+                    return
+                }
+                session?.noteTransportSuccess(issuedUnder: handle.generation)
+                if shows(page, issued: issued, start: start, lineage: lineage) { return }
+            } catch {
+                guard lineage == self.lineage else {
+                    MemosLog.api.info("rows above a day failed for a list that has moved on")
+                    guard sessionStillCurrent(handle) else { return }
+                    continue
+                }
+                await report(error, issuedUnder: handle)
+                return
+            }
+        }
+    }
+
+    /// Whether a pull of the list on screen is reading. One left by a list that has moved on is
+    /// not: its answer lands nowhere, and the list on screen is not waiting on it.
+    private var refreshing: Bool { loadingLineage == lineage }
+
+    /// The direction the rows above a day are read in: away from it, the grid's own turned round.
+    static func opposite(of order: MediaLibraryOrder) -> MediaLibraryOrder {
+        order == .newestFirst ? .oldestFirst : .newestFirst
+    }
+
+    /// One page of the rows above, taken in: its rows past the day are carried, the whole days
+    /// among them are put above the list. Answers whether this call is done — rows were shown, or
+    /// there are no more to read.
+    private func shows(
+        _ page: (items: [LibraryRow], nextCursor: String?),
+        issued: FavoriteStamp,
+        start: ListStart,
+        lineage: Lineage
+    ) -> Bool {
+        guard var chain = earlier else { return true }
+        let index = earlierPagesHeld
+        earlierPagesHeld += 1
+        let day = { (row: LibraryRow) in dayKey(row.takenAt, timeZone: start.timeZone) }
+        chain.carried += page.items
+            .filter { day($0) != start.bucket }
+            .map { Carried(row: $0, page: index, issued: issued) }
+        chain.cursor = page.nextCursor
+        let shown: ArraySlice<Carried>
+        if page.nextCursor == nil {
+            shown = chain.carried[...]
+            earlier = nil
+        } else {
+            let farthest = chain.carried.last.flatMap { day($0.row) }
+            let whole = chain.carried.lastIndex { day($0.row) != farthest }.map { $0 + 1 } ?? 0
+            shown = chain.carried[..<whole]
+            chain.carried.removeFirst(whole)
+            earlier = chain
+        }
+        // Read nearest the day first; shown in the grid's order, the farthest first.
+        let above = Self.merged(
+            [],
+            with: shown.reversed().map { fenced([$0.row], $0.issued) }.flatMap { $0 },
+            filter: lineage.filter,
+            dropping: removed.union(items.map(\.id))
+        )
+        for carried in shown where earlierPageOf[carried.row.id] == nil {
+            earlierPageOf[carried.row.id] = carried.page
+        }
+        guard !above.isEmpty else { return earlier == nil }
+        items = above + items
+        lastError = nil
+        return true
     }
 
     // MARK: - Deleting the selection (MEMNG-589)
@@ -670,6 +832,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         while !isLoading, hasMore, let cursor = nextCursor {
             let lineage = self.lineage
             let limit = nextCursorLimit
+            let start = self.start
             do {
                 let issued = favoriteStamp
                 let page = try await Self.page(
@@ -679,6 +842,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                     tag: lineage.tag,
                     mine: lineage.mine,
                     visibility: lineage.visibility,
+                    bucket: start?.bucket,
+                    timeZone: start?.timeZone,
                     cursor: cursor,
                     limit: limit,
                     baseURL: baseURL
@@ -742,7 +907,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// that walk would hold back the running session's ask for the same rows.
     public func reissue(uids: [String], using handle: SessionHandle, baseURL: URL) async {
         guard sessionStillCurrent(handle) else { return }
-        let held = uids.filter { pageOf[$0] != nil }
+        let held = uids.filter { pageOf[$0] != nil || earlierPageOf[$0] != nil }
         guard !held.isEmpty else { return }
         outstanding.formUnion(held)
         deferred = (handle, baseURL)
@@ -795,32 +960,46 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         return session.activeHandle
     }
 
-    /// The walk itself. It reads page after page for as long as a row it is looking for can still
+    /// The walk itself: the pages of the list, and then — for a list opened at a day — the pages
+    /// of the rows put above it, each read the way it was first read, from the same bucket.
+    private func walk(using handle: SessionHandle, baseURL: URL) async {
+        guard await walk(above: false, using: handle, baseURL: baseURL) else { return }
+        _ = await walk(above: true, using: handle, baseURL: baseURL)
+    }
+
+    /// One of the two. It reads page after page for as long as a row it is looking for can still
     /// be ahead of it — its own page, or the one after, because a picture added at the top since
     /// the list was read pushes every row down — and never past the pages this list holds.
-    private func walk(using handle: SessionHandle, baseURL: URL) async {
+    /// Answers whether it ran to its end, so the walk after it runs only then.
+    private func walk(above: Bool, using handle: SessionHandle, baseURL: URL) async -> Bool {
         let client = handle.client
         let lineage = self.lineage
         let limit = nextCursorLimit
+        let start = self.start
+        let order = above ? Self.opposite(of: lineage.order) : lineage.order
+        let pageOf = { [self] (uid: String) in above ? earlierPageOf[uid] : self.pageOf[uid] }
+        let held = { [self] in above ? earlierPagesHeld : pagesHeld }
         var cursor: String?
         var index = 0
         // The rows that were owed a reissue when their own page was read.
         var looked: Set<String> = []
-        while index < pagesHeld, index == 0 || cursor != nil,
-            outstanding.contains(where: { (pageOf[$0] ?? -2) + 1 >= index })
+        while index < held(), index == 0 || cursor != nil,
+            outstanding.contains(where: { (pageOf($0) ?? -2) + 1 >= index })
         {
             // Never sent under a client whose session is over.
-            guard sessionStillCurrent(handle) else { return }
-            looked.formUnion(outstanding.filter { pageOf[$0] == index })
+            guard sessionStillCurrent(handle) else { return false }
+            looked.formUnion(outstanding.filter { pageOf($0) == index })
             do {
                 let issued = favoriteStamp
                 let page = try await Self.page(
                     client,
                     filter: lineage.filter,
-                    order: lineage.order,
+                    order: order,
                     tag: lineage.tag,
                     mine: lineage.mine,
                     visibility: lineage.visibility,
+                    bucket: start?.bucket,
+                    timeZone: start?.timeZone,
                     cursor: cursor,
                     limit: limit,
                     baseURL: baseURL
@@ -830,28 +1009,29 @@ public final class MediaLibraryStore: MediaLibraryPaging {
                 guard lineage == self.lineage else {
                     MemosLog.api.info("a reissue page answered for a list that has moved on")
                     outstanding = []
-                    return
+                    return false
                 }
                 // Judged by the session that ISSUED the page, never the one running now: a list
                 // the next account is reading must not take this one's rows.
                 guard sessionStillCurrent(handle) else {
                     MemosLog.api.info("a reissue page for a session that has ended is not merged")
-                    return
+                    return false
                 }
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 reissued(fenced(page.items, issued))
                 cursor = page.nextCursor
                 index += 1
             } catch {
-                guard lineage == self.lineage else { return }
+                guard lineage == self.lineage else { return false }
                 await report(error, issuedUnder: handle, writesSentence: false)
-                return
+                return false
             }
         }
         // A row this walk looked for and did not find is no longer where this list says it is; the
         // next refresh is what finds it. A row that arrived after the walk passed its page is
         // still owed one, and the walk after the cooldown is it.
         outstanding.subtract(looked)
+        return true
     }
 
     /// A walked page's rows, each replacing the held row with its uid, where it stands.
@@ -865,21 +1045,27 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         }
     }
 
-    /// The rows now held and not yet placed are the page just read.
+    /// The rows now held and not yet placed are the page just read — the rows put above a day
+    /// excepted, which are placed in their own map as they come (`earlierPageOf`).
     private func recordPage(_ rows: [LibraryRow]) {
         var placed = false
-        for row in rows where pageOf[row.id] == nil {
+        for row in rows where pageOf[row.id] == nil && earlierPageOf[row.id] == nil {
             pageOf[row.id] = pagesHeld
             placed = true
         }
         if placed { pagesHeld += 1 }
     }
 
-    /// A list replaced or emptied takes its page map, and the rows owed a reissue, with it.
+    /// A list replaced or emptied takes its page maps, the rows owed a reissue, the bucket it was
+    /// opened at and the rows above that bucket still to read, with it.
     private func forgetPages() {
         pageOf = [:]
         pagesHeld = 0
+        earlierPageOf = [:]
+        earlierPagesHeld = 0
         outstanding = []
+        start = nil
+        earlier = nil
     }
 
     /// True once the reader is close enough to the end of the grid that the next page should
@@ -906,8 +1092,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         dropping removed: Set<String> = []
     ) -> [LibraryRow] {
         // A uid this store saw deleted counts as already known, so no page can add it back — and it
-        // leaves the rows already gathered too: a jump collects pages before it installs them, and
-        // a picture it collected before its delete landed would otherwise ride back in with them.
+        // leaves the rows already gathered too: the rows above a day are carried across calls
+        // before they are installed, and a picture carried before its delete landed would
+        // otherwise ride back in with them.
         var out = loaded.filter { !removed.contains($0.id) }
         var known = Set(out.map(\.id)).union(removed)
         for item in page {

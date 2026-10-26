@@ -51,16 +51,31 @@ final class DayMarkers {
     /// Where the scroll last was.
     var line = PageLine(y: 0, atEnd: false)
 
-    /// Whether the element's top has been brought to the line under the header, or the scroll has
-    /// gone as far as it can.
-    func reached(_ id: String) -> Bool {
+    /// Whether the element's top has been brought to the line under the header — or `offset`
+    /// above it — or the scroll has gone as far as it can.
+    func reached(_ id: String, above offset: Double = 0) -> Bool {
         guard let top = byID[id]?.marker.top else { return false }
         // At its end only once the scroll has moved: the lazy stack's first passes report a page
         // shorter than it is — even one that fits the screen — and a landing settled on one of
         // them would never be brought at all. A page that truly fits has nowhere to scroll, so
         // its landing waiting on costs nothing.
-        return abs(top - line.y) <= 1 || (line.atEnd && line.y > 1)
+        return abs(top + offset - line.y) <= 1 || (line.atEnd && line.y > 1)
     }
+
+    /// The built element reaching below the line — a heading or a band — and how far the line is
+    /// past its top, as `first(reaching:among:)` reads it.
+    func atLine() -> (id: String, offset: Double)? {
+        let y = line.y
+        let down = byID.map { (id: $0.key, top: $0.value.marker.top) }.sorted { $0.top < $1.top }
+        for (place, element) in down.enumerated() {
+            let end = place + 1 < down.count ? down[place + 1].top : .infinity
+            if end > y + 1 { return (element.id, y - element.top) }
+        }
+        return nil
+    }
+
+    /// Where the element starts on the page, while it is built.
+    func top(of id: String) -> Double? { byID[id]?.marker.top }
 
     func place(_ id: String, day: String, order: Int, top: CGFloat) {
         byID[id] = (order, DayMarker(key: day, top: Double(top)))

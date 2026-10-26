@@ -24,6 +24,8 @@ struct MediaLibraryRenderTests {
         /// Select mode as the Library hands it over: the grid draws what it leaves visible.
         var selection = LibrarySelection()
         var grouping = LibraryGridGrouping.byDay
+        var wantsEarlier: (Int) -> Bool = { _ in false }
+        var loadEarlier: () async -> Void = {}
         @Namespace private var zoom
 
         var body: some View {
@@ -36,6 +38,8 @@ struct MediaLibraryRenderTests {
                 open: { _ in },
                 fetch: { _, _ in },
                 loadMore: {},
+                wantsEarlier: wantsEarlier,
+                loadEarlier: loadEarlier,
                 landing: landing,
                 landed: landed,
                 listGeneration: { generation.value },
@@ -119,6 +123,192 @@ struct MediaLibraryRenderTests {
         #expect(offset > 0, "the grid never scrolled to the landing it was built with")
         #expect(offset >= bottom - 1, "the scroll stopped short of the landing's row")
         #expect(consumed.all == [landing], "the landing was not reported scrolled to exactly once")
+    }
+
+    /// MEMNG-636: a list opened at a day reads the rows above it when its first tiles appear; the
+    /// rule for "near enough the top" is the store's, the asking is the tile's.
+    @Test("a tile near the top of the grid asks for the rows above it")
+    func aTileNearTheTopAsksForTheRowsAbove() async throws {
+        let asked = GenerationBox(0)
+        let second = GenerationBox(0)
+        let window = Self.show(
+            Harness(
+                items: Self.items,
+                wantsEarlier: { index in
+                    if index == 1 { second.value += 1 }
+                    return index == 0
+                },
+                loadEarlier: { asked.value += 1 }))
+        defer { window.isHidden = true }
+        for _ in 0..<80 where asked.value == 0 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+        }
+        #expect(asked.value >= 1, "the first tile appeared and never asked for the rows above")
+        #expect(second.value >= 1, "control: a second tile was asked about too")
+    }
+
+    /// MEMNG-636 review: rows put above the list while the reader is down it must not move what
+    /// they see. The reader has a band of the older day partly scrolled past the line; whole days
+    /// put above are several screens. Five days keep every day below on its mosaic step (the
+    /// cycle is five long), so the band stays exactly where it was. One day moves every day below
+    /// a step and re-cuts it: the band holding the file is kept there, the file inside it.
+    @Test(
+        "rows put above the list keep the band the reader had at the line where it was",
+        arguments: [5, 1])
+    func rowsPutAboveKeepTheReader(days: Int) async throws {
+        let items =
+            Self.day("mon", 12, at: Self.noon(14)) + Self.day("old", 30, at: Self.noon(13))
+        let target = "old-9"
+        let generation = GenerationBox(1)
+        let window = Self.show(Harness(items: items, generation: generation))
+        defer { window.isHidden = true }
+        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
+        let rested = try await Self.rest(target, at: -40, in: window)
+        try #require(rested, "control: \(target) never came to rest 40 pt past the line")
+
+        host.rootView = Harness(items: Self.above(days) + items, generation: generation)
+        let seen = try await Self.tops(of: target, in: window, passes: 40)
+        let kept = seen.suffix(15).allSatisfy {
+            $0.map { days == 5 ? abs($0 + 40) <= 3 : (-43...300).contains($0) } == true
+        }
+        #expect(kept, "\(days) day(s) put above moved \(target) off its place (\(seen))")
+    }
+
+    /// MEMNG-636 review (B1): a jump lands its day's heading at the line, and the rows above it
+    /// arrive while the landing still holds it there. The heading is what the reader has at the
+    /// line, so the heading stays — not the first band under it, which would push the heading off.
+    @Test("rows put above a landed day keep its heading at the line")
+    func rowsPutAboveKeepALandedHeading() async throws {
+        let generation = GenerationBox(1)
+        let held = try await Self.landAndHold(generation)
+        defer { held.window.isHidden = true }
+
+        held.host.rootView = Harness(items: Self.above(5) + held.items, generation: generation)
+        let seen = try await held.gaps(after: 40)
+        #expect(
+            seen.count >= 15 && seen.suffix(15).allSatisfy { abs($0) <= 3 },
+            "the rows put above moved the landed heading (gaps \(seen))")
+    }
+
+    /// MEMNG-636 review (B1), with no landing holding anything: the reader scrolled a day's heading
+    /// partly past the line. Rows put above keep that heading where it was, not the band under it,
+    /// which would put the band at the heading's place and the heading above the line.
+    @Test("rows put above keep a heading the reader had at the line")
+    func rowsPutAboveKeepAHeadingAtTheLine() async throws {
+        let items =
+            Self.day("mon", 12, at: Self.noon(14)) + Self.day("old", 30, at: Self.noon(13))
+        let heading = "Sun 13 Sep"
+        let generation = GenerationBox(1)
+        let window = Self.show(Harness(items: items, generation: generation))
+        defer { window.isHidden = true }
+        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
+        let rested = try await Self.rest(at: -8, in: window) {
+            Self.headingTop(heading, in: window)
+        }
+        try #require(rested, "control: \(heading) never came to rest 8 pt past the line")
+
+        host.rootView = Harness(items: Self.above(5) + items, generation: generation)
+        var seen: [CGFloat?] = []
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(50))
+            seen.append(Self.headingTop(heading, in: window))
+        }
+        let kept = seen.suffix(15).allSatisfy { $0.map { abs($0 + 8) <= 3 } == true }
+        #expect(kept, "the rows put above moved \(heading) off its place (\(seen))")
+    }
+
+    /// MEMNG-636 review (F1): the list as drawn is the one compared, whatever moved it last. A next
+    /// page appended, scrolled into, and then rows put above: the reader's band in that page stays.
+    @Test("rows put above after a next page keep the reader in that page")
+    func rowsPutAboveAfterANextPageKeepTheReader() async throws {
+        let first = Self.day("mon", 12, at: Self.noon(14)) + Self.day("old", 9, at: Self.noon(13))
+        let generation = GenerationBox(1)
+        let window = Self.show(Harness(items: first, generation: generation))
+        defer { window.isHidden = true }
+        let host = try #require(window.rootViewController as? UIHostingController<Harness>)
+        for _ in 0..<10 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+        }
+        let paged = first + Self.day("older", 30, at: Self.noon(12))
+        host.rootView = Harness(items: paged, generation: generation)
+        let target = "older-9"
+        let rested = try await Self.rest(target, at: -40, in: window)
+        try #require(rested, "control: \(target) never came to rest 40 pt past the line")
+
+        host.rootView = Harness(items: Self.above(5) + paged, generation: generation)
+        let seen = try await Self.tops(of: target, in: window, passes: 40)
+        let kept = seen.suffix(15).allSatisfy { $0.map { abs($0 + 40) <= 3 } == true }
+        #expect(kept, "the rows put above moved \(target) off its place (\(seen))")
+    }
+
+    /// `count` days of twenty pictures each, newer than every fixture day: rows put above a list,
+    /// screens of them — a few small rows put above can be absorbed by the stack's own estimates.
+    private static func above(_ count: Int) -> [LibraryRow] {
+        (0..<count).reversed().flatMap { Self.day("new\($0)", 20, at: Self.noon(21 + $0)) }
+    }
+
+    /// Scrolls until `uid`'s tile top rests `gap` pt from the line under the top inset (negative:
+    /// above it, partly scrolled past) for five passes in a row.
+    private static func rest(_ uid: String, at gap: CGFloat, in window: UIWindow) async throws
+        -> Bool
+    {
+        try await rest(at: gap, in: window) { top(of: uid, in: window) }
+    }
+
+    /// Scrolls until `top` reads `gap` pt from the line for five passes in a row.
+    private static func rest(
+        at gap: CGFloat, in window: UIWindow, top: () -> CGFloat?
+    ) async throws -> Bool {
+        var stable = 0
+        for _ in 0..<240 where stable < 5 {
+            try await Task.sleep(for: .milliseconds(50))
+            window.layoutIfNeeded()
+            let scroll = try #require(Self.visibleTop(in: window)?.scroll)
+            guard let now = top() else {
+                stable = 0
+                scroll.setContentOffset(
+                    CGPoint(x: 0, y: scroll.contentOffset.y + 200), animated: false)
+                continue
+            }
+            if abs(now - gap) <= 1.5 {
+                stable += 1
+            } else {
+                stable = 0
+                scroll.setContentOffset(
+                    CGPoint(x: 0, y: scroll.contentOffset.y + now - gap), animated: false)
+            }
+        }
+        return stable >= 5
+    }
+
+    /// `uid`'s tile top against the line under the top inset, or nil where it is not drawn.
+    private static func top(of uid: String, in window: UIWindow) -> CGFloat? {
+        window.layoutIfNeeded()
+        guard let frame = tileFrame(uid, in: window), let visible = visibleTop(in: window)
+        else { return nil }
+        return frame.minY - visible.top
+    }
+
+    /// The top of the heading labelled `label` against the line, or nil where it is not drawn.
+    private static func headingTop(_ label: String, in window: UIWindow) -> CGFloat? {
+        window.layoutIfNeeded()
+        guard let heading = element(label, in: window), let visible = visibleTop(in: window)
+        else { return nil }
+        return heading.accessibilityFrame.minY - visible.top
+    }
+
+    /// `uid`'s tile top against the line on each of `passes` passes.
+    private static func tops(of uid: String, in window: UIWindow, passes: Int) async throws
+        -> [CGFloat?]
+    {
+        var seen: [CGFloat?] = []
+        for _ in 0..<passes {
+            try await Task.sleep(for: .milliseconds(50))
+            seen.append(top(of: uid, in: window))
+        }
+        return seen
     }
 
     @Test("a grid holding files places them once it has a real frame")
