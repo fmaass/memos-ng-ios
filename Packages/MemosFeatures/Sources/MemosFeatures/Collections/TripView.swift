@@ -260,9 +260,14 @@ struct TripView: View {
     /// How long a trip that is gone stays up before the screen leaves: longer than an alert takes
     /// to go.
     static let leavingDelay = Duration.milliseconds(600)
-    static let deleteButton = "Delete Trip"
-    /// What the rename alert asks.
-    static let renameTitle = "Rename Trip"
+    /// The Manage menu's delete row and the delete alert's button, named for the kind.
+    static func deleteButton(_ kind: Trip.Kind = .trip) -> String {
+        kind == .album ? "Delete Album" : "Delete Trip"
+    }
+    /// What the rename alert asks, named for the kind.
+    static func renameTitle(_ kind: Trip.Kind = .trip) -> String {
+        kind == .album ? "Rename Album" : "Rename Trip"
+    }
     /// What a drained trip with no picture left says.
     static let emptyTitle = "No photos in this trip"
     /// What a journal read with no memo under the trip's tag says.
@@ -273,7 +278,9 @@ struct TripView: View {
     /// The hero's cover, read by VoiceOver.
     static let coverLabel = "Cover"
     /// What the delete dialog says under its question.
-    static let deleteExplanation = "The trip goes. Its photos and memos stay."
+    static func deleteExplanation(_ kind: Trip.Kind = .trip) -> String {
+        "The \(kind == .album ? "album" : "trip") goes. Its photos and memos stay."
+    }
 
     /// The hero cover's identifier when it draws `uid`.
     static func coverIdentifier(_ uid: String) -> String { "trip-cover-\(uid)" }
@@ -466,13 +473,13 @@ struct TripView: View {
     }
 
     /// Of `rows`, read as `scope`'s members, the ones still its members as far as this app knows:
-    /// a trip's as the store says (`stillMembers`); an automatic collection's less every picture
-    /// Delete took.
+    /// a trip's as the store keeps them (`keptMembers`: less what this app took out, with what it
+    /// put back since); an automatic collection's less every picture Delete took.
     static func stillMembers(
         _ rows: [LibraryRow], of scope: CollectionScope, in store: TripMemberStore
     ) -> [LibraryRow] {
         switch scope {
-        case .trip(let trip): return store.stillMembers(rows, of: trip)
+        case .trip(let trip): return store.keptMembers(rows, of: trip)
         case .automatic:
             guard !store.deleted.isEmpty else { return rows }
             return rows.filter { !store.deleted.contains($0.id) }
@@ -581,6 +588,8 @@ struct TripView: View {
     /// An album is opened on this screen (MEMNG-804), less the chrome a trip's dates and
     /// exclusions need: no Trip Dates, no Removed row, no journal read. A kind never changes.
     private var isAlbum: Bool { openedTrip?.kind == .album }
+    /// The opened collection's kind, which names the Manage menu's rows and its dialogs.
+    private var kind: Trip.Kind { openedTrip?.kind ?? .trip }
 
     private var live: Trip? {
         guard let openedTrip else { return nil }
@@ -638,16 +647,16 @@ struct TripView: View {
             // for the reason `ComposeView.deleteRow` records: the dialog put its Cancel neither on
             // screen nor in the accessibility tree.
             .alert(Self.deleteQuestion(shown.title), isPresented: asking(.delete)) {
-                Button(Self.deleteButton, role: .destructive) {
+                Button(Self.deleteButton(kind), role: .destructive) {
                     manage.confirmDelete(scope.id, in: trips, using: access())
                 }
                 Button("Cancel", role: .cancel) { manage.cancel() }
             } message: {
-                Text(Self.deleteExplanation)
+                Text(Self.deleteExplanation(kind))
             }
             .background {
-                Color.clear.alert(Self.renameTitle, isPresented: asking(.rename)) {
-                    TextField(Self.renameTitle, text: $manage.draft)
+                Color.clear.alert(Self.renameTitle(kind), isPresented: asking(.rename)) {
+                    TextField(Self.renameTitle(kind), text: $manage.draft)
                     Button(Self.renameButton) {
                         manage.confirmRename(scope.id, in: trips, using: access())
                     }
@@ -1403,7 +1412,7 @@ struct TripView: View {
         }
     }
 
-    /// The ellipsis menu: Rename, Trip Dates, then Delete Trip.
+    /// The ellipsis menu: Rename, Trip Dates, then Delete Trip; an album's Rename and Delete Album.
     private var manageMenu: some View {
         Menu(Self.manageButton, systemImage: "ellipsis") {
             Button(Self.renameButton, systemImage: "pencil") {
@@ -1413,7 +1422,7 @@ struct TripView: View {
                 Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
             }
             Divider()
-            Button(Self.deleteButton, systemImage: "trash", role: .destructive) {
+            Button(Self.deleteButton(kind), systemImage: "trash", role: .destructive) {
                 manage.askDelete()
             }
         }

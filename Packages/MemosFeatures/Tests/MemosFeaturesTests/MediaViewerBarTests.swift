@@ -852,6 +852,29 @@ struct ViewerMemoAlbumTests {
         #expect(!bare.contains("More"), "a menu without the album stores: \(bare)")
     }
 
+    /// Memo detail opened over a memo no timeline holds and no re-read has answered: the screen
+    /// shows the memo it was opened with, and its viewer — the source the detail builds — has to
+    /// carry that memo too, or Add to Album is withheld from its pictures.
+    @Test("the memo detail's viewer carries the memo it shows when no timeline holds it")
+    func detailViewerCarriesTheShownMemo() throws {
+        let memo = Self.five
+        let timeline = TimelineStore()
+        #expect(!timeline.memos.contains { $0.uid == memo.uid }, "control: no timeline holds it")
+        let detached = DetachedMemo(uid: memo.uid)
+        #expect(detached.fetched == nil, "control: no re-read has answered")
+        let opened = try #require(TimelineView.viewer(for: memo, startingAt: "p1"))
+        let shownMemo = MemoDetailView.shown(
+            uid: memo.uid, timeline: timeline, detached: detached, initial: memo)
+        #expect(shownMemo.uid == memo.uid, "control: the detail shows the memo it opened with")
+        let source = MemoDetailView.viewerSource(
+            uid: memo.uid, timeline: timeline, detached: detached, initial: memo,
+            fallback: opened.pages)
+        #expect(source.carriedMemo?.uid == memo.uid, "the detail's viewer carries no memo")
+        #expect(source.carries("p1"), "the detail's viewer does not carry picture 2")
+        let shown = drawn(opened, source, albums: true)
+        #expect(shown.contains("More"), "the detail's viewer offers no Add to Album: \(shown)")
+    }
+
     @Test("the memo's viewer's row for picture 2 of five is Add to Album alone, never Show Memo")
     func memoViewerRows() throws {
         let memo = Self.five

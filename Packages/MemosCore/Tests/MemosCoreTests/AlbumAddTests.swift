@@ -157,6 +157,66 @@ struct AlbumAddTests {
             members.stillMembers([picture], of: album).map(\.id) == [picture.id],
             "the re-added picture is hidden again once its drain failed")
     }
+
+    /// The screen keeps the rows its last good drain read — the ones after the removal — and the
+    /// add moved the revision, so nothing the store holds lists the picture until a drain answers.
+    @Test("a picture put back stays among the kept members across a failed drain, at its place")
+    func aReAddIsKeptAcrossAFailedDrain() async throws {
+        let server = TripServer()
+        let (album, trips, members) = try await album(server, pictures: [0, 1, 2])
+        let handle = server.client.handle
+        await members.drain(album, using: handle, baseURL: Stub.baseURL)
+        let picture = TripWire.uid(1)
+        try await trips.removeMember(
+            uid: album.uid, attachments: [picture], using: handle, baseURL: Stub.baseURL)
+        let kept = members.members(for: album)
+        #expect(
+            kept.map(\.id) == [TripWire.uid(0), TripWire.uid(2)],
+            "control: the drain after the removal answered without the picture")
+
+        server.fail([TripWire.members])
+        let outcome = try await trips.addMembers(
+            [picture], to: album, using: handle, baseURL: Stub.baseURL)
+        #expect(outcome.added == [picture], "control: the server took the picture back")
+        #expect(members.members(for: album).isEmpty, "control: the reconciling drain failed")
+        #expect(
+            members.keptMembers(kept, of: album).map(\.id)
+                == [TripWire.uid(0), picture, TripWire.uid(2)],
+            "the picture put back is missing from the kept members after the failed drain")
+
+        // Another phone took it out again; a drain asked after the add is the server's word.
+        server.edit(album.uid) { $0.pictures.removeAll { $0 == 1 } }
+        server.fail([])
+        await members.drain(album, using: handle, baseURL: Stub.baseURL)
+        #expect(
+            members.members(for: album).map(\.id) == [TripWire.uid(0), TripWire.uid(2)],
+            "control: the later drain landed without the picture")
+        #expect(
+            members.keptMembers(kept, of: album).map(\.id) == kept.map(\.id),
+            "a drain asked after the add left the carried picture standing")
+    }
+
+    @Test("a picture put back is carried for its own account only")
+    func aReAddIsNotCarriedAcrossAnIdentityChange() async throws {
+        let server = TripServer()
+        let (album, trips, members) = try await album(server, pictures: [0, 1])
+        let handle = server.client.handle
+        await members.drain(album, using: handle, baseURL: Stub.baseURL)
+        let picture = TripWire.uid(1)
+        try await trips.removeMember(
+            uid: album.uid, attachments: [picture], using: handle, baseURL: Stub.baseURL)
+        let kept = members.members(for: album)
+        server.fail([TripWire.members])
+        try await trips.addMembers([picture], to: album, using: handle, baseURL: Stub.baseURL)
+        #expect(
+            members.keptMembers(kept, of: album).map(\.id) == [TripWire.uid(0), picture],
+            "control: the picture put back is carried")
+
+        members.sessionIdentityChanged()
+        #expect(
+            members.keptMembers(kept, of: album).map(\.id) == [TripWire.uid(0)],
+            "the outgoing account's put-back picture outlived the identity change")
+    }
 }
 
 /// Holds the first member drain asked after `arm()` on the wire until `release` opens.

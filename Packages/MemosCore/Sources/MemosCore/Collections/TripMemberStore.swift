@@ -157,6 +157,12 @@ public final class TripMemberStore {
     /// The exclusions this app wrote and the server acknowledged, by trip and picture, each with
     /// the token it was recorded under; what overrides one is `noteAcknowledged`'s rule.
     var ownExclusions: [String: [String: Int]] = [:]
+    /// The row each of those exclusions took off a drain, kept with it: the one thing an add of
+    /// the same picture back cannot read until a drain answers again.
+    var excludedRows: [String: [String: LibraryRow]] = [:]
+    /// The pictures this app put back into a trip and the server acknowledged, by trip and
+    /// picture, each with its row and the token it was recorded under (`keptMembers`).
+    var ownInclusions: [String: [String: (row: LibraryRow, token: Int)]] = [:]
     /// Bumped by `sessionIdentityChanged()`: everything read before it belongs to somebody else.
     var generation = 0
     var journalToken = 0
@@ -270,6 +276,32 @@ public final class TripMemberStore {
         let removed = ownExclusions[trip.uid] ?? [:]
         guard !deleted.isEmpty || !removed.isEmpty else { return rows }
         return rows.filter { !deleted.contains($0.id) && removed[$0.id] == nil }
+    }
+
+    /// The members a screen keeps while no drain of the current lineage has landed: its last
+    /// settled `rows` as `stillMembers` reads them, and each picture this app put back and the
+    /// server acknowledged since, at its place in taken order. An add moves the revision, so the
+    /// store holds no drain until the one after it answers; when that one fails, the rows the
+    /// screen kept are the ones before the picture was put back. The carried row ends when a
+    /// drain asked after the add lands, whatever it lists — the server's word then — or when
+    /// the picture is taken out again or the identity changes. Never the store's own
+    /// `members(for:)`: a drain that landed answered after every add the current revision holds.
+    public func keptMembers(_ rows: [LibraryRow], of trip: Trip) -> [LibraryRow] {
+        var kept = stillMembers(rows, of: trip)
+        guard let carried = ownInclusions[trip.uid] else { return kept }
+        let present = Set(kept.map(\.id))
+        let added = carried.values.map(\.row)
+            .filter { !present.contains($0.id) && !deleted.contains($0.id) }
+            .sorted { left, right in
+                (left.takenAt ?? .distantFuture, left.id)
+                    < (right.takenAt ?? .distantFuture, right.id)
+            }
+        for row in added {
+            let taken = row.takenAt ?? .distantFuture
+            let at = kept.firstIndex { ($0.takenAt ?? .distantFuture) > taken } ?? kept.endIndex
+            kept.insert(row, at: at)
+        }
+        return kept
     }
 
     /// The server's count, the drained rows' taken extrema, and the cover: the chosen one while it
@@ -948,17 +980,41 @@ public final class TripMemberStore {
         case .exclude, .removeMember:
             nextToken += 1
             ownExclusions[uid, default: [:]][picture] = nextToken
+            endInclusion(of: picture, in: uid)
+            let read = drained[uid]?.rows ?? filteredDrains[uid]?.drain.rows ?? []
+            if let row = read.first(where: { $0.id == picture }) {
+                excludedRows[uid, default: [:]][picture] = row
+            }
         case .include:
             ownExclusions[uid]?[picture] = nil
             if ownExclusions[uid]?.isEmpty == true { ownExclusions[uid] = nil }
+            // Put back, it is carried until a drain asked after this answers (`keptMembers`).
+            guard let row = excludedRows[uid]?.removeValue(forKey: picture) else { return }
+            if excludedRows[uid]?.isEmpty == true { excludedRows[uid] = nil }
+            nextToken += 1
+            ownInclusions[uid, default: [:]][picture] = (row, nextToken)
         }
     }
 
+    private func endInclusion(of picture: String, in uid: String) {
+        ownInclusions[uid]?[picture] = nil
+        if ownInclusions[uid]?.isEmpty == true { ownInclusions[uid] = nil }
+    }
+
     /// Ends the record of each picture a drain of `uid` asked for at `token` lists, when the
-    /// record is older than the drain (`noteAcknowledged`).
+    /// record is older than the drain (`noteAcknowledged`). A put-back picture's carried row ends
+    /// at a drain asked after it, listed or not: that drain answered after the add.
     private func contradict(uid: String, listed rows: [LibraryRow], askedAt token: Int) {
+        if let carried = ownInclusions[uid] {
+            let left = carried.filter { $0.value.token >= token }
+            ownInclusions[uid] = left.isEmpty ? nil : left
+        }
         guard var own = ownExclusions[uid] else { return }
-        for row in rows where (own[row.id] ?? .max) < token { own[row.id] = nil }
+        for row in rows where (own[row.id] ?? .max) < token {
+            own[row.id] = nil
+            excludedRows[uid]?[row.id] = nil
+        }
+        if excludedRows[uid]?.isEmpty == true { excludedRows[uid] = nil }
         ownExclusions[uid] = own.isEmpty ? nil : own
     }
 

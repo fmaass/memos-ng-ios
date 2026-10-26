@@ -199,7 +199,7 @@ struct CollectionScreenTests {
     func noRenameItem() async { await expectTripOnly(TripView.renameButton) }
 
     @Test("an automatic collection offers no Delete Trip; a trip does")
-    func noDeleteItem() async { await expectTripOnly(TripView.deleteButton) }
+    func noDeleteItem() async { await expectTripOnly(TripView.deleteButton()) }
 
     /// `title` is offered on a trip's screen — the control that the search finds it — and on
     /// neither a tag's nor a month's, once each has drawn its grid.

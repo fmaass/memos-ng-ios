@@ -905,12 +905,6 @@ struct MediaLibraryRenderTests {
         #expect((pending.accessibilityValue ?? "").isEmpty, "a count drawn with no bucket read")
     }
 
-    /// The scroll's offset and content height, for a failure's message.
-    private static func scrollState(_ window: UIWindow) -> String {
-        guard let scroll = visibleTop(in: window)?.scroll else { return "no scroll view" }
-        return "offset \(scroll.contentOffset.y), content \(scroll.contentSize.height)"
-    }
-
     /// MEMNG-587's jump lands on the day's HEADING under the month header, not its first tile.
     @Test("a jump lands the day's heading at the top of the screen")
     func jumpLandsOnTheDayHeading() async throws {

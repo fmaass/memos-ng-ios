@@ -1063,11 +1063,11 @@ struct TripScreenRenderTests {
             trace.append("after2: " + TripProbe.presentation(screen))
             #expect(asked, "no confirmation was presented: \(trace)")
             #expect(
-                TripProbe.dialogActions(in: screen.host)?.contains(TripView.deleteButton) == true)
+                TripProbe.dialogActions(in: screen.host)?.contains(TripView.deleteButton()) == true)
             // The alert's own Delete Trip: the yes travels the action the alert runs, and the
             // alert goes on its way out as it would under a finger.
             #expect(
-                TripProbe.pressDialog(TripView.deleteButton, in: screen.host),
+                TripProbe.pressDialog(TripView.deleteButton(), in: screen.host),
                 "the alert's Delete Trip took no press")
             let back = await TripProbe.idle(seconds: 10) {
                 TripProbe.tiles(in: screen.window).isEmpty
@@ -3386,7 +3386,7 @@ extension TripScreenRenderTests {
             #expect(xs == xs.sorted() && Set(xs).count == 3, "not in that order: \(xs)")
             let manage = TripMenuProbe.rows(of: TripView.manageButton, in: screen.window)
             #expect(
-                manage == [TripView.renameButton, TripView.spanButton, TripView.deleteButton],
+                manage == [TripView.renameButton, TripView.spanButton, TripView.deleteButton()],
                 "the ellipsis menu's rows: \(manage)")
             let filter = TripMenuProbe.rows(of: TripView.filterButton, in: screen.window)
             #expect(filter.contains(TripView.removedRowButton), "the filter menu: \(filter)")
@@ -4031,6 +4031,53 @@ extension TripScreenRenderTests {
             #expect(
                 wire.transport.trips.calls(TripRows.removeMember).map(\.path)
                     == ["/api/collections/\(uid)/members/p0"])
+        }
+    }
+
+    /// The Manage menu and its two dialogs name the album; no Trip Dates is offered on it.
+    @Test("an album's Manage menu reads Rename and Delete Album, and its dialogs name the album")
+    func anAlbumsManageNamesTheAlbum() async throws {
+        #expect(TripView.deleteButton() == "Delete Trip", "control: a trip's row")
+        #expect(TripView.renameTitle() == "Rename Trip", "control: a trip's rename")
+        let wire = TripWire()
+        let stores = stores()
+        let uid = wire.transport.trips.seed("At the sea", kind: "album", picked: "portugal2026")
+        await stores.0.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
+        let record = try #require(stores.0.trips.first { $0.uid == uid })
+        #expect(record.kind == .album, "control: the record is no album")
+        let dock = AppDock()
+        dock.send(.selected(.collections))
+        let view = trip(stores, wire, record).environment(dock)
+        await CollectionsHost.with(view, height: 3000) { screen in
+            _ = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(TripProbe.photos(in: screen.window).count == 5, "control: the grid landed")
+            let manage = TripMenuProbe.rows(of: TripView.manageButton, in: screen.window)
+            #expect(
+                manage == [TripView.renameButton, "Delete Album"],
+                "the album's ellipsis menu: \(manage)")
+
+            #expect(TripMenuProbe.perform(TripView.renameButton, in: screen.window))
+            let renaming = await screen.until { TripMenuProbe.alert(over: screen.host) != nil }
+            #expect(renaming, "no rename dialog")
+            let rename = TripMenuProbe.alert(over: screen.host)?.title
+            #expect(rename == "Rename Album", "the rename dialog asks \(rename ?? "nothing")")
+            #expect(TripMenuProbe.answer("Cancel", over: screen.host))
+            _ = await screen.until { TripMenuProbe.alert(over: screen.host) == nil }
+
+            #expect(TripMenuProbe.perform("Delete Album", in: screen.window))
+            let deleting = await screen.until {
+                let actions = TripMenuProbe.alert(over: screen.host)?.actions ?? []
+                return actions.contains { $0.title == "Delete Album" }
+            }
+            #expect(deleting, "no delete dialog with Delete Album")
+            let message = TripMenuProbe.alert(over: screen.host)?.message
+            #expect(
+                message == "The album goes. Its photos and memos stay.",
+                "the delete dialog says \(message ?? "nothing")")
+            #expect(TripMenuProbe.answer("Cancel", over: screen.host))
+            await screen.settle(turns: 6)
+            let writes = wire.transport.writes
+            #expect(writes.isEmpty, "a cancelled dialog wrote \(writes)")
         }
     }
 }

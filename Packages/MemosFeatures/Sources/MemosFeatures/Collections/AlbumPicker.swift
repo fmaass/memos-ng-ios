@@ -118,7 +118,8 @@ final class AlbumAddFlow {
     }
 }
 
-/// The album picker: "New Album" at the top, then the albums newest first with cover and count.
+/// The album picker: "New Album" at the top, then the albums newest first with cover and count,
+/// the list read again as it opens.
 /// A row hands its album to `choose` and closes the sheet; New Album runs the Album path of the
 /// new-collection sheet and then hands the album it made to `choose`.
 struct AlbumPickerSheet: View {
@@ -166,6 +167,7 @@ struct AlbumPickerSheet: View {
             }
             .navigationTitle(AlbumPicker.title)
             .navigationBarTitleDisplayMode(.inline)
+            .task { await refresh() }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -178,6 +180,13 @@ struct AlbumPickerSheet: View {
                 NewTripSheet(flow: flow, trips: trips, members: members, access: access)
             }
         }
+    }
+
+    /// Opening reads the list again, so an album made on another phone is offered: the store's
+    /// own list load, which joins one already on the wire rather than sending a second.
+    private func refresh() async {
+        guard let access = access() else { return }
+        await trips.refresh(using: access.handle, baseURL: access.baseURL)
     }
 
     /// Back from the new-collection sheet: the album it made, if it made one, takes the pictures.

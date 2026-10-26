@@ -110,3 +110,43 @@ struct AlbumPickerTests {
 private final class Presses {
     var count = 0
 }
+
+/// The picker over a scripted server: opening it reads the collection list again, through the
+/// store's own list load, so an album made on another phone is offered.
+@MainActor
+@Suite("Album — the picker reads the list as it opens", .serialized, .mediaGlobals)
+struct AlbumPickerRefreshTests {
+    private let root = FileManager.default.temporaryDirectory
+        .appending(path: "album-picker").appending(path: UUID().uuidString)
+    private let alice = TimelineSnapshotIdentity(
+        server: URL(string: "https://memos.example.invalid")!, subject: "alice")
+
+    private func lists(_ wire: CollectionsWire) -> Int {
+        wire.transport.sent.filter { $0.hasPrefix(TripRows.list + " ") }.count
+    }
+
+    @Test("opening the picker offers an album made on another phone, after one list read")
+    func openingReadsTheListAgain() async {
+        let wire = CollectionsWire()
+        let trips = TripStore(identity: alice, root: root)
+        let members = TripMemberStore(trips: trips)
+        wire.transport.trips.seed("At the sea", kind: "album")
+        await trips.refresh(using: wire.access.handle, baseURL: CollectionsWire.baseURL)
+        #expect(
+            AlbumPicker.albums(trips.trips).map(\.title) == ["At the sea"],
+            "control: the first album is listed")
+        // Another phone makes an album; nothing on this one has read the list since.
+        wire.transport.trips.seed("Lake", kind: "album")
+        let before = lists(wire)
+        let access = wire.access
+        let sheet = AlbumPickerSheet(
+            trips: trips, members: members, access: { access }, choose: { _ in })
+        await CollectionsHost.with(sheet) { screen in
+            let listed = await screen.until { screen.says("Lake") }
+            #expect(listed, "the album made on another phone was never offered")
+            #expect(screen.says("At the sea"), "control: the album already listed is offered")
+            await screen.settle(turns: 10)
+            #expect(lists(wire) == before + 1, "opening sent \(lists(wire) - before) list reads")
+        }
+    }
+}

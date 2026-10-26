@@ -52,7 +52,27 @@ public struct MemoDetailView: View {
     }
 
     private var memo: Memo {
+        Self.shown(uid: uid, timeline: timeline, detached: detached, initial: initial)
+    }
+
+    /// The memo the screen shows: the timeline's copy, else its own re-read, else the one it was
+    /// opened with.
+    static func shown(
+        uid: String, timeline: TimelineStore, detached: DetachedMemo, initial: Memo
+    ) -> Memo {
         timeline.memos.first { $0.uid == uid } ?? detached.fetched ?? initial
+    }
+
+    /// The viewer's source reads the memo exactly as the screen shows it (`shown`), the one it
+    /// was opened with included: a memo that left the loaded timeline before a re-read still
+    /// carries its pictures, so the viewer offers what it offers on any memo (MEMNG-930).
+    static func viewerSource(
+        uid: String, timeline: TimelineStore, detached: DetachedMemo, initial: Memo,
+        fallback: [MediaPage]
+    ) -> MediaViewerSource {
+        .memo(
+            resolve: { shown(uid: uid, timeline: timeline, detached: detached, initial: initial) },
+            fallback: fallback)
     }
 
     private var tasks: [(text: String, checked: Bool)] {
@@ -110,12 +130,9 @@ public struct MemoDetailView: View {
             // this screen holds it, so a re-read with fresh URLs reaches a page already open.
             MediaViewerView(
                 selection: selection,
-                source: .memo(
-                    uid: uid,
-                    in: timeline,
-                    detached: detached,
-                    fallback: selection.pages
-                ),
+                source: Self.viewerSource(
+                    uid: uid, timeline: timeline, detached: detached, initial: initial,
+                    fallback: selection.pages),
                 delete: deletePicture
             )
             .environment(\.signedURLRefresher, refresher)
