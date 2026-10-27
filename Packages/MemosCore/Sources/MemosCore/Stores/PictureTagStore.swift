@@ -26,10 +26,16 @@ public final class PictureTagStore {
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
+    /// Whose memos' pictures are counted, fixed for the store's life (MEMNG-933): the Collections
+    /// root's Tags row reads Public, so a Just us picture is counted only inside its trip.
+    public let visibility: MediaVisibilityFilter
+
     public init(
+        visibility: MediaVisibilityFilter = .any,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded }
     ) {
+        self.visibility = visibility
         self.onUnauthorized = onUnauthorized
     }
 
@@ -62,7 +68,8 @@ public final class PictureTagStore {
         while true {
             let issued = favorites?.stamp
             do {
-                let rows = try await Self.tags(handle.client, filter: filter)
+                let rows = try await Self.tags(
+                    handle.client, filter: filter, visibility: self.visibility)
                 guard lineage == Lineage(generation: generation, filter: filter) else {
                     MemosLog.api.info("picture tags answered for a kind that has moved on")
                     return
@@ -131,11 +138,12 @@ public final class PictureTagStore {
         return session.nothingEstablishedSince(handle)
     }
 
-    static func tags(_ client: any APIProtocol, filter: MediaLibraryFilter) async throws
-        -> [LibraryTag]
-    {
+    static func tags(
+        _ client: any APIProtocol, filter: MediaLibraryFilter,
+        visibility: MediaVisibilityFilter = .any
+    ) async throws -> [LibraryTag] {
         let response = try await client.attachmentPictureTagsApiAttachmentsPictureTagsGet(
-            .init(query: .init(_type: filter.apiType))
+            .init(query: .init(_type: filter.apiType, visibility: visibility.apiVisibility))
         )
         switch response {
         case .ok(let ok):

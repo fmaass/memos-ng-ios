@@ -59,8 +59,9 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// starts on it (MEMNG-919).
     public private(set) var mine: Bool
     /// Who may see the memo a picture hangs on (MEMNG-787). Changed only through `setVisibility`,
-    /// and not persisted, for `tag`'s reason.
-    public private(set) var visibility = MediaVisibilityFilter.any
+    /// and not persisted, for `tag`'s reason. Set at init so the first page is already read under
+    /// it: the Library tab starts on Public (MEMNG-933), and a flip after load would read twice.
+    public private(set) var visibility: MediaVisibilityFilter
 
     private var nextCursor: String?
     /// The page size `nextCursor` was minted under. A continuation is resent "with the same
@@ -107,6 +108,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         filter: MediaLibraryFilter = .all,
         order: MediaLibraryOrder = .newestFirst,
         mine: Bool = false,
+        visibility: MediaVisibilityFilter = .any,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded },
         reissueCooldown: @escaping @MainActor @Sendable () async -> Void = {
@@ -119,6 +121,7 @@ public final class MediaLibraryStore: MediaLibraryPaging {
         self.filter = filter
         self.order = order
         self.mine = mine
+        self.visibility = visibility
         self.onUnauthorized = onUnauthorized
     }
 

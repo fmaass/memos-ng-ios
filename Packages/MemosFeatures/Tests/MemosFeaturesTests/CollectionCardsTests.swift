@@ -241,7 +241,7 @@ struct CollectionCardsTests {
 
     // MARK: - My own pictures outside a trip (MEMNG-919)
 
-    @Test("a month card and a year card count and cover my own pictures, read with mine=true")
+    @Test("a month card and a year card count and cover my own Public pictures: mine, PUBLIC")
     func periodCardsAreMyOwn() async {
         let wire = CollectionsWire()
         wire.transport.answerTags("[]")
@@ -269,6 +269,8 @@ struct CollectionCardsTests {
         let reads = wire.transport.sent.filter { $0.hasPrefix("attachment_buckets") }
         #expect(reads.count == 2, "one month and one year read: \(reads)")
         #expect(reads.allSatisfy { $0.contains("mine=true") }, "an everyone read: \(reads)")
+        // Public only (MEMNG-933): a Just us picture is counted and covered only in its trip.
+        #expect(reads.allSatisfy { $0.contains("visibility=PUBLIC") }, "a Just us read: \(reads)")
     }
 
     // MARK: - RED 5: no span on any card

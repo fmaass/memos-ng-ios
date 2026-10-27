@@ -107,9 +107,8 @@ struct MainTabView: View {
         let favoriteStore = FavoriteStore(
             onUnauthorized: { [session] refusal in await session.handle(refusal) })
         favoriteStore.reports(to: session)
-        let tagStore = PictureTagStore(
-            onUnauthorized: { [session] refusal in await session.handle(refusal) })
-        tagStore.reports(to: session)
+        // Read only by the Collections root's Tags row, so it counts as that row does (MEMNG-933).
+        let tagStore = CollectionsRootView.makePictureTags(session: session)
         tagStore.follow(favoriteStore)
         memberStore.follow(favoriteStore)
         favorites = favoriteStore

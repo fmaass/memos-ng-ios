@@ -111,7 +111,8 @@ struct CollectionFilterTests {
         await members.drain(scope, using: client.handle, baseURL: Stub.baseURL)
         let drained = paths.get().count
 
-        let newest = TripMemberQuery(order: .newestFirst)
+        // A tag drains its Public pictures (MEMNG-933): its order alone is that drain turned round.
+        let newest = TripMemberQuery(order: .newestFirst, visibility: .public)
         await members.drainFiltered(
             scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
 
@@ -127,8 +128,9 @@ struct CollectionFilterTests {
         let client = Self.server(paths, rows: Self.mixed)
         let (_, members) = await seeder.members()
         let scope = CollectionScopeDrainTests.scope(.month("2026-09"))
-        // A month drains my own pictures (MEMNG-919): its order alone is that drain turned round.
-        let newest = TripMemberQuery(order: .newestFirst, mine: true)
+        // A month drains my own Public pictures (MEMNG-919, MEMNG-933): its order alone is that
+        // drain turned round.
+        let newest = TripMemberQuery(order: .newestFirst, mine: true, visibility: .public)
         await members.drainFiltered(
             scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
 
@@ -149,7 +151,7 @@ struct CollectionFilterTests {
         await members.drain(scope, using: client.handle, baseURL: Stub.baseURL)
         #expect(members.state(for: scope) == .truncated, "control: the cap stopped the drain")
 
-        let newest = TripMemberQuery(order: .newestFirst)
+        let newest = TripMemberQuery(order: .newestFirst, visibility: .public)
         await members.drainFiltered(
             scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
         let read = try #require(paths.get().last)

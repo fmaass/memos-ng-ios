@@ -23,9 +23,10 @@ private enum AudienceWire {
 }
 
 /// A server whose answer follows the audience a read asks for (MEMNG-787): three pictures on one
-/// day for everybody's, two of them mine, one of those shared just with us — and the day bucket
-/// counting 12, 7 and 3 under the same three queries, so the heading shows which answer it was
-/// drawn from. Every read's query is kept, by operation.
+/// day for everybody's, two of them mine, one of those shared just with us (`aud-a`) — and the day
+/// bucket counting 12, 7 and 3 under the same three queries, 4 for my Public ones and 9 for
+/// everybody's Public ones (MEMNG-933), so the heading shows which answer it was drawn from.
+/// Every read's query is kept, by operation.
 private final class AudienceTransport: ClientTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var asked: [(operation: String, query: [String: String])] = []
@@ -47,6 +48,7 @@ private final class AudienceTransport: ClientTransport, @unchecked Sendable {
         lock.withLock { asked.append((operation: operationID, query: query)) }
         let mine = query["mine"] == "true"
         let justUs = query["visibility"] == "PROTECTED"
+        let shown = query["visibility"] == "PUBLIC"
         switch operationID {
         case AudienceWire.whoami:
             return Self.json(
@@ -57,7 +59,7 @@ private final class AudienceTransport: ClientTransport, @unchecked Sendable {
             )
         case AudienceWire.buckets:
             guard query["size"] == "day" else { return Self.json("[]") }
-            let count = justUs ? 3 : mine ? 7 : 12
+            let count = justUs ? 3 : shown ? (mine ? 4 : 9) : mine ? 7 : 12
             return Self.json(
                 """
                 [{"key":"\(AudienceWire.day)","count":\(count),"coverUid":"aud-a",\
@@ -66,7 +68,8 @@ private final class AudienceTransport: ClientTransport, @unchecked Sendable {
             )
         case AudienceWire.listAttachments:
             let everybody = ["aud-a", "aud-b", "aud-c"]
-            let uids = justUs ? ["aud-a"] : mine ? ["aud-a", "aud-b"] : everybody
+            let opened = mine ? ["aud-b"] : ["aud-b", "aud-c"]
+            let uids = justUs ? ["aud-a"] : shown ? opened : mine ? ["aud-a", "aud-b"] : everybody
             return Self.json("[\(uids.map(Self.row).joined(separator: ","))]")
         case AudienceWire.attachmentTags:
             return Self.json("[]")
@@ -144,6 +147,17 @@ enum LibraryMenuProbe {
             }
         }
         return false
+    }
+
+    /// The checkmark state of the first header row titled `title`, or nil when no such row.
+    static func state(of title: String, in window: UIWindow) -> UIMenuElement.State? {
+        for holder in holders(in: window) {
+            guard let menu = menu(of: holder) else { continue }
+            for case let action as UIAction in leaves(menu) where action.title == title {
+                return action.state
+            }
+        }
+        return nil
     }
 
     /// The rows of the long-press menu on the grid tile drawing `uid` (MEMNG-902), asked of every
@@ -395,7 +409,7 @@ extension MediaImageLoaderTests {
         return condition()
     }
 
-    @Test("the Library opens on Captured by me; unchecked, mine and Just us each read and show")
+    @Test("the Library opens on my Public pictures; Any, unchecked, mine and Just us each read")
     func capturedByMeInTheLibrary() async {
         let wire = AudienceTransport()
         await withTransport(AudiencePictures()) {
@@ -412,16 +426,39 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
-            // The Library opens on Captured by me (MEMNG-919): my own pictures and their counts.
+            // The Library opens on Captured by me (MEMNG-919) and Public (MEMNG-933): my own
+            // pictures and their counts, the Just us one (aud-a) left to its trip.
             let everybody = Set(["aud-a", "aud-b", "aud-c"])
             let landed = await audienceUntil(window) {
-                Set(TripProbe.tiles(in: window)) == ["aud-a", "aud-b"]
-                    && Self.audienceHeading(in: window) == bucketCountLabel(7)
+                TripProbe.tiles(in: window) == ["aud-b"]
+                    && Self.audienceHeading(in: window) == bucketCountLabel(4)
             }
             #expect(landed, "the opening grid drew \(Self.drawn(in: window))")
             let firstList = wire.reads(AudienceWire.listAttachments).first
             #expect(firstList?["mine"] == "true", "the Library did not open on Captured by me")
-            #expect(firstList?["visibility"] == nil, "control: the first list named a visibility")
+            #expect(firstList?["visibility"] == "PUBLIC", "the Library did not open on Public")
+            let openingDays = wire.reads(AudienceWire.buckets)
+            #expect(!openingDays.isEmpty, "no bucket read")
+            #expect(
+                openingDays.allSatisfy { $0["visibility"] == "PUBLIC" },
+                "a bucket read counted Just us: \(openingDays)")
+            #expect(
+                LibraryMenuProbe.state(of: "Public", in: window) == .on,
+                "Public is not the checked Visibility row: \(LibraryMenuProbe.describe(window))")
+
+            // Any widens it on purpose: the Just us picture is in the grid again.
+            let publicLists = wire.reads(AudienceWire.listAttachments).count
+            #expect(
+                LibraryMenuProbe.perform("Any", in: window),
+                "no Any row: \(LibraryMenuProbe.describe(window))")
+            let anyDrawn = await audienceUntil(window) {
+                Set(TripProbe.tiles(in: window)) == ["aud-a", "aud-b"]
+                    && Self.audienceHeading(in: window) == bucketCountLabel(7)
+            }
+            #expect(anyDrawn, "Any drew \(Self.drawn(in: window))")
+            let anyLists = wire.reads(AudienceWire.listAttachments).dropFirst(publicLists)
+            #expect(anyLists.last?["visibility"] == nil, "Any still named a visibility")
+            #expect(anyLists.last?["mine"] == "true", "Any dropped Captured by me")
 
             // Unchecked on purpose: everyone's pictures, everyone's counts.
             let opened = wire.reads(AudienceWire.listAttachments).count

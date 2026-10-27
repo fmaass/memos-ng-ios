@@ -65,10 +65,16 @@ public final class TagCoverStore {
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
     private var session: (any SessionReporting)?
 
+    /// Whose memos' pictures may be a cover, fixed for the store's life (MEMNG-933): the Collections
+    /// root's Tags row reads Public, so a Just us picture never covers a tag's card.
+    public let visibility: MediaVisibilityFilter
+
     public init(
+        visibility: MediaVisibilityFilter = .any,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
             { _ in .superseded }
     ) {
+        self.visibility = visibility
         self.onUnauthorized = onUnauthorized
     }
 
@@ -145,7 +151,8 @@ public final class TagCoverStore {
         do {
             let page = try await MediaLibraryStore.page(
                 handle.client, filter: .images, order: .newestFirst, tag: tag,
-                pictureTag: pictureTag, cursor: nil, limit: 1, baseURL: baseURL)
+                visibility: visibility, pictureTag: pictureTag, cursor: nil, limit: 1,
+                baseURL: baseURL)
             guard issued == generation, sessionStillCurrent(handle) else {
                 MemosLog.api.info("a tag cover answered for a credential that has gone; dropped")
                 return

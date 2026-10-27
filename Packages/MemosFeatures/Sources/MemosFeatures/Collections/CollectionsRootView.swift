@@ -95,11 +95,7 @@ struct CollectionsRootView: View {
                 .task {
                     guard let session else { return }
                     if tags == nil {
-                        let store = LibraryTagStore(
-                            onUnauthorized: { [session] refusal in await session.handle(refusal) }
-                        )
-                        store.reports(to: session)
-                        tags = store
+                        tags = Self.makeTags(session: session)
                     }
                     if years == nil {
                         // Wired to the session exactly as the Library's own bucket store is.
@@ -117,11 +113,7 @@ struct CollectionsRootView: View {
                         months = store
                     }
                     if covers == nil {
-                        let store = TagCoverStore(
-                            onUnauthorized: { [session] refusal in await session.handle(refusal) }
-                        )
-                        store.reports(to: session)
-                        covers = store
+                        covers = Self.makeTagCovers(session: session)
                     }
                     if chosenCovers == nil {
                         let store = CollectionCoverStore(
@@ -134,15 +126,43 @@ struct CollectionsRootView: View {
                         pictureTags = sessionPictureTags
                     }
                     if pictureTags == nil {
-                        let store = PictureTagStore(
-                            onUnauthorized: { [session] refusal in await session.handle(refusal) }
-                        )
-                        store.reports(to: session)
+                        let store = Self.makePictureTags(session: session)
                         if let favorites { store.follow(favorites) }
                         pictureTags = store
                     }
                 }
         }
+    }
+
+    // The Tags row's stores read Public pictures only (MEMNG-933): a Just us picture is counted
+    // and covers a card only inside its trip or album. Built here, wired to the session, so a test
+    // reads what the root reads.
+
+    /// The memo tags and their counts.
+    static func makeTags(session: SessionStore) -> LibraryTagStore {
+        let store = LibraryTagStore(
+            visibility: .public,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
+        store.reports(to: session)
+        return store
+    }
+
+    /// The pictures' own tags — the Favorites card's count.
+    static func makePictureTags(session: SessionStore) -> PictureTagStore {
+        let store = PictureTagStore(
+            visibility: .public,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
+        store.reports(to: session)
+        return store
+    }
+
+    /// Each tag card's cover, and the Favorites card's.
+    static func makeTagCovers(session: SessionStore) -> TagCoverStore {
+        let store = TagCoverStore(
+            visibility: .public,
+            onUnauthorized: { [session] refusal in await session.handle(refusal) })
+        store.reports(to: session)
+        return store
     }
 }
 
@@ -555,21 +575,21 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// Every month, every kind and every tag, my own pictures (MEMNG-919), through the store's
-    /// own fences.
+    /// Every month, every kind and every tag, my own pictures (MEMNG-919) of Public memos
+    /// (MEMNG-933), through the store's own fences.
     private func loadMonths() async {
         guard let months, let access = access() else { return }
         await months.load(
-            size: .month, filter: .all, tag: nil, mine: true, using: access.handle,
-            baseURL: access.baseURL)
+            size: .month, filter: .all, tag: nil, mine: true, visibility: .public,
+            using: access.handle, baseURL: access.baseURL)
     }
 
     /// The year buckets the row draws: the store's list only while it answers a year read of every
-    /// kind, every tag and my own pictures, else nil (`bucketsShown`).
+    /// kind, every tag and my own Public pictures, else nil (`bucketsShown`).
     private var yearsShown: [LibraryBucket]? {
         guard let years else { return nil }
         return bucketsShown(
-            for: .years, filter: .all, tag: nil, mine: true, visibility: .any,
+            for: .years, filter: .all, tag: nil, mine: true, visibility: .public,
             timeZoneIdentifier: years.timeZoneIdentifier,
             buckets: years.buckets, answering: years.loadedRequest)
     }
@@ -591,13 +611,14 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// Every year, every kind, every tag and my own pictures (MEMNG-919), through the store's own
-    /// fences: a read for a session that has been replaced is refused, and its answer dropped.
+    /// Every year, every kind, every tag and my own pictures (MEMNG-919) of Public memos
+    /// (MEMNG-933), through the store's own fences: a read for a session that has been replaced
+    /// is refused, and its answer dropped.
     private func loadYears() async {
         guard let years, let access = access() else { return }
         await years.load(
-            size: .year, filter: .all, tag: nil, mine: true, using: access.handle,
-            baseURL: access.baseURL)
+            size: .year, filter: .all, tag: nil, mine: true, visibility: .public,
+            using: access.handle, baseURL: access.baseURL)
     }
 
     /// The summaries the store holds now, each with the trip it was read for.
