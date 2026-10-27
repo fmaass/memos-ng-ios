@@ -5,6 +5,13 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (72)
+
+- Pictures I keep to the household now show up only inside their trip or album. The Library, Years, Months and Tags start on Public, and Any in the Visibility menu shows everything again.
+- When I scroll the library's All view, the big "Library" title shrinks to a small centred one and the line under it goes, so nothing piles up at the top of the screen.
+- Scrubbing the filmstrip no longer jumps to another photo when a picture is deleted while I'm dragging.
+- Open in Places now always switches to the map, even when I ask for the same photo twice, and it tells me why when the map is empty or failed to load.
+
 ## 2.4.0 (71)
 
 - A picture I put back into an album stays on the album's screen even when the refresh after it fails.
