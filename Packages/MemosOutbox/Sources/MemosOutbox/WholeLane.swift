@@ -100,7 +100,9 @@ extension UploadJob {
         .with {
             $0.state = .waiting
             $0.lastError = error
-            $0.waitReason = nil
+            // One file spacing itself out is the row retrying, never the row waiting for a
+            // network it was not refused by (MEMNG-657).
+            $0.waitReason = .retrying
         }
     }
 

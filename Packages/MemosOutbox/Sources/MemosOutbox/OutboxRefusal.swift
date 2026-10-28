@@ -23,10 +23,15 @@ public struct OutboxRefusal: Sendable, Equatable {
     /// What was refused, in the words the sentences below are built from — "chunk", "upload".
     public let what: String
 
-    public init(statusCode: Int, issuedUnder: Int?, what: String) {
+    /// The answer's `Retry-After` in seconds, when it gave a usable one. Only a transient
+    /// disposition reads it: it replaces the curve, exactly as it does on the whole lane.
+    public let retryAfter: TimeInterval?
+
+    public init(statusCode: Int, issuedUnder: Int?, what: String, retryAfter: TimeInterval? = nil) {
         self.statusCode = statusCode
         self.issuedUnder = issuedUnder
         self.what = what
+        self.retryAfter = retryAfter
     }
 
     /// Whether the refusal is about the credential rather than the request — the one status an
@@ -44,8 +49,10 @@ public struct OutboxRefusal: Sendable, Equatable {
     /// Two cases rather than three: every status this lane meets resolves to one of them, and a
     /// third that nothing produces is a branch no test can reach.
     public enum Disposition: Sendable, Equatable {
-        case hold(String)
-        case backOff(String)
+        /// `RetryClass.hold`: the reason the row carries, so it can name its fix, and the sentence.
+        case hold(HoldReason, String)
+        /// `RetryClass.transient`: the sentence, and the server's own delay when it named one.
+        case backOff(String, retryAfter: TimeInterval?)
     }
 
     /// The status-to-decision mapping, in the one place that owns it.
@@ -56,15 +63,15 @@ public struct OutboxRefusal: Sendable, Equatable {
     public func disposition(assumingCurrent: Bool) -> Disposition {
         switch statusCode {
         case 401 where !assumingCurrent:
-            return .backOff(supersededMessage)
+            return .backOff(supersededMessage, retryAfter: nil)
         case 401:
-            return .hold("Sign in again to send this memo.")
+            return .hold(.signInRequired, "Sign in again to send this memo.")
         case 413:
-            return .hold("The server will not accept a file this large.")
+            return .hold(.tooLarge, "The server will not accept a file this large.")
         case 408, 429, 500...599:
-            return .backOff("The server could not take the \(what).")
+            return .backOff("The server could not take the \(what).", retryAfter: retryAfter)
         default:
-            return .hold("The server rejected the \(what) (\(statusCode)).")
+            return .hold(.serverRefused, "The server rejected the \(what) (\(statusCode)).")
         }
     }
 

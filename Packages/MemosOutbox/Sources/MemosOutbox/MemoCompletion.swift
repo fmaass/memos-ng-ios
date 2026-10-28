@@ -12,7 +12,7 @@ public enum MemoCompletionOutcome: Sendable, Equatable {
     case unlinkable(UploadsUnlinkableFailure)
     /// Try again later with the same idempotency key: a timeout, a 5xx, a lost connection. Safe by
     /// construction — a replay of a create that DID commit returns the original memo.
-    case retry(String)
+    case retry(String, retryAfter: TimeInterval? = nil)
     /// A refusal that repeating cannot fix. The job is held and surfaced; it is never looped on.
     ///
     /// The second value is which GRANT earned it, when the server is the one that refused. It
@@ -191,7 +191,13 @@ public struct MemoCompletionEndpoint: MemoCompleting {
             // Concurrent writes raced this keyed create and nothing was stored under the key.
             return .retry("The server raced this memo; retrying with the same key.")
         case 408, 425, 429, 500...599:
-            return .retry("The server could not take the memo (\(response.statusCode)).")
+            // Transient (`RetryClass.transient`): the same key goes again in seconds, or after the
+            // server's own `Retry-After` — a replay of a create that did commit answers with that
+            // memo rather than making a second one (MEMNG-656).
+            return .retry(
+                "The server could not take the memo (\(response.statusCode)).",
+                retryAfter: WholeOutcome.seconds(inRetryAfter: response.header("Retry-After"))
+            )
         case 401:
             return .refused("Sign in again to finish sending this memo.", refusal(401, epoch))
         default:

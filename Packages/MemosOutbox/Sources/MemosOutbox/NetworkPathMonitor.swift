@@ -50,12 +50,15 @@ public final class NetworkPathMonitor: NetworkPathProviding, @unchecked Sendable
 }
 
 extension NetworkPath {
-    /// What the system says, in the three terms the policy is written in.
+    /// What the system says, in the four terms the policy is written in.
     public init(_ path: NWPath) {
         self.init(
             usesCellular: path.usesInterfaceType(.cellular),
             isExpensive: path.isExpensive,
-            isConstrained: path.isConstrained
+            isConstrained: path.isConstrained,
+            // `.requiresConnection` is a path an attempt can bring up — an on-demand VPN — so
+            // only a path the system calls unusable outright counts as none.
+            isSatisfied: path.status != .unsatisfied
         )
     }
 }

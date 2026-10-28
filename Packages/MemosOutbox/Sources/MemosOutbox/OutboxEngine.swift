@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 
 /// The drain: what actually moves a capture from this phone to the server.
 ///
@@ -11,6 +12,9 @@ import Foundation
 /// local arithmetic. And a job leaves the outbox on ONE condition — the memo was created with
 /// every original linked to it; everything else is a retry, and nothing is ever dropped.
 public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
+    /// The reason a capture stopped is logged by its raw value — the same string the row's
+    /// wording is chosen by and any metric would be labelled with, so the three never disagree.
+    private static let log = Logger(subsystem: "live.discomarder.memosng", category: "outbox")
     /// A ceiling on how many decisions one job may take in a single pass. It is not a retry limit
     /// (there is none): it stops a server that keeps answering "recover this" from spinning the
     /// drain, and hands the job to the ordinary backoff instead.
@@ -377,9 +381,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         await replaceMismatched(credentials)
         // Before the probe, because the probe is itself a request: a phone on mobile data with the
         // toggle off spends nothing at all, and every candidate says what it is waiting for.
-        guard permitsNetwork() else {
+        if let reason = networkWait() {
             for job in candidates {
-                await waitForNetwork(job)
+                await waitForNetwork(job, reason)
             }
             await onChange()
             return
@@ -493,8 +497,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                     // An edit is new work: it waits for the foreground, and nothing is claimed or
                     // written for it here. The sender asks the same gate again (`applyEdit`).
                     guard schedulingGate.isOpen else { return }
-                    guard permitsNetwork() else {
-                        await waitForNetwork(current)
+                    if let reason = networkWait(for: current) {
+                        await waitForNetwork(current, reason)
                         return
                     }
                     // Built here, before anything is claimed: the build is the one part of this
@@ -536,8 +540,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // An early skip, and only that: the sender asks the gate again where the request
                 // leaves (`authority(under:for:)`).
                 guard schedulingGate.isOpen else { return }
-                guard permitsNetwork() else {
-                    await waitForNetwork(current)
+                if let reason = networkWait(for: current) {
+                    await waitForNetwork(current, reason)
                     return
                 }
                 guard
@@ -548,8 +552,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 current = next
             case .uploadChunk(let fileID, let offset, let length):
                 guard schedulingGate.isOpen else { return }
-                guard permitsNetwork() else {
-                    await waitForNetwork(current)
+                if let reason = networkWait(for: current) {
+                    await waitForNetwork(current, reason)
                     return
                 }
                 await schedule(
@@ -558,8 +562,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 )
                 return
             case .createMemo:
-                guard permitsNetwork() else {
-                    await waitForNetwork(current)
+                if let reason = networkWait(for: current) {
+                    await waitForNetwork(current, reason)
                     return
                 }
                 // The one step a closed gate lets through, and one claimant at a time.
@@ -617,9 +621,16 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// can reach its next chunk on a train, and the only honest moment to ask is the moment before
     /// a request would go out. `advance` therefore asks again for each action it takes — including
     /// the one `handle` re-enters it with when a chunk finishes.
-    private func permitsNetwork() -> Bool {
+    private func permitsNetwork(_ job: UploadJob? = nil) -> Bool {
+        networkWait(for: job) == nil
+    }
+
+    /// What `job` waits for on the network this phone is on now, or nil when it may send — read
+    /// once per site and handed to `waitForNetwork`, so the reason written is the one that stopped
+    /// the step rather than a second reading of a path that may have moved in between.
+    private func networkWait(for job: UploadJob? = nil) -> WaitReason? {
         let policy = UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData)
-        return policy.permits(network.currentPath())
+        return policy.waitReason(on: network.currentPath(), for: job)
     }
 
     /// The capture waits for a network it is allowed to use, and the row says which.
@@ -628,9 +639,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// mobile data for a week does not rewrite every manifest on every drain.
     /// - Returns: false when the fence refused the write: the row moved and says something else.
     @discardableResult
-    private func waitForNetwork(_ job: UploadJob) async -> Bool {
-        guard job.state != .waiting || job.waitReason != .homeNetwork else { return true }
-        return await save(job.waitingForNetwork(), matching: job) != nil
+    private func waitForNetwork(_ job: UploadJob, _ reason: WaitReason) async -> Bool {
+        guard job.state != .waiting || job.waitReason != reason else { return true }
+        return await save(job.waitingForNetwork(reason), matching: job) != nil
     }
 
     // MARK: - the four calls
@@ -679,7 +690,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // renewal landing in that hop is exactly what this fence is about — so both candidate
             // outcomes travel and the CHOICE is made where the bytes are written.
             let refused = OutboxRefusal(
-                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload"
+                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload",
+                retryAfter: WholeOutcome.seconds(inRetryAfter: response.header("Retry-After"))
             )
             await save(
                 job.applying(refused.disposition(assumingCurrent: true), at: clock()),
@@ -902,15 +914,25 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 }
             }
             return await save(current, matching: creating)
-        case .retry(let message):
-            await save(creating.backingOff(at: clock(), error: message), matching: creating)
+        case .retry(let message, let retryAfter):
+            await save(
+                creating.backingOff(at: clock(), error: message, retryAfter: retryAfter),
+                matching: creating
+            )
             return nil
         case .refused(let message, let refused):
             // Not at the answer, and not here either: `save` hops into `OutboxRepository`, so the
             // choice travels WITH the write and is made under that actor's isolation.
             if let refused {
+                // The reason is the refusal's own disposition under the credential that earned it:
+                // a grant turned away is `signInRequired`, a 413 `tooLarge`. Chosen only on the
+                // current-credential arm; the epoch fence below picks between the two unchanged.
+                var reason = HoldReason.serverRefused
+                if case .hold(let named, _) = refused.disposition(assumingCurrent: true) {
+                    reason = named
+                }
                 await save(
-                    creating.held(.serverRefused, error: message),
+                    creating.held(reason, error: message),
                     ifStillCurrent: refused.issuedUnder,
                     matching: creating,
                     else: creating.backingOff(at: clock(), error: refused.supersededMessage)
@@ -1182,8 +1204,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // Only the server can say where this upload stands, and asking is a request like any
             // other. On a network this capture may not use it is not asked: the capture parks,
             // with nothing counted against it, because nothing was tried.
-            guard permitsNetwork() else {
-                await save(job.waitingForNetwork(), matching: job)
+            if let reason = networkWait(for: job) {
+                await save(job.waitingForNetwork(reason), matching: job)
                 await onChange()
                 return
             }
@@ -1321,8 +1343,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             case .wait:
                 return .done
             case .upload, .resume:
-                guard permitsNetwork() else {
-                    if await !waitForNetwork(current) { requestDrain() }
+                if let reason = networkWait(for: current) {
+                    if await !waitForNetwork(current, reason) { requestDrain() }
                     return .done
                 }
                 // A file a live task is carrying is not sent again: the planner cannot see tasks.
@@ -1375,8 +1397,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 )
                 return .done
             case .createMemo:
-                guard permitsNetwork() else {
-                    if await !waitForNetwork(current) { requestDrain() }
+                if let reason = networkWait(for: current) {
+                    if await !waitForNetwork(current, reason) { requestDrain() }
                     return .done
                 }
                 guard creating.insert(current.id).inserted else { return .done }
@@ -1521,8 +1543,16 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     // MARK: - the deadline timer
 
     private func noteDeadlines(of job: UploadJob) {
-        guard job.lane == .whole, job.cancelledAt == nil, job.state != .held else {
+        guard job.cancelledAt == nil, job.state != .held else {
             wakeDeadlines[job.id] = nil
+            return
+        }
+        // Any lane (MEMNG-955): a transient retry is due in seconds, and a chunk-lane row — a text
+        // memo, an owed edit, an older capture — has nothing else to wake it. Only its own waiting
+        // deadline is armed there, and never for a connectivity wait, which the path event ends.
+        guard job.lane == .whole else {
+            let timed = job.state == .waiting && job.waitReason?.retryClass != .connectivity
+            wakeDeadlines[job.id] = timed ? [job.nextAttemptAt] : nil
             return
         }
         // The capture's own next attempt too (MEMNG-731): a create or an owed edit spacing out its
@@ -1534,8 +1564,22 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// Records what a write left and re-arms the timer on it.
     private func wrote(_ job: UploadJob) {
+        Self.logReason(of: job)
         noteDeadlines(of: job)
         rearmDeadlineTimer()
+    }
+
+    /// Every hold and every wait that lands is logged by the reason's raw value — the string the
+    /// row's wording is chosen by — so the app and the log never name it differently. One site,
+    /// because every write the drain makes lands through `save` and comes here.
+    private static func logReason(of job: UploadJob) {
+        if job.state == .held, let reason = job.holdReason {
+            let name = reason.rawValue
+            let fix = reason.fixAction.rawValue
+            log.info("outbox hold reason=\(name, privacy: .public) fix=\(fix, privacy: .public)")
+        } else if job.state == .waiting, let reason = job.waitReason {
+            log.info("outbox wait reason=\(reason.rawValue, privacy: .public)")
+        }
     }
 
     /// Arms the ONE timer at the earliest future deadline, a file's or a capture's, while the gate
@@ -2191,7 +2235,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// was turned away for comes back as the refusal that HEAD earned, never as an unreadable
     /// answer.
     private func askWhereItStands(_ job: UploadJob, fileID: UUID) async -> WholeFileChange? {
-        guard schedulingGate.isOpen, permitsNetwork(),
+        guard schedulingGate.isOpen, permitsNetwork(job),
             let credentials = await credentials.currentCredentials(),
             let file = job.file(fileID)
         else { return nil }
@@ -2378,7 +2422,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         _ bytesConfirmed: Int64, of fileID: UUID, refusedAbout snapshot: UploadJob
     ) async {
         guard let onDisk = await repository.job(snapshot.id), onDisk != snapshot else { return }
-        let parked = onDisk == snapshot.waitingForNetwork()
+        let parked = WaitReason.allCases.contains {
+            $0.retryClass == .connectivity && onDisk == snapshot.waitingForNetwork($0)
+        }
         let heldForAccount = onDisk == Self.holding(snapshot, for: .accountMismatch)
         guard parked || heldForAccount else { return }
         await save(onDisk.updating(fileID) { $0.bytesConfirmed = bytesConfirmed }, matching: onDisk)
@@ -2494,6 +2540,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             return "This memo is no longer on the server."
         case .uploadSessionLost:
             return "The server kept losing this upload. Try again later."
+        case .tooLarge:
+            return "The server will not accept a file this large."
+        case .signInRequired:
+            return "Sign in again to send this memo."
         }
     }
 }
@@ -2506,8 +2556,9 @@ extension UploadJob {
     /// as it is a sentence.
     func applying(_ disposition: OutboxRefusal.Disposition, at instant: Date) -> UploadJob {
         switch disposition {
-        case .hold(let message): held(.serverRefused, error: message)
-        case .backOff(let message): backingOff(at: instant, error: message)
+        case .hold(let reason, let message): held(reason, error: message)
+        case .backOff(let message, let retryAfter):
+            backingOff(at: instant, error: message, retryAfter: retryAfter)
         }
     }
 }

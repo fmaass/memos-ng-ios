@@ -63,13 +63,13 @@ struct UploadBudgetTests {
     @Test("the jitter is exact under the injected draw: 0, half, and the whole computed delay")
     func jitterIsExact() {
         #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: nil, rng: { 0 }) == 0)
-        #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: nil, rng: { 0.5 }) == 450)
-        #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: nil, rng: { 1 }) == 900)
-        #expect(RetrySchedule.delay(forAttempt: 3, retryAfter: nil, rng: { 0.5 }) == 1800)
-        #expect(RetrySchedule.delay(forAttempt: 3, retryAfter: nil, rng: { 1 }) == 3600)
-        // The existing curve every other caller uses is unchanged.
-        #expect(RetrySchedule.delay(forAttempt: 1) == 900)
-        #expect(RetrySchedule.delay(forAttempt: 3) == 3600)
+        #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: nil, rng: { 0.5 }) == 1)
+        #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: nil, rng: { 1 }) == 2)
+        #expect(RetrySchedule.delay(forAttempt: 3, retryAfter: nil, rng: { 0.5 }) == 4)
+        #expect(RetrySchedule.delay(forAttempt: 3, retryAfter: nil, rng: { 1 }) == 8)
+        // The un-jittered curve every other caller uses.
+        #expect(RetrySchedule.delay(forAttempt: 1) == 2)
+        #expect(RetrySchedule.delay(forAttempt: 3) == 8)
     }
 
     @Test("a Retry-After replaces the computed delay, un-jittered, whatever the draw")
@@ -103,9 +103,9 @@ struct UploadBudgetTests {
             ).files[0].nextAttemptAt
         }
         #expect(try deadline(after: "604800") == Date(timeIntervalSince1970: 1000 + 604_800))
-        // Ignored: the first attempt's computed delay, half of 900 s under the draw.
-        #expect(try deadline(after: "604801") == Date(timeIntervalSince1970: 1450))
-        #expect(try deadline(after: String(Int.max)) == Date(timeIntervalSince1970: 1450))
+        // Ignored: the first attempt's computed delay, half of 2 s under the draw.
+        #expect(try deadline(after: "604801") == Date(timeIntervalSince1970: 1001))
+        #expect(try deadline(after: String(Int.max)) == Date(timeIntervalSince1970: 1001))
     }
 
     @Test("429 and 503 are backpressure with the header's seconds; an HTTP-date is ignored")
@@ -163,12 +163,12 @@ struct UploadBudgetTests {
         )
         // The session is kept: the next attempt asks the server where it stands first.
         #expect(next.files[0].uploadUID == "u1")
-        #expect(next.files[0].nextAttemptAt == Date(timeIntervalSince1970: 1450))
+        #expect(next.files[0].nextAttemptAt == Date(timeIntervalSince1970: 1001))
         let action = OutboxPlanner.nextWholeAction(
             for: next, credentials: Fixture.credentials(),
-            now: Date(timeIntervalSince1970: 1001), schedulingOpen: true
+            now: Date(timeIntervalSince1970: 1000), schedulingOpen: true
         )
-        #expect(action == .wait(until: Date(timeIntervalSince1970: 1450)))
+        #expect(action == .wait(until: Date(timeIntervalSince1970: 1001)))
     }
 
     @Test("a resume that found no new bytes keeps its spacing growing; one that did resets it")
@@ -196,11 +196,11 @@ struct UploadBudgetTests {
             )
             return job.files[0].nextAttemptAt?.timeIntervalSince(instant)
         }
-        #expect(try resumeThenFail(at: 40) == 900)
-        #expect(try resumeThenFail(at: 40) == 1800, "a resume with no progress reset the count")
-        #expect(try resumeThenFail(at: 40) == 3600, "a resume with no progress reset the count")
+        #expect(try resumeThenFail(at: 40) == 2)
+        #expect(try resumeThenFail(at: 40) == 4, "a resume with no progress reset the count")
+        #expect(try resumeThenFail(at: 40) == 8, "a resume with no progress reset the count")
         #expect(job.files[0].attemptCount == 3)
-        #expect(try resumeThenFail(at: 70) == 900, "control: progress starts the spacing over")
+        #expect(try resumeThenFail(at: 70) == 2, "control: progress starts the spacing over")
         #expect(job.files[0].attemptCount == 1)
         #expect(job.files[0].bytesConfirmed == 70)
     }

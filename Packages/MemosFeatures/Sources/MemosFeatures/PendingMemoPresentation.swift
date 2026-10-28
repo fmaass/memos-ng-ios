@@ -114,7 +114,13 @@ public enum PendingMemoPresentation {
                 // is offered back — unless a change already stands unanswered, whose body stays
                 // frozen until the server settles it.
                 return job.editUnansweredSince == nil ? [.reopen, .retry] : [.retry]
-            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost, .none:
+            case .tooLarge:
+                // Sending the same bytes again gets the same 413, so the fix the reason names
+                // (`fixAction`, remove) leads — unless a change stands unanswered, whose capture
+                // Remove must never throw away. Try again stays for the day the limit rises.
+                return job.editUnansweredSince == nil ? [.remove, .retry] : [.retry]
+            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost,
+                .signInRequired, .none:
                 // No Remove here: a change turned away while it was still unanswered is not a
                 // deleted memo, and Remove would throw away a capture whose change may have landed.
                 return [.retry]
@@ -159,6 +165,10 @@ public enum PendingMemoPresentation {
                 // The reason is the whole of what the person needs to read, so the server's own
                 // words for the refusal do not replace it.
                 return "This memo is no longer on the server"
+            case .tooLarge:
+                return "Too large for the server — remove it, or try again if the limit rises"
+            case .signInRequired:
+                return "Sign in again to send this memo"
             case .serverRefused, .uploadSessionLost, .none:
                 return job.lastError ?? "Needs attention"
             }
@@ -175,14 +185,32 @@ public enum PendingMemoPresentation {
             return "Uploading \(percent(job))%"
         case .waiting:
             // The reason comes before the attempt count on purpose. A capture refused by the
-            // network it is on is not spacing out a retry — nothing was tried — and "Waiting to
-            // try again" on a phone that will never try until it is back on wifi is the kind of
+            // network it is on is not spacing out a retry — nothing was tried — and a retry
+            // sentence on a phone that will never try until it is back on wifi is the kind of
             // sentence that makes a person force-quit the app.
             if case .refused(let reason) = verdict { return Self.refusal(reason) }
-            if job.attemptCount > 0 { return "Waiting to try again" }
+            // Then the reason the queue persisted. The network reasons are the path's, and the
+            // live verdict above outranks a marker the next drain has not yet cleared; the video
+            // rule is this capture's own, and a backoff says it is retrying — a file spacing
+            // itself out never reads as waiting for a network it was not refused by (MEMNG-657).
+            if job.waitReason == .videoOverMobileLimit, job.owesVideoOverMobileLimit {
+                return Self.waitingForWiFiVideo
+            }
+            if job.waitReason == .retrying || job.attemptCount > 0
+                || job.files.contains(where: { ($0.attemptCount ?? 0) > 0 })
+            {
+                return Self.retrying
+            }
             return "Waiting for home wifi"
         }
     }
+
+    /// What a capture still owing a video over the mobile-data limit says while on mobile data.
+    static let waitingForWiFiVideo = "Waiting for Wi-Fi (video over 200 MB)"
+
+    /// What a capture spacing out a transient failure says: the queue sends it again by itself,
+    /// in seconds, and nothing is asked of the person.
+    static let retrying = "Retrying shortly — it will be sent again by itself"
 
     /// How long a capture's confirmed bytes may stand still before the row stops showing a
     /// percentage nothing is adding to.
@@ -230,6 +258,9 @@ public enum PendingMemoPresentation {
         "Waiting for your home network — turn on Upload over mobile data in Settings"
         + " to send it now"
 
+    /// No network at all: nothing is tried until one comes back, and nothing needs pressing.
+    static let waitingForAnyNetwork = "No network — it will send when the phone is back online"
+
     /// Low Data Mode is not the mobile-data switch's business, so its sentence does not send a
     /// person to a setting that would not help.
     static let waitingForLowDataMode =
@@ -240,6 +271,8 @@ public enum PendingMemoPresentation {
     /// are the same hold behind the same switch, so they read the same.
     static func refusal(_ reason: UploadVerdict.Reason) -> String {
         switch reason {
+        case .noPath:
+            return waitingForAnyNetwork
         case .cellularWhileMobileDataOff, .expensiveWhileMobileDataOff:
             return waitingForHomeNetwork
         case .lowDataMode:

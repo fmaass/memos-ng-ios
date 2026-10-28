@@ -121,7 +121,7 @@ struct CompletionTests {
         let raced = Data(
             #"{"detail":{"code":"create_raced","message":"Concurrent writes raced."}}"#.utf8)
         let outcome = endpoint.outcome(for: OutboxHTTPResponse(statusCode: 503, body: raced))
-        guard case .retry(let message) = outcome else {
+        guard case .retry(let message, _) = outcome else {
             Issue.record("a raced create must be retried with the same idempotency key")
             return
         }

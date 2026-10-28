@@ -60,17 +60,73 @@ public enum HoldReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// The server lost this capture's upload session every time a fresh one was opened, up to
     /// `UploadBudget.maxFreshSessionsPerFile`. Opening yet another would only repeat it.
     case uploadSessionLost
+    /// The server will not take a file this large (413). Sending it again sends the same bytes, so
+    /// the fix is the person's: take the file out, or remove the capture.
+    case tooLarge
+    /// The grant this capture was sent under was turned away and is still the device's. The fix
+    /// is signing in again; nothing the queue repeats changes the answer.
+    case signInRequired
+
+    /// The one move that resumes a capture held for this reason, named beside the reason. A hold
+    /// has no timer (`RetryClass.hold`), so this names its only way out. It is logged with the
+    /// reason (`OutboxEngine.logReason`) and pins which button leads a row — the pending row's own
+    /// actions are still chosen by `PendingMemoPresentation.action(for:)`, which agrees with it.
+    public var fixAction: FixAction {
+        switch self {
+        case .accountMismatch: .switchAccount
+        case .signInRequired: .signIn
+        case .unreadableManifest, .memoGone, .tooLarge: .remove
+        case .editIncomplete: .reopen
+        case .serverRefused, .storageFailed, .uploadSessionLost: .retry
+        }
+    }
+
+    /// Every hold is the hold class: no timer, resumed by its fix.
+    public var retryClass: RetryClass { .hold }
 }
 
-/// Why a waiting job is waiting on an EVENT rather than on the clock.
+/// What a person does to resume a held capture. The raw value is the same word the log and any
+/// metric label use, so the three never disagree about which fix a row was waiting on.
+public enum FixAction: String, Codable, Sendable, Equatable, CaseIterable {
+    /// Try again as it stands — the cause is not the capture's.
+    case retry
+    /// Throw the capture (or the offending file) away; sending it again cannot succeed.
+    case remove
+    /// Sign in again, so a fresh grant sends it.
+    case signIn
+    /// Sign in as the account the capture was made under.
+    case switchAccount
+    /// Open the capture in the editor again, where the missing part can be put right.
+    case reopen
+}
+
+/// Why a waiting job is waiting, by class: on an EVENT (the network) or on the clock (`retrying`).
 ///
-/// A backoff spaces itself out and comes back by itself; this does not. It is nil for every job
-/// that is simply between attempts, which is also how a manifest written before this existed
-/// decodes — the field is optional so that a queue from an older build is read, never quarantined.
+/// It is nil for a job that has not been tried yet, which is also how a manifest written before
+/// this existed decodes — the field is optional so that a queue from an older build is read, never
+/// quarantined. The raw value is the reason string the app, the log and any metric label share.
 public enum WaitReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// The phone is on a network this capture may not use: mobile data with the toggle off, or
     /// Low Data Mode, which waits whatever the toggle says.
     case homeNetwork
+    /// The phone has no network at all. Nothing is tried and no timer is set; the path coming
+    /// back is what sends it.
+    case noNetwork
+    /// Mobile data is allowed, but this capture still has a video over
+    /// `UploadNetworkPolicy.mobileVideoLimit` to send, and that waits for Wi-Fi.
+    case videoOverMobileLimit
+    /// A transient failure is spacing itself out (`RetrySchedule`): the one reason that waits on
+    /// the clock rather than on an event. Written by every backoff, so a row between attempts
+    /// says it is retrying instead of guessing at a network it was never waiting for (MEMNG-657).
+    case retrying
+
+    /// Which class this wait belongs to: the clock for `retrying`, the path event for the rest.
+    public var retryClass: RetryClass {
+        switch self {
+        case .retrying: .transient
+        case .homeNetwork, .noNetwork, .videoOverMobileLimit: .connectivity
+        }
+    }
 }
 
 /// Which background transport carries a capture's bytes.

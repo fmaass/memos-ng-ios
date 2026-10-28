@@ -145,22 +145,25 @@ extension UploadJob {
         }
     }
 
-    /// A failure that is worth trying again later. The job is never dropped, only spaced out.
-    public func backingOff(at now: Date, error: String) -> UploadJob {
+    /// A transient failure (`RetryClass.transient`): worth trying again in seconds. The job is
+    /// never dropped, only spaced out — by the server's `Retry-After` when it named one.
+    public func backingOff(
+        at now: Date, error: String, retryAfter: TimeInterval? = nil
+    ) -> UploadJob {
         with {
             $0.attemptCount += 1
             // A marked job keeps the date the mark parked: an answer that outlived a cancel must
             // not schedule the capture the editor now holds.
             if $0.cancelledAt == nil {
                 $0.nextAttemptAt = RetrySchedule.nextAttempt(
-                    afterFailure: $0.attemptCount, from: now
+                    afterFailure: $0.attemptCount, from: now, retryAfter: retryAfter
                 )
             }
             $0.state = .waiting
             $0.lastError = error
             // A backoff waits on the clock, so whatever it was waiting for before is no longer
-            // what the row should say.
-            $0.waitReason = nil
+            // what the row should say: it says it is retrying.
+            $0.waitReason = .retrying
         }
     }
 
@@ -259,16 +262,17 @@ extension UploadJob {
         }
     }
 
-    /// The network this phone is on is not one this capture may use.
+    /// The network this phone is on is not one this capture may use, or there is none
+    /// (`RetryClass.connectivity`).
     ///
     /// Not a failure and never a backoff: nothing was tried, nothing went wrong, and the job is
     /// waiting for an EVENT — the wifi coming back, or the toggle going on — rather than for a
     /// timer. So the attempt count and the next attempt are left exactly as they were, and what
     /// the row gains is the reason.
-    public func waitingForNetwork() -> UploadJob {
+    public func waitingForNetwork(_ reason: WaitReason = .homeNetwork) -> UploadJob {
         with {
             $0.state = .waiting
-            $0.waitReason = .homeNetwork
+            $0.waitReason = reason
         }
     }
 

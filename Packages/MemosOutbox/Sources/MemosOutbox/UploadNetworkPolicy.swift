@@ -13,12 +13,23 @@ public struct NetworkPath: Sendable, Equatable {
     public var isExpensive: Bool
     /// Low Data Mode, on this network or on the whole phone.
     public var isConstrained: Bool
+    /// There is a path at all. False is the connectivity class's other half: nothing is tried and
+    /// no timer is set, because only the path coming back changes anything.
+    public var isSatisfied: Bool
 
-    public init(usesCellular: Bool, isExpensive: Bool, isConstrained: Bool) {
+    public init(
+        usesCellular: Bool, isExpensive: Bool, isConstrained: Bool, isSatisfied: Bool = true
+    ) {
         self.usesCellular = usesCellular
         self.isExpensive = isExpensive
         self.isConstrained = isConstrained
+        self.isSatisfied = isSatisfied
     }
+
+    /// No network at all — airplane mode, a dead zone.
+    public static let offline = NetworkPath(
+        usesCellular: false, isExpensive: false, isConstrained: false, isSatisfied: false
+    )
 
     /// The network a capture may always go over: the home wifi.
     public static let wifi = NetworkPath(
@@ -45,10 +56,42 @@ public struct UploadNetworkPolicy: Sendable, Equatable {
     }
 
     public func permits(_ path: NetworkPath) -> Bool {
+        // No path sends nothing, whatever anything else says.
+        if !path.isSatisfied { return false }
         // Low Data Mode always waits, whatever the toggle says.
         if path.isConstrained { return false }
         if path.usesCellular || path.isExpensive { return allowsMobileData }
         return true
+    }
+
+    /// The largest video a capture may send over mobile data even with mobile data allowed: the
+    /// "only under 200 MB" default of the network policy. A capture still owing bytes of a larger
+    /// one waits for Wi-Fi, and says so.
+    public static let mobileVideoLimit: Int64 = 200_000_000
+
+    /// What this capture waits for on this path, or nil when its bytes may leave now — the
+    /// connectivity class (`RetryClass.connectivity`), one reason per cause, and no timer.
+    ///
+    /// - Parameter job: the capture, for the rule that is about its files; nil asks about the path
+    ///   alone, as the pass does before its probe.
+    public func waitReason(on path: NetworkPath, for job: UploadJob? = nil) -> WaitReason? {
+        if !path.isSatisfied { return .noNetwork }
+        if !permits(path) { return .homeNetwork }
+        if let job, path.usesCellular || path.isExpensive, job.owesVideoOverMobileLimit {
+            return .videoOverMobileLimit
+        }
+        return nil
+    }
+}
+
+extension UploadJob {
+    /// Whether a file of this capture still to be sent is a video over the mobile-data limit.
+    /// A file whose bytes the server already holds owes nothing to any network.
+    public var owesVideoOverMobileLimit: Bool {
+        files.contains {
+            !$0.isComplete && $0.mime.lowercased().hasPrefix("video/")
+                && $0.byteSize > UploadNetworkPolicy.mobileVideoLimit
+        }
     }
 }
 
@@ -83,6 +126,8 @@ public enum UploadVerdict: Sendable, Equatable {
     case refused(Reason)
 
     public enum Reason: Sendable, Equatable {
+        /// There is no network at all.
+        case noPath
         /// Low Data Mode, which the toggle never overrides.
         case lowDataMode
         /// The phone's own radio, with mobile data turned off in Settings.
@@ -92,7 +137,9 @@ public enum UploadVerdict: Sendable, Equatable {
     }
 
     public init(policy: UploadNetworkPolicy, path: NetworkPath) {
-        if path.isConstrained {
+        if !path.isSatisfied {
+            self = .refused(.noPath)
+        } else if path.isConstrained {
             self = .refused(.lowDataMode)
         } else if path.usesCellular, !policy.allowsMobileData {
             self = .refused(.cellularWhileMobileDataOff)

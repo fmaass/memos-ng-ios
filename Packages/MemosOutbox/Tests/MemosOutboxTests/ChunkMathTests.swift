@@ -53,12 +53,15 @@ struct ChunkMathTests {
 struct RetryScheduleTests {
     @Test("spacing grows and then stops growing, and never gives up")
     func spacing() {
-        #expect(RetrySchedule.delay(forAttempt: 1) == 15 * 60)
-        #expect(RetrySchedule.delay(forAttempt: 2) == 30 * 60)
-        #expect(RetrySchedule.delay(forAttempt: 3) == 60 * 60)
-        #expect(RetrySchedule.delay(forAttempt: 5) == 4 * 60 * 60)
-        #expect(RetrySchedule.delay(forAttempt: 6) == 6 * 60 * 60)
-        #expect(RetrySchedule.delay(forAttempt: 99) == 6 * 60 * 60)
+        // The transient class (MEMNG-955): 2, 4, 8, 32, 60 s, then a minute for ever.
+        #expect(RetrySchedule.delay(forAttempt: 1) == 2)
+        #expect(RetrySchedule.delay(forAttempt: 2) == 4)
+        #expect(RetrySchedule.delay(forAttempt: 3) == 8)
+        #expect(RetrySchedule.delay(forAttempt: 4) == 32)
+        #expect(RetrySchedule.delay(forAttempt: 5) == 60)
+        #expect(RetrySchedule.delay(forAttempt: 6) == 60)
+        #expect(RetrySchedule.delay(forAttempt: 99) == 60)
+        #expect(RetrySchedule.delay(forAttempt: Int.max) == 60)
     }
 
     @Test("a job that has failed a hundred times is still a job")
@@ -71,7 +74,7 @@ struct RetryScheduleTests {
         }
         #expect(current.attemptCount == 101)
         #expect(current.state == .waiting)
-        #expect(current.nextAttemptAt == now.addingTimeInterval(6 * 60 * 60))
+        #expect(current.nextAttemptAt == now.addingTimeInterval(RetrySchedule.cap))
         #expect(current.files == job.files)
     }
 }

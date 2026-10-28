@@ -1012,7 +1012,7 @@ struct WholeLaneEngineTests {
         await rig.engine.handle(try rig.answer(rig.task(for: rig.picture.id), status: 401))
         let saved = try await rig.reload()
         #expect(saved.state == .held)
-        #expect(saved.holdReason == .serverRefused)
+        #expect(saved.holdReason == .signInRequired)
     }
 
     @Test("a refusal this launch earned under a replaced credential backs off")
@@ -1045,7 +1045,7 @@ struct WholeLaneEngineTests {
         try await settled(rig.engine)
         saved = try await rig.reload()
         #expect(saved.state == .held)
-        #expect(saved.holdReason == .serverRefused)
+        #expect(saved.holdReason == .signInRequired)
     }
 
     @Test("a toggle flip replaces each task: cancelled first, successor under the new choice")
@@ -1683,7 +1683,7 @@ struct WholeLaneEngineTests {
     /// nothing is sent for it before that, and the deadline timer sends it — no test-side drain.
     @Test(
         "a start whose failure a sibling's answer overtook keeps its own deadline, and the timer sends it",
-        arguments: [(500, nil as String?, 900.0), (429, "2" as String?, 2.0)]
+        arguments: [(500, nil as String?, 2.0), (429, "7" as String?, 7.0)]
     )
     func refusedFailureWriteRequestsDrain(status: Int, retryAfter: String?, delay: Double)
         async throws
@@ -2437,9 +2437,9 @@ struct WholeBudgetEngineTests {
         await rig.engine.handle(try rig.answer(picture, status: 200, received: 400))
         try await settled(rig.engine)
 
-        // Attempt 1 draws half of its 900 s, rounded up to the second a manifest keeps.
+        // Attempt 1 draws half of its 2 s, rounded up to the second a manifest keeps.
         let due = Date(
-            timeIntervalSince1970: (answeredAt.timeIntervalSince1970 + 450).rounded(.up)
+            timeIntervalSince1970: (answeredAt.timeIntervalSince1970 + 1).rounded(.up)
         )
         let row = try await rig.reload()
         #expect(row.file(rig.picture.id)?.nextAttemptAt == due)
@@ -2921,7 +2921,7 @@ struct WholeResumeTests {
         await current.engine.drain()
         let held = try await current.reload()
         #expect(held.state == .held)
-        #expect(held.holdReason == .serverRefused)
+        #expect(held.holdReason == .signInRequired)
         #expect(current.session.createdTasks.isEmpty)
 
         let renew = WholeBox<(@Sendable () -> Void)?>(nil)
@@ -3061,7 +3061,7 @@ struct WholeResumeTests {
 
         let saved = try await rig.reload()
         #expect(saved.state == .held)
-        #expect(saved.holdReason == .serverRefused)
+        #expect(saved.holdReason == .signInRequired)
         #expect(stagedTails(rig).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: video.file.path(percentEncoded: false)))
     }
@@ -3076,7 +3076,7 @@ struct WholeResumeTests {
         #expect(heads(current) == 1)
         let held = try await current.reload()
         #expect(held.state == .held)
-        #expect(held.holdReason == .serverRefused)
+        #expect(held.holdReason == .signInRequired)
 
         let renew = WholeBox<(@Sendable () -> Void)?>(nil)
         let stale = try await WholeRig.make(
@@ -3113,7 +3113,7 @@ struct WholeResumeTests {
         #expect(heads(rig) == 1)
         let held = try await rig.reload()
         #expect(held.state == .held)
-        #expect(held.holdReason == .serverRefused)
+        #expect(held.holdReason == .signInRequired)
     }
 
     static func busyHead(_ status: Int = 429) -> OutboxHTTPResponse {
@@ -4081,6 +4081,40 @@ struct WholeJobDeadlineTimerTests {
         try await rig.repository.save(sibling)
     }
 
+    /// MEMNG-955 review B1: the transient class retries in seconds on EVERY lane. A chunk-lane row
+    /// (an older capture, a text memo, an owed edit) whose create got a 5xx is woken by the timer
+    /// alone — the test advances the sleeper and never drains.
+    @Test("a chunk-lane create backing off is sent again at its deadline, with no test drain")
+    func chunkLaneCreateBackoffArmsTheTimer() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(
+            completion: [.retry("502"), .created(uid: "m1")],
+            prepare: {
+                var chunk = Self.allUploaded($0)
+                chunk.transport = .chunk
+                return chunk
+            },
+            sleeper: sleeper
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(rig.completion.idempotencyKeys.count == 1)
+        let backingOff = try await rig.reload()
+        #expect(backingOff.lane == .chunk)
+        #expect(backingOff.waitReason == .retrying)
+        let deadline = backingOff.nextAttemptAt
+        #expect(deadline > rig.clock.now && deadline <= rig.clock.now.addingTimeInterval(5))
+
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
+        sleeper.advance(to: rig.clock.now)
+        let sent = try await rig.eventually { rig.completion.idempotencyKeys.count == 2 }
+        #expect(sent, "a chunk-lane create's deadline armed no timer")
+        try await settled(rig.engine)
+        #expect(Set(rig.completion.idempotencyKeys).count == 1, "the same key went again")
+        #expect(await rig.repository.job(rig.job.id) == nil)
+    }
+
     @Test("a create backing off is sent again at its own deadline, with no drain from the test")
     func createBackoffArmsTheTimer() async throws {
         let sleeper = ControlledSleeper()
@@ -4277,8 +4311,10 @@ struct WholeJobDeadlineTimerTests {
         #expect(sleeper.history == [start.addingTimeInterval(90)])
     }
 
-    @Test("a chunk-lane capture's future deadline arms no timer: the timer is the whole lane's")
-    func chunkJobArmsNothing() async throws {
+    /// Inverted by MEMNG-955 (review B1): a chunk-lane row's transient retry is due in seconds and
+    /// nothing else wakes it, so its own deadline arms the one timer — here the earlier of the two.
+    @Test("a chunk-lane capture's future deadline arms the timer too, earliest first")
+    func chunkJobArmsItsDeadline() async throws {
         let sleeper = ControlledSleeper()
         let rig = try await WholeRig.make(
             prepare: { job in
@@ -4295,9 +4331,9 @@ struct WholeJobDeadlineTimerTests {
         let start = rig.clock.now
         try await queueSibling(in: rig, fileDue: start.addingTimeInterval(90))
         try await rig.engine.reconcile()
-        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(90)] }
+        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(60)] }
         #expect(armed)
         try await settled(rig.engine)
-        #expect(sleeper.history == [start.addingTimeInterval(90)])
+        #expect(sleeper.history == [start.addingTimeInterval(60)])
     }
 }

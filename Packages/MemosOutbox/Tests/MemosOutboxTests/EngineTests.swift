@@ -94,7 +94,10 @@ struct Harness {
             completion: completion,
             network: network,
             preferences: preferences.store,
-            clock: { clock.now }
+            clock: { clock.now },
+            // A timer no test advances: chunk-lane backoffs arm the deadline timer (MEMNG-955),
+            // and a system sleeper would fire at once against this fixed 2025 clock.
+            sleeper: ControlledSleeper()
         )
         return Harness(
             root: root,
@@ -478,7 +481,7 @@ struct EngineTests {
         let saved = try #require(await harness.reload())
         #expect(saved.state == .waiting)
         #expect(saved.attemptCount == 1)
-        #expect(saved.nextAttemptAt == harness.now.addingTimeInterval(15 * 60))
+        #expect(saved.nextAttemptAt == harness.now.addingTimeInterval(RetrySchedule.base))
         #expect(completion.idempotencyKeys == [harness.job.idempotencyKey])
     }
 

@@ -62,14 +62,14 @@ struct PendingMemoPresentationTests {
     }
 
     /// The reason beats the attempt count. A capture refused by the network was never tried, so
-    /// "Waiting to try again" would be describing a retry that is not happening.
+    /// a retry sentence would be describing a retry that is not happening.
     @Test("a held capture that had also failed before still says what it is waiting for")
     func theReasonBeatsTheAttemptCount() {
         let status = PendingMemoPresentation.status(
             for: job(attemptCount: 3), verdict: .refused(.cellularWhileMobileDataOff)
         )
         #expect(status.contains("home network"))
-        #expect(!status.contains("try again"))
+        #expect(!status.contains("Retrying"))
     }
 
     /// The refused sentence names the reason, and it comes from the queue's live verdict rather
@@ -108,12 +108,53 @@ struct PendingMemoPresentationTests {
         )
     }
 
+    /// MEMNG-657: one file spacing itself out leaves the row's own attempt count at 0, and that
+    /// used to fall through to "Waiting for home wifi" on a phone that was on it. The persisted
+    /// reason drives the sentence now, and an older manifest without one is read by its counts.
+    @Test("a file backing off says it is retrying, never that it waits for home wifi")
+    func aFileBackingOffSaysRetrying() {
+        var backing = file(size: 1000, confirmed: 400)
+        backing.attemptCount = 1
+        let marked = job(files: [backing], waitReason: .retrying)
+        var legacy = job(files: [backing])
+        legacy.waitReason = nil
+        for row in [marked, legacy] {
+            let status = PendingMemoPresentation.status(for: row, verdict: .permitted)
+            #expect(status == "Retrying shortly — it will be sent again by itself")
+            #expect(!status.contains("home wifi"))
+        }
+    }
+
+    @Test("a video over the mobile-data limit says it waits for Wi-Fi, and why")
+    func aLargeVideoWaitsForWiFi() {
+        let video = OutboxFile(
+            relativePath: "v.mov", filename: "IMG_2.MOV", mime: "video/quicktime",
+            byteSize: UploadNetworkPolicy.mobileVideoLimit + 1, bytesConfirmed: 0
+        )
+        let row = job(files: [video], waitReason: .videoOverMobileLimit)
+        #expect(
+            PendingMemoPresentation.status(for: row, verdict: .permitted)
+                == "Waiting for Wi-Fi (video over 200 MB)")
+        // A path with no network outranks it: the live verdict is the fresher fact.
+        #expect(
+            PendingMemoPresentation.status(for: row, verdict: .refused(.noPath))
+                == "No network — it will send when the phone is back online")
+    }
+
+    @Test("a capture the server found too large names its fix: remove")
+    func tooLargeNamesRemove() {
+        let held = job(state: .held, holdReason: .tooLarge, lastError: "413")
+        #expect(HoldReason.tooLarge.fixAction == .remove)
+        #expect(PendingMemoPresentation.action(for: held).first == .remove)
+        #expect(PendingMemoPresentation.status(for: held).contains("Too large"))
+    }
+
     @Test("every state a job can be in has its own sentence")
     func statusLines() {
         #expect(PendingMemoPresentation.status(for: job()) == "Waiting for home wifi")
         #expect(
             PendingMemoPresentation.status(for: job(attemptCount: 3))
-                == "Waiting to try again"
+                == "Retrying shortly — it will be sent again by itself"
         )
         #expect(
             PendingMemoPresentation.status(
@@ -182,7 +223,10 @@ struct PendingMemoPresentationTests {
                 expected = ([.retry, .remove], [.retry, .remove])
             case .editIncomplete:
                 expected = ([.reopen, .retry], [.retry])
-            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost:
+            case .tooLarge:
+                expected = ([.remove, .retry], [.retry])
+            case .accountMismatch, .serverRefused, .storageFailed, .uploadSessionLost,
+                .signInRequired:
                 expected = ([.retry], [.retry])
             }
             let (answered, whileUnanswered) = expected

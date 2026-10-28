@@ -386,7 +386,7 @@ struct OutboxRefusalEpochTests {
 
         let saved = try #require(await repository.job(job.id))
         #expect(saved.state == JobState.held, "a live refusal stopped holding the capture")
-        #expect(saved.holdReason == .serverRefused)
+        #expect(saved.holdReason == .signInRequired, "a live 401 on the create names its fix")
     }
 }
 
