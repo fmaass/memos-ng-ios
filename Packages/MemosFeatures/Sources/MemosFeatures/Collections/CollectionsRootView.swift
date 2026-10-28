@@ -22,8 +22,8 @@ struct CollectionsRootView: View {
     @Environment(PictureTagStore.self) private var sessionPictureTags: PictureTagStore?
     /// The Tags row's names and counts, every kind of file counted.
     @State private var tags: LibraryTagStore?
-    /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720), my
-    /// own pictures alone (MEMNG-919): another member's are there only to fill out a trip.
+    /// The Years row's years and counts, every kind of file and every tag counted (MEMNG-720),
+    /// everyone's Public pictures (MEMNG-933): the household's year, not one member's.
     @State private var years: LibraryBucketStore?
     /// The Months row's months and counts, counted as the years are (MEMNG-783). A store of its
     /// own: one store holds one answer, and the years are another.
@@ -220,7 +220,7 @@ struct CollectionsScreen: View {
     /// alert goes away is a dismissal the going alert takes for its own.
     var trail: Binding<[CollectionRoute]> = .constant([])
     /// What a pushed trip's Manage menu runs through, made for the scope it opens (its filter
-    /// menu's first choice, MEMNG-919); a test hands in its own to drive it.
+    /// menu's first choice, `TripMemberStore.drainQuery`); a test hands in its own to drive it.
     var tripManage: (CollectionScope) -> TripManage = { TripManage(for: $0) }
 
     @State private var newTrip: NewTripFlow?
@@ -575,21 +575,21 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// Every month, every kind and every tag, my own pictures (MEMNG-919) of Public memos
-    /// (MEMNG-933), through the store's own fences.
+    /// Every month, every kind and every tag, everyone's pictures of Public memos (MEMNG-933),
+    /// through the store's own fences.
     private func loadMonths() async {
         guard let months, let access = access() else { return }
         await months.load(
-            size: .month, filter: .all, tag: nil, mine: true, visibility: .public,
+            size: .month, filter: .all, tag: nil, mine: false, visibility: .public,
             using: access.handle, baseURL: access.baseURL)
     }
 
     /// The year buckets the row draws: the store's list only while it answers a year read of every
-    /// kind, every tag and my own Public pictures, else nil (`bucketsShown`).
+    /// kind, every tag and everyone's Public pictures, else nil (`bucketsShown`).
     private var yearsShown: [LibraryBucket]? {
         guard let years else { return nil }
         return bucketsShown(
-            for: .years, filter: .all, tag: nil, mine: true, visibility: .public,
+            for: .years, filter: .all, tag: nil, mine: false, visibility: .public,
             timeZoneIdentifier: years.timeZoneIdentifier,
             buckets: years.buckets, answering: years.loadedRequest)
     }
@@ -611,13 +611,13 @@ struct CollectionsScreen: View {
         }
     }
 
-    /// Every year, every kind, every tag and my own pictures (MEMNG-919) of Public memos
-    /// (MEMNG-933), through the store's own fences: a read for a session that has been replaced
-    /// is refused, and its answer dropped.
+    /// Every year, every kind, every tag and everyone's pictures of Public memos (MEMNG-933),
+    /// through the store's own fences: a read for a session that has been replaced is refused,
+    /// and its answer dropped.
     private func loadYears() async {
         guard let years, let access = access() else { return }
         await years.load(
-            size: .year, filter: .all, tag: nil, mine: true, visibility: .public,
+            size: .year, filter: .all, tag: nil, mine: false, visibility: .public,
             using: access.handle, baseURL: access.baseURL)
     }
 

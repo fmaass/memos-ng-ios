@@ -895,7 +895,7 @@ struct TripView: View {
 
     /// The trip's memos oldest first, one `MemoCard` each, under a heading per day.
     private func journal(_ shown: CollectionScope) -> some View {
-        // A month's and a year's follow "Captured by me" (MEMNG-919); a trip's take none.
+        // A month's and a year's follow "Captured by me"; a trip's take none.
         let memos = memberStore.journal(for: shown, mine: gridQuery.mine)
         let state = memberStore.journalState(for: shown)
         let calendar = journalCalendar(for: shown)
@@ -1526,8 +1526,8 @@ struct TripView: View {
             && shownMembers.summary?.complete == true
     }
 
-    /// What this screen's members were drained under (MEMNG-919): a month's and a year's own
-    /// pictures, every other collection's everyone's.
+    /// What this screen's members were drained under: everyone's pictures, Public outside a trip
+    /// or an album (`TripMemberStore.drainQuery`).
     private var drainQuery: TripMemberQuery { TripMemberStore.drainQuery(for: scope) }
 
     /// The order the read the grid draws walked in, which decides the end a cut one kept: the
@@ -1837,8 +1837,8 @@ final class TripManage {
 
     init(query: TripMemberQuery = .unfiltered) { self.query = query }
 
-    /// The flow a screen opens with: its filter menu on what `scope` drains (MEMNG-919) — a
-    /// month's or a year's "Captured by me" checked, a trip's and a tag's everyone's.
+    /// The flow a screen opens with: its filter menu on what `scope` drains — everyone's in every
+    /// scope, "Captured by me" unchecked until chosen.
     convenience init(for scope: CollectionScope) {
         self.init(query: TripMemberStore.drainQuery(for: scope))
     }

@@ -1060,42 +1060,43 @@ struct CollectionScreenTests {
         }
     }
 
-    // MARK: - My own pictures outside a trip (MEMNG-919)
+    // MARK: - Everyone's pictures outside a trip (MEMNG-933)
 
     @Test(
-        "a month and a year open on Captured by me: another member's picture only once unchecked",
+        "a month and a year open on everyone's: another member's picture until Captured by me",
         arguments: ["month", "year"])
-    func aPeriodOpensOnMyOwn(_ kind: String) async {
+    func aPeriodOpensOnEveryone(_ kind: String) async {
         let wire = TripWire()
         wire.transport.others("p1")
         let scope = kind == "month" ? Self.month : Self.year
         await CollectionsHost.with(screen(stores(), wire, scope), height: 3000) { screen in
-            let mine = ["p0", "p2", "p3", "p4"]
-            let landed = await screen.until { TripProbe.tiles(in: screen.window) == mine }
+            let landed = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
             #expect(landed, "the grid: \(TripProbe.tiles(in: screen.window))")
             let reads = wire.transport.listReads
             #expect(!reads.isEmpty, "nothing was read")
-            #expect(reads.allSatisfy { $0["mine"] == "true" }, "an everyone read: \(reads)")
+            #expect(reads.allSatisfy { $0["mine"] == nil }, "a Captured by me read: \(reads)")
             let checked = TripMenuProbe.isOn("Captured by me", in: screen.window)
-            #expect(checked == true, "Captured by me started \(String(describing: checked))")
+            #expect(checked == false, "Captured by me started \(String(describing: checked))")
+            // Checked on purpose: my own pictures alone, read with mine=true.
             let before = wire.transport.listReads.count
             #expect(TripMenuProbe.perform("Captured by me", in: screen.window), "no such row")
-            let everyone = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
-            #expect(everyone, "the grid: \(TripProbe.tiles(in: screen.window))")
-            let after = wire.transport.listReads.dropFirst(before)
-            #expect(after.contains { $0["mine"] == nil }, "no everyone read: \(Array(after))")
-            // Checked again: my own pictures alone, once more.
-            #expect(TripMenuProbe.perform("Captured by me", in: screen.window), "no such row")
+            let mine = ["p0", "p2", "p3", "p4"]
             let narrowed = await screen.until { TripProbe.tiles(in: screen.window) == mine }
-            #expect(narrowed, "checked again: \(TripProbe.tiles(in: screen.window))")
+            #expect(narrowed, "the grid: \(TripProbe.tiles(in: screen.window))")
+            let after = wire.transport.listReads.dropFirst(before)
+            #expect(after.contains { $0["mine"] == "true" }, "no mine read: \(Array(after))")
             #expect(TripMenuProbe.isOn("Captured by me", in: screen.window) == true)
+            // Unchecked again: everyone's pictures, once more.
+            #expect(TripMenuProbe.perform("Captured by me", in: screen.window), "no such row")
+            let widened = await screen.until { TripProbe.tiles(in: screen.window) == Self.files }
+            #expect(widened, "unchecked again: \(TripProbe.tiles(in: screen.window))")
         }
     }
 
     @Test(
-        "a month's and a year's Journal leaves another member's memo out until unchecked",
+        "a month's and a year's Journal shows another member's memo until Captured by me",
         arguments: ["month", "year"])
-    func aPeriodJournalIsMyOwn(_ kind: String) async {
+    func aPeriodJournalStartsOnEveryone(_ kind: String) async {
         let wire = TripWire()
         wire.transport.othersMemo("j1")
         let scope = kind == "month" ? Self.month : Self.year
@@ -1103,18 +1104,19 @@ struct CollectionScreenTests {
             modes.choose(.journal)
             let journal = await screen.until {
                 screen.says("Arrived in Lisbon") && screen.says("A day out in Sintra")
+                    && screen.says("Tram up to the castle")
             }
             #expect(journal, "Journal: \(wire.transport.memoReads)")
-            await screen.settle(turns: 10)
-            #expect(!screen.says("Tram up to the castle"), "another member's memo is shown")
-            // The filter menu is the Photos view's: unchecked there, the Journal widens too.
+            // The filter menu is the Photos view's: checked there, the Journal narrows too.
             modes.choose(.photos)
             let grid = await screen.until { !TripProbe.tiles(in: screen.window).isEmpty }
             #expect(grid, "Photos drew no grid")
             #expect(TripMenuProbe.perform("Captured by me", in: screen.window), "no such row")
             modes.choose(.journal)
-            let widened = await screen.until { screen.says("Tram up to the castle") }
-            #expect(widened, "unchecked, the family memo is still out")
+            let mine = await screen.until { screen.says("Arrived in Lisbon") }
+            #expect(mine, "checked, my own memo is gone")
+            await screen.settle(turns: 10)
+            #expect(!screen.says("Tram up to the castle"), "checked, another member's memo shown")
         }
     }
 

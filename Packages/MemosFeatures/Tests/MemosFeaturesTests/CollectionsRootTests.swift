@@ -1022,7 +1022,7 @@ final class CollectionsTransport: ClientTransport, @unchecked Sendable {
     }
 
     /// Answers every month and year read WITHOUT `mine=true` with these — everyone's pictures,
-    /// another member's counted too (MEMNG-919); a `mine=true` read answers as before.
+    /// another member's counted too; a `mine=true` read (Captured by me) answers as before.
     nonisolated func answerEveryone(months: String, years: String) {
         lock.withLock { everyoneBuckets = (months, years) }
     }

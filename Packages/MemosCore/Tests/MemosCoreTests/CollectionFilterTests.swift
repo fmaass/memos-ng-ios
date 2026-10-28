@@ -128,9 +128,9 @@ struct CollectionFilterTests {
         let client = Self.server(paths, rows: Self.mixed)
         let (_, members) = await seeder.members()
         let scope = CollectionScopeDrainTests.scope(.month("2026-09"))
-        // A month drains my own Public pictures (MEMNG-919, MEMNG-933): its order alone is that
-        // drain turned round.
-        let newest = TripMemberQuery(order: .newestFirst, mine: true, visibility: .public)
+        // A month drains everyone's Public pictures (MEMNG-933): its order alone is that drain
+        // turned round.
+        let newest = TripMemberQuery(order: .newestFirst, visibility: .public)
         await members.drainFiltered(
             scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
 

@@ -37,10 +37,11 @@ extension CollectionCardsTests {
 
 /// The Collections root's Tags row (MEMNG-933): a Just us picture is counted and covers a card
 /// only inside its trip or album, so the tag counts, the Favorites count and every card's cover
-/// are read with `visibility=PUBLIC`, through the stores the root builds and the real generated
-/// client over a scripted transport.
+/// are read with `visibility=PUBLIC` and without `mine` — everyone's pictures, as the owner set the
+/// start on 2026-10-28 — through the stores the root builds and the real generated client over a
+/// scripted transport.
 extension CollectionCardsTests {
-    @Test("the Tags row's counts and covers, Favorites' included, read visibility=PUBLIC")
+    @Test("the Tags row's counts and covers, Favorites' included, read PUBLIC and no mine")
     func theTagsRowReadsPublic() async {
         let wire = CollectionsWire()
         wire.transport.answerTags(#"[{"name":"lisbon","count":2}]"#)
@@ -74,6 +75,7 @@ extension CollectionCardsTests {
         #expect(reads.map(\.count) == [1, 1, 2], "\(sent)")
         for read in reads.joined() {
             #expect(read.contains("visibility=PUBLIC"), "a Just us read: \(read)")
+            #expect(!read.contains("mine="), "a Captured by me read: \(read)")
         }
     }
 }

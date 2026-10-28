@@ -55,8 +55,8 @@ public final class MediaLibraryStore: MediaLibraryPaging {
     /// pictures, which is the worse failure.
     public private(set) var tag: String?
     /// "Captured by me" (MEMNG-787): only the signed-in account's own pictures, `mine=true` on the
-    /// wire. Changed only through `setMine`, and not persisted, for `tag`'s reason; the Library tab
-    /// starts on it (MEMNG-919).
+    /// wire. Changed only through `setMine`, and not persisted, for `tag`'s reason; a choice, never
+    /// the start: the Library tab opens on everyone's pictures.
     public private(set) var mine: Bool
     /// Who may see the memo a picture hangs on (MEMNG-787). Changed only through `setVisibility`,
     /// and not persisted, for `tag`'s reason. Set at init so the first page is already read under
