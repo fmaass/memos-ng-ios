@@ -38,12 +38,14 @@ private func row(keyed key: String, in rows: [[String: Any]]) throws -> [String:
 @MainActor
 @Suite("The Settings app's pane")
 struct SettingsBundlePaneTests {
-    @Test("the pane holds exactly the five keys the app reads, in the order it shows them")
-    func exactlyFiveKeys() throws {
+    @Test("the pane holds exactly the six keys the app reads, in the order it shows them")
+    func exactlySixKeys() throws {
         let keys = try bundledRows().compactMap { $0["Key"] as? String }
+        // The last is the MEMNG-538 spike switch (kill date 2026-11-03), under About.
         let expected = [
             AppSettings.appearanceKey, UploadSettings.key, SettingsBundleSync.mediaCacheSizeKey,
             SettingsBundleSync.clearMediaCacheKey, SettingsBundleSync.versionKey,
+            UploadSpike.toggleKey,
         ]
         #expect(keys == expected)
     }

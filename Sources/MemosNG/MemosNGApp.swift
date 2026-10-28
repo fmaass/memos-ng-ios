@@ -100,11 +100,22 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     /// The two lifecycle observers feeding the outbox's scheduling gate, kept for the life of the
     /// process.
     private var lifecycleObservers: [any NSObjectProtocol] = []
+    /// MEMNG-538 spike (kill date 2026-11-03): one session per `share.` identifier the system
+    /// woke the app for, kept apart from the outbox's two, and the handlers held per wake ticket.
+    private var spikeSessions: [String: (session: URLSession, receiver: UploadSpikeReceiver)] = [:]
+    private var spikeHandlers: [String: () -> Void] = [:]
 
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        if UploadSpike.isEnabled(SettingsBundleSync.paneDefaults),
+            let root = OutboxRepository.appGroupRoot()
+        {
+            UploadSpikeLog.append(
+                "app: didFinishLaunching applicationState=\(application.applicationState.rawValue)",
+                root: root)
+        }
         let session = session
         // The session is the ONE source of the outbox's authority: who it may upload as and the
         // token it presents come from `credentialGrant()` as a single value, never assembled here
@@ -181,6 +192,12 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
+        // Before the outbox is asked: a spike session is not one of its two, and it would answer
+        // the system at once.
+        if UploadSpike.isSpikeSession(identifier) {
+            receiveSpike(identifier, completionHandler: completionHandler)
+            return
+        }
         let wake = OutboxBackgroundCompletion.shared.beginWake(
             for: identifier, handler: completionHandler
         )
@@ -189,6 +206,40 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             return
         }
         Task { @MainActor in await self.startOutbox(holding: wake) }
+    }
+
+    /// MEMNG-538 spike: recreate the extension's session under its identifier, so the system can
+    /// deliver what happened to its task, and answer the wake once — when the session has finished
+    /// its events, or at the outbox's own fallback deadline, whichever claims first.
+    private func receiveSpike(_ identifier: String, completionHandler: @escaping () -> Void) {
+        guard let root = OutboxRepository.appGroupRoot() else {
+            completionHandler()
+            return
+        }
+        UploadSpikeLog.append("app: handleEventsForBackgroundURLSession \(identifier)", root: root)
+        let receiver: UploadSpikeReceiver
+        if let existing = spikeSessions[identifier] {
+            receiver = existing.receiver
+        } else {
+            receiver = UploadSpikeReceiver(identifier: identifier, root: root) { ticket in
+                Task { @MainActor in
+                    self.spikeHandlers.removeValue(forKey: "\(identifier)#\(ticket)")?()
+                }
+            }
+        }
+        // Armed and held BEFORE the session exists, so its first event cannot find nothing held.
+        let ticket = receiver.claim.arm()
+        spikeHandlers["\(identifier)#\(ticket)"] = completionHandler
+        if spikeSessions[identifier] == nil {
+            let session = URLSession(
+                configuration: UploadSpike.backgroundConfiguration(identifier: identifier),
+                delegate: receiver, delegateQueue: nil)
+            spikeSessions[identifier] = (session, receiver)
+        }
+        Task {
+            try? await Task.sleep(for: OutboxBackgroundCompletion.fallbackDelay)
+            receiver.answerOnce(ticket: ticket, reason: "fallback")
+        }
     }
 
     /// `startOutbox`, holding the system's handlers until the outbox is quiescent.

@@ -865,6 +865,86 @@ extension ManageTokensStoreTests {
         #expect(store.minted?.secret == "memos_pat_brand_new")
     }
 
+    // MEMNG-538 device spike — kill date 2026-11-03, with the method it pins.
+    private func spikeStore(
+        seen: LockedValue<[Seen]>, gate: RequestGate, session: (any SessionReporting)? = nil
+    ) -> ManageTokensStore {
+        makeStore(seen: seen, session: session) { operation in
+            if operation == createOperation {
+                await gate.hold()
+                return .created(
+                    Stub.patCreated(id: 9, name: "Upload spike", token: "memos_pat_spike")
+                )
+            }
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation: return .json("[]")
+            default: return .status(.internalServerError)
+            }
+        }
+    }
+
+    @Test("two taps on the spike mint put one create on the wire and keep its secret once")
+    func spikeMintIsSerialised() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let kept = LockedValue<[String]>([])
+        let store = spikeStore(seen: seen, gate: gate)
+        await signOn(store)
+
+        let keep: @Sendable (MintedToken) -> Bool = {
+            kept.set(kept.get() + [$0.secret])
+            return true
+        }
+        async let first = store.createForUploadSpike(keep)
+        await gate.waitForArrival()
+        let second = await store.createForUploadSpike(keep)
+        await gate.release()
+        let firstFinished = await first
+
+        #expect(firstFinished)
+        #expect(!second, "the second tap should have been refused rather than sent")
+        #expect(seen.get().filter { $0.operation == createOperation }.count == 1)
+        #expect(kept.get() == ["memos_pat_spike"])
+        #expect(store.minted == nil, "a kept spike token left its plaintext panel up")
+    }
+
+    @Test("a spike token minted after the app identity went is never kept")
+    func spikeMintFencedOnIdentity() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let kept = LockedValue<[String]>([])
+        let session = await signedInSession()
+        let store = spikeStore(seen: seen, gate: gate, session: session)
+        await signOn(store)
+
+        async let minting = store.createForUploadSpike {
+            kept.set(kept.get() + [$0.secret])
+            return true
+        }
+        await gate.waitForArrival()
+        await session.signOutWithoutRevoking()
+        await gate.release()
+
+        #expect(!(await minting))
+        #expect(kept.get().isEmpty)
+    }
+
+    @Test("a spike secret that could not be stored stays on its panel")
+    func spikeMintUnkeptStaysVisible() async throws {
+        let seen = LockedValue<[Seen]>([])
+        let gate = RequestGate()
+        let store = spikeStore(seen: seen, gate: gate)
+        await signOn(store)
+
+        async let minting = store.createForUploadSpike { _ in false }
+        await gate.waitForArrival()
+        await gate.release()
+
+        #expect(!(await minting))
+        #expect(store.minted?.secret == "memos_pat_spike")
+    }
+
     @Test("two overlapping reads put one request on the wire, not two")
     func readsAreSerialised() async throws {
         let seen = LockedValue<[Seen]>([])

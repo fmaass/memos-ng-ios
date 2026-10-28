@@ -1,5 +1,6 @@
 import Foundation
 import MemosAPI
+import MemosOutbox
 
 /// Why the management screen is asking for a sign-on rather than showing a list.
 ///
@@ -414,6 +415,26 @@ public final class ManageTokensStore {
         // out is refused as well: one intention is one create, not a create and then a window.
         await reload(work)
         endWork(work)
+        return true
+    }
+
+    /// MEMNG-538 device spike (kill date 2026-11-03): mints the one-day "Upload spike" token the
+    /// share extension presents, and hands its plaintext to `keep` instead of the panel.
+    ///
+    /// It IS `create`, under the same work gate: a second tap while the first is on the wire is
+    /// refused, never a second token. `keep` is asked synchronously, with nothing awaited between
+    /// the create's end and the read, through `minted` — the read fenced on the identity the token
+    /// was minted under, so a token minted for an account that has gone is never kept. The panel
+    /// is put away only once `keep` says the secret is stored; if it could not be, the panel stays
+    /// and the person still has the one look at it.
+    @discardableResult
+    public func createForUploadSpike(_ keep: (MintedToken) -> Bool) async -> Bool {
+        guard
+            await create(name: UploadSpike.tokenName, expiresInDays: UploadSpike.tokenLifetimeDays),
+            let minted
+        else { return false }
+        guard keep(minted) else { return false }
+        dismissMinted()
         return true
     }
 

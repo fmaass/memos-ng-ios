@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import MemosOutbox
 import SwiftUI
 import UIKit
 
@@ -41,6 +42,9 @@ struct ManageTokensView: View {
     /// The question a revoke raises lives here, above the screen that raises it, because the
     /// screen is a function of what it is given and holds no state of its own.
     @State private var pendingRevoke: ManagedToken?
+    /// Read once, as the sheet opens: the switch lives in the Settings app, which this sheet
+    /// cannot be on top of.
+    private let uploadSpikeOn = UploadSpike.isEnabled(SettingsBundleSync.paneDefaults)
 
     /// Takes the server's base URL rather than a configuration: `ServerConfiguration` belongs to
     /// the API layer, which this one reaches through `MemosCore` and never directly.
@@ -73,6 +77,10 @@ struct ManageTokensView: View {
                 copySecret: { ManageTokensClipboard.copy(current: { store.minted?.secret }) },
                 dismissSecret: { store.dismissMinted() }
             )
+            // MEMNG-538 spike (kill date 2026-11-03): nothing at all unless the debug switch is on.
+            .safeAreaInset(edge: .bottom) {
+                if uploadSpikeOn { UploadSpikeTokenBar(store: store) }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     // Said before the sheet goes, because the dismissal that follows arrives as a

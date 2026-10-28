@@ -136,7 +136,10 @@ struct ShareRootView: View {
                 into: repository
             )
             switch outcome {
-            case .enqueued:
+            case .enqueued(let job):
+                // MEMNG-538 spike (kill date 2026-11-03): returns at once unless the debug switch
+                // is on. The capture above is already queued either way.
+                await UploadSpikeShare.live(jobID: job, root: root)
                 discardStaging()
                 finish()
             case .notSignedIn:

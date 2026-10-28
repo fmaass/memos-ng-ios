@@ -3033,7 +3033,7 @@ check("extension", appex, "live.discomarder.memosng.share")
 # Storage), the switch off by default, the groups in the order Uploads, Storage, About, and the
 # footer that promises the next launch.
 SETTINGS_KEYS = ["settings.appearance", "uploadOverMobileData", "settings.mediaCacheSize",
-                 "settings.clearMediaCacheOnLaunch", "settings.version"]
+                 "settings.clearMediaCacheOnLaunch", "settings.version", "debug.uploadSpike"]
 STORAGE_ROWS = [("settings.mediaCacheSize", "PSTitleValueSpecifier", "Media cache"),
                 ("settings.clearMediaCacheOnLaunch", "PSToggleSwitchSpecifier",
                  "Clear media cache on next launch")]
