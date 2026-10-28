@@ -27,6 +27,9 @@ struct MainTabView: View {
     /// A picture's place asked for from the viewer's Info sheet, which Places moves its map to
     /// (MEMNG-869).
     @State private var placesFocus = PlacesFocus()
+    /// The Timeline tab's store, which a viewer's Info sheet changes a memo's audience through
+    /// wherever the viewer was opened (MEMNG-970).
+    @State private var timelineAccess = TimelineAccess()
     /// The session's collections and their memberships: one of each for as long as this view
     /// shows a session, built once its identity can be read, moved to a new identity beside the
     /// timeline (`TimelineView`), and read by every tab through the environment.
@@ -158,6 +161,7 @@ struct MainTabView: View {
         .environment(yearJump)
         .environment(monthJump)
         .environment(placesFocus)
+        .environment(timelineAccess)
         .environment(trips)
         .environment(members)
         .environment(actions)

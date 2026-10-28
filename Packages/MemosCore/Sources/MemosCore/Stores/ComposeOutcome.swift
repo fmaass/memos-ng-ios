@@ -66,6 +66,25 @@ public enum ComposeOutcome: Sendable, Equatable {
     }
 }
 
+/// What one memo mutation did, and the memo the server answered it with when it answered with
+/// one (MEMNG-970).
+///
+/// It is the value a memo's line hands back (`TimelineStore.claimMutation`), so a caller that
+/// JOINED a mutation already in line is handed the same memo as the caller that started it. The
+/// memo is nil for every lane but a PATCH that the server answered, and for an answer that landed
+/// after its session had gone.
+public struct MemoMutationAnswer: Sendable, Equatable {
+    public let outcome: ComposeOutcome
+    public let memo: Memo?
+
+    public init(_ outcome: ComposeOutcome, memo: Memo? = nil) {
+        self.outcome = outcome
+        self.memo = memo
+    }
+
+    public var isSaved: Bool { outcome.isSaved }
+}
+
 extension ComposeFailure {
     /// What a thrown error means for a compose.
     ///

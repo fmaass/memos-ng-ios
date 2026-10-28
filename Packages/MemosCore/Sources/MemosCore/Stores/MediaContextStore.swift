@@ -280,6 +280,21 @@ public final class MediaContextStore {
         await task.value
     }
 
+    /// The memo a change made from the Info sheet was answered with (MEMNG-970): held for its uid
+    /// as a read's answer is, so the sheet shows what the SERVER now says — on this opening and on
+    /// every later one in this viewer.
+    ///
+    /// Judged against the session that ISSUED the change: an answer from a session that is no
+    /// longer current lands nowhere, and one from a generation other than the one held drops what
+    /// is held first, as any ask does (`adopt`). An answer the server wrote BEFORE the memo already
+    /// held is not installed, so an answer that outlived a later one cannot put an older audience
+    /// back on the chip.
+    public func adoptAnswer(_ memo: Memo, issuedUnder handle: SessionHandle) {
+        guard adopt(handle) else { return }
+        if case .found(let held) = memos[memo.uid], held.updatedAt > memo.updatedAt { return }
+        memos[memo.uid] = .found(memo)
+    }
+
     /// The account changed: nothing held is about the reader any more, and nothing in the air may
     /// land.
     public func sessionIdentityChanged() {

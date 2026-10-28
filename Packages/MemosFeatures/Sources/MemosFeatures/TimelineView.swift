@@ -29,6 +29,8 @@ public struct TimelineView: View {
     @Environment(TripMemberStore.self) private var tripMembers: TripMemberStore?
     /// The tabs' dock, which the list's scrolls are told to; nil when hosted without the tabs.
     @Environment(AppDock.self) private var dock: AppDock?
+    /// Where this tab's store is put for the viewer's Info sheet (MEMNG-970); nil without the tabs.
+    @Environment(TimelineAccess.self) private var timelineAccess: TimelineAccess?
     @State private var timeline: TimelineStore?
     /// A memo read from the server because a jump named one this list has never loaded. It is what
     /// the detail screen opens WITH — the loaded list is left alone, so nothing is inserted into a
@@ -221,6 +223,8 @@ public struct TimelineView: View {
                 // answers at all.
                 await store.restoreSnapshot()
             }
+            // The viewer's Info sheet changes a memo's audience through this store's line.
+            timelineAccess?.store = timeline
             // A failure that never reached the server belongs to the session's one banner, not to
             // an error card over this list (`SessionReporting`).
             timeline?.reports(to: session)

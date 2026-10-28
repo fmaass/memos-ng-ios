@@ -65,6 +65,9 @@ struct MediaViewerView: View {
     /// Where the Info sheet's Open in Places sends a picture's place (MEMNG-869). Optional: a host
     /// without one draws no Open in Places.
     @Environment(PlacesFocus.self) private var placesFocus: PlacesFocus?
+    /// The app's one timeline store, whose line the Info sheet's Visibility chip sends through
+    /// (MEMNG-970). Nil outside the tabs, and the chip is then inert.
+    @Environment(TimelineAccess.self) private var timelineAccess: TimelineAccess?
     /// The albums the menu's Add to Album adds to (MEMNG-805); the row is offered only with them.
     @Environment(TripStore.self) private var trips: TripStore?
     @Environment(TripMemberStore.self) private var tripMembers: TripMemberStore?
@@ -366,6 +369,7 @@ struct MediaViewerView: View {
             opening: subject.opening,
             handle: session?.activeHandle,
             baseURL: session?.serverBaseURL,
+            timeline: timelineAccess?.store,
             places: places,
             showMemo: { uid in
                 inspecting = nil

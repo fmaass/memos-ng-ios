@@ -1058,10 +1058,11 @@ public final class TimelineStore {
         // up: a save that joins the one ahead of it must present neither a second key nor a second
         // copy of the same photograph.
         return await claimMutation(.edit(attempt), on: uid) { [self] claim in
-            await performEdit(
-                attempt, attaching: files, claim: claim, using: handle, baseURL: baseURL
-            )
-        }.value
+            MemoMutationAnswer(
+                await performEdit(
+                    attempt, attaching: files, claim: claim, using: handle, baseURL: baseURL
+                ))
+        }.value.outcome
     }
 
     /// The save itself, once every earlier mutation of this memo has finished.
@@ -1148,7 +1149,7 @@ public final class TimelineStore {
             }
             return resolved
         }
-        let outcome = await patchOutcome(
+        let outcome = await patchAnswer(
             uid: attempt.uid,
             .init(
                 attachmentUids: listed, content: attempt.content, createdAt: attempt.createdAt,
@@ -1157,7 +1158,7 @@ public final class TimelineStore {
             claim: claim,
             using: handle,
             baseURL: baseURL
-        )
+        ).outcome
         finishEdit(key: key, saved: outcome.isSaved)
         return outcome
     }
@@ -1281,7 +1282,7 @@ public final class TimelineStore {
     private struct MemoMutation {
         var claim: Int
         var identity: MemoMutationIdentity
-        var task: Task<ComposeOutcome, Never>
+        var task: Task<MemoMutationAnswer, Never>
     }
 
     /// The unfinished mutations of each memo, in arrival order: the one on the wire first, then
@@ -1505,8 +1506,8 @@ public final class TimelineStore {
     private func claimMutation(
         _ identity: MemoMutationIdentity,
         on uid: String,
-        perform work: @escaping @MainActor @Sendable (Int) async -> ComposeOutcome
-    ) -> Task<ComposeOutcome, Never> {
+        perform work: @escaping @MainActor @Sendable (Int) async -> MemoMutationAnswer
+    ) -> Task<MemoMutationAnswer, Never> {
         var queue = mutations[uid] ?? []
         if let tail = queue.last, tail.identity == identity { return tail.task }
         mutationClaim += 1
@@ -1562,12 +1563,26 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        await setVisibilityAnswering(change, uid: uid, using: handle, baseURL: baseURL).outcome
+    }
+
+    /// `setVisibility`, handing back the memo the server answered with as well (MEMNG-970): the
+    /// viewer's Info sheet shows a memo this list may not hold, and the chip there reflects the
+    /// server's answer rather than the pick. The SAME line as the long press and the edit sheet,
+    /// so a chip, a long press and a Save on one memo are one queue, and a caller that joins an
+    /// identical change in line is handed the same memo.
+    public func setVisibilityAnswering(
+        _ change: VisibilityChange,
+        uid: String,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async -> MemoMutationAnswer {
         await claimMutation(.visibility(change.to), on: uid) { [self] claim in
             if let question = visibilityReask(change, on: uid) {
                 mutationChangedNothing(claim, on: uid)
-                return .ask(question)
+                return MemoMutationAnswer(.ask(question))
             }
-            return await patchOutcome(
+            return await patchAnswer(
                 uid: uid, .init(visibility: change.generated), claim: claim, using: handle,
                 baseURL: baseURL)
         }.value
@@ -1588,7 +1603,7 @@ public final class TimelineStore {
     }
 
     /// The audience each memo was last asked to have by a request this store SENT, written the
-    /// moment the PATCH goes (`patchOutcome`), whatever its answer turns out to be: a request that
+    /// moment the PATCH goes (`patchAnswer`), whatever its answer turns out to be: a request that
     /// went may have been applied, so it is the memo's last known audience until a row says
     /// otherwise. One account's memos, so it goes with the identity (`sessionIdentityChanged`).
     private var sentVisibility: [String: MemoVisibility] = [:]
@@ -1628,7 +1643,8 @@ public final class TimelineStore {
         baseURL: URL
     ) async -> Bool {
         await claimMutation(.pinned(pinned), on: uid) { [self] claim in
-            await performPin(pinned, uid: uid, claim: claim, using: handle, baseURL: baseURL)
+            MemoMutationAnswer(
+                await performPin(pinned, uid: uid, claim: claim, using: handle, baseURL: baseURL))
         }.value.isSaved
     }
 
@@ -1713,7 +1729,7 @@ public final class TimelineStore {
         // has already removed comes back 404 and reads as a fact about a memo this app deleted
         // itself.
         await claimMutation(.delete, on: uid) { [self] claim in
-            await performDelete(uid: uid, claim: claim, using: handle)
+            MemoMutationAnswer(await performDelete(uid: uid, claim: claim, using: handle))
         }.value.isSaved
     }
 
@@ -2549,10 +2565,11 @@ public final class TimelineStore {
         // Its place in line is taken all the same: the tick that went out first is the one a save
         // submitted after it must be sent after.
         return await claimMutation(.task(index: index), on: uid) { [self] gate in
-            await performToggle(
-                toggled, restoring: original, in: uid, claim: claim, gate: gate,
-                using: handle, baseURL: baseURL
-            )
+            MemoMutationAnswer(
+                await performToggle(
+                    toggled, restoring: original, in: uid, claim: claim, gate: gate,
+                    using: handle, baseURL: baseURL
+                ))
         }.value.isSaved
     }
 
@@ -2625,7 +2642,7 @@ public final class TimelineStore {
             // the winner wrote.
             case .serviceUnavailable:
                 // The one 503 the contract says left nothing behind, read here rather than from
-                // the thrown value for the reason `patchOutcome` reads it here.
+                // the thrown value for the reason `patchAnswer` reads it here.
                 mutationChangedNothing(gate, on: uid)
                 throw APIError.server(status: 503)
             case .unprocessableContent:
@@ -2676,7 +2693,7 @@ public final class TimelineStore {
         baseURL: URL
     ) async -> Bool {
         await claimMutation(identity, on: uid) { [self] claim in
-            await patchOutcome(uid: uid, body, claim: claim, using: handle, baseURL: baseURL)
+            await patchAnswer(uid: uid, body, claim: claim, using: handle, baseURL: baseURL)
         }.value.isSaved
     }
 
@@ -2690,22 +2707,25 @@ public final class TimelineStore {
     /// The patch is a SEND: by the time anything can be caught below, the request has gone out.
     /// That is what `sent: true` records, and it is the difference between "nothing changed" and
     /// "this could not be confirmed".
-    private func patchOutcome(
+    ///
+    /// A request the server answered hands back the memo it answered with, the memo this store
+    /// applies, so a caller showing a memo this list does not hold can show the answer (MEMNG-970).
+    private func patchAnswer(
         uid: String,
         _ body: Components.Schemas.MemoPatch,
         claim: Int,
         using handle: SessionHandle,
         baseURL: URL
-    ) async -> ComposeOutcome {
+    ) async -> MemoMutationAnswer {
         // Before the first request and AFTER whatever this memo's line made it wait for, for the
         // reason `performEdit` asks before its uploads.
         guard sessionStillCurrent(handle) else {
             mutationChangedNothing(claim, on: uid)
-            return .failed(.authorization)
+            return MemoMutationAnswer(.failed(.authorization))
         }
         guard !serverConfirmedDeletion(of: uid) else {
             mutationChangedNothing(claim, on: uid)
-            return .failed(.rejection)
+            return MemoMutationAnswer(.failed(.rejection))
         }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
@@ -2732,14 +2752,13 @@ public final class TimelineStore {
                     // The server did something and no one is left to be told what: the row stays
                     // held against every read that was already on its way.
                     mutationOutcomeUnknown(claim, on: uid)
-                    return .failed(.authorization)
+                    return MemoMutationAnswer(.failed(.authorization))
                 }
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
-                await apply(
-                    Memo(try ok.body.json, baseURL: baseURL), under: authority, confirming: claim
-                )
-                return .saved
+                let answered = Memo(try ok.body.json, baseURL: baseURL)
+                await apply(answered, under: authority, confirming: claim)
+                return MemoMutationAnswer(.saved, memo: answered)
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
             // is thrown exactly as it was, so the sheet stays open with the reason in it rather
             // than reporting a save for a memo that is no longer there.
@@ -2771,7 +2790,7 @@ public final class TimelineStore {
         } catch {
             mutationFailed(claim, on: uid, with: error)
             await report(error, issuedUnder: handle)
-            return .failed(ComposeFailure.classify(error, sent: true))
+            return MemoMutationAnswer(.failed(ComposeFailure.classify(error, sent: true)))
         }
     }
 

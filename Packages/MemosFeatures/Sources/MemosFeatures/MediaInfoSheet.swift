@@ -53,6 +53,9 @@ enum MediaInfoRows {
         /// viewer was opened from is the screen behind it.
         let showable: Bool
         let uid: String
+        /// Whether the memo is the signed-in person's: the server's own `mine`, the flag the
+        /// timeline's long press reads before it offers Visibility. Never the FILE's flag.
+        let mine: Bool
     }
 
     struct File: Equatable {
@@ -181,10 +184,18 @@ enum MediaInfoRows {
             ? "UTC\(sign)\(hours)" : "UTC\(sign)\(hours):\(String(format: "%02d", rest))"
     }
 
+    /// `found` is the memo the viewer's store holds for the page's memo: the one it looked up,
+    /// or the one a change from this sheet was answered with. For a carried memo it is that answer
+    /// alone, and it is shown only when the server wrote it no earlier than the carried copy — the
+    /// carried memo is the list's, and a list re-read after the answer is the newer word.
     static func memoCard(_ link: MediaViewerContext.MemoLink, looked found: Memo?) -> MemoCard? {
         switch link {
         case .orphan: return nil
-        case .carried(let memo): return card(memo, showable: false)
+        case .carried(let memo):
+            guard let found, found.uid == memo.uid, found.updatedAt >= memo.updatedAt else {
+                return card(memo, showable: false)
+            }
+            return card(found, showable: false)
         case .lookup: return found.map { card($0, showable: true) }
         }
     }
@@ -193,7 +204,7 @@ enum MediaInfoRows {
         let text = stripTagOnlyLines(memo.content).trimmingCharacters(in: .whitespacesAndNewlines)
         return MemoCard(
             excerpt: String(text.prefix(140)), tags: memo.tags, visibility: memo.visibility,
-            showable: showable, uid: memo.uid)
+            showable: showable, uid: memo.uid, mine: memo.mine)
     }
 
     static func file(_ attachment: MemoAttachment, facts: AttachmentFacts?) -> File {
@@ -236,11 +247,17 @@ struct MediaInfoSheet: View {
     let opening: MediaContextStore.Opening
     var handle: SessionHandle? = nil
     var baseURL: URL? = nil
+    /// The app's one timeline store, whose per-memo line a change of the memo's audience goes
+    /// through (MEMNG-970) — the long press's and the edit sheet's line too. Nil draws the chip
+    /// inert.
+    var timeline: TimelineStore? = nil
     /// The place names the viewer has looked up, one lookup per file.
     var places: PlaceNameCache? = nil
     var showMemo: (String) -> Void = { _ in }
     /// Open in Places: the viewer goes and Places centres on this picture. Nil draws no button.
     var openInPlaces: ((PlacesFocus.Request) -> Void)? = nil
+    /// The one question a widening from the chip asks before anything is sent (`WideningAsk`).
+    @State private var widening = WideningAsk()
 
     var body: some View {
         let facts = store.facts(for: opening)
@@ -275,6 +292,24 @@ struct MediaInfoSheet: View {
             }
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
+            .alert(
+                widening.title,
+                isPresented: Binding(
+                    get: { widening.pending != nil },
+                    set: { if !$0 { _ = widening.answer(widening.pending, confirmed: false) } }
+                ),
+                presenting: widening.pending
+            ) { pending in
+                Button("Make \(pending.question.to.label)") {
+                    // Claimed synchronously in `answer`: two taps on the yes are one change.
+                    if let yes = widening.answer(pending, confirmed: true) {
+                        send(yes.change, uid: yes.uid)
+                    }
+                }
+                Button("Cancel", role: .cancel) { _ = widening.answer(pending, confirmed: false) }
+            } message: { pending in
+                Text(pending.question.sentence)
+            }
         }
         .presentationDetents([.medium, .large])
         .task { await appeared() }
@@ -294,9 +329,25 @@ struct MediaInfoSheet: View {
     /// The sheet has gone: this opening, and no other, ends.
     func disappeared() { store.close(opening) }
 
-    private var lookedUp: Memo? {
-        guard case .lookup(let uid) = context.memo else { return nil }
-        return store.memo(uid)
+    private var lookedUp: Memo? { MediaInfoRows.held(context.memo, in: store) }
+
+    /// A pick on the chip: a narrowing goes at once, a widening asks first, the memo's own
+    /// audience sends nothing — `WideningAsk`, the long press's and the edit sheet's rule.
+    private func pick(_ option: MemoVisibility, on card: MediaInfoRows.MemoCard) {
+        let next = widening.pick(option, from: card.visibility, on: card.uid)
+        if case .send(let change?) = next { send(change, uid: card.uid) }
+    }
+
+    private func send(_ change: VisibilityChange, uid: String) {
+        guard let timeline, let handle, let baseURL else { return }
+        Task {
+            let outcome = await Self.sendVisibility(
+                change, uid: uid, through: timeline, holding: store, using: handle,
+                baseURL: baseURL)
+            // A change that became a widening while it queued comes back as its question
+            // (MEMNG-981), and is asked like any widening.
+            widening.heard(outcome, on: uid)
+        }
     }
 
     @ViewBuilder
@@ -317,10 +368,47 @@ struct MediaInfoSheet: View {
         if !card.tags.isEmpty {
             Text(card.tags.map { "#\($0)" }.joined(separator: " ")).foregroundStyle(.secondary)
         }
-        LabeledContent("Visibility", value: card.visibility.label)
+        visibilityChip(card)
         if card.showable {
             Button("Show memo") { showMemo(card.uid) }
         }
+    }
+
+    /// The memo's audience as a chip: a menu of the audiences for the person's own memo, inert for
+    /// anyone else's (MEMNG-970).
+    @ViewBuilder
+    private func visibilityChip(_ card: MediaInfoRows.MemoCard) -> some View {
+        let canChange = timeline != nil && handle != nil && baseURL != nil
+        switch MediaInfoRows.chip(card, canChange: canChange) {
+        case .menu(let visibility):
+            LabeledContent("Visibility") {
+                Menu {
+                    ForEach(MemoVisibility.allCases, id: \.self) { option in
+                        Button {
+                            pick(option, on: card)
+                        } label: {
+                            if visibility == option {
+                                Label(option.label, systemImage: "checkmark")
+                            } else {
+                                Label(option.label, systemImage: option.symbolName)
+                            }
+                        }
+                    }
+                } label: {
+                    chipLabel(visibility)
+                }
+            }
+        case .inert(let visibility):
+            LabeledContent("Visibility") { chipLabel(visibility) }
+        }
+    }
+
+    private func chipLabel(_ visibility: MemoVisibility) -> some View {
+        Label(visibility.label, systemImage: visibility.symbolName)
+            .font(.subheadline)
+            .padding(.horizontal, DesignTokens.Space.snug)
+            .padding(.vertical, DesignTokens.Space.tight)
+            .background(.quaternary, in: Capsule())
     }
 
     @ViewBuilder
