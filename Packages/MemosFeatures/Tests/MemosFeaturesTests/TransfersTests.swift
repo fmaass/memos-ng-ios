@@ -118,7 +118,14 @@ struct TransfersPresentationTests {
         // Remove is never offered beside a change the server has not answered.
         #expect(row(job(.held, hold: .tooLarge, unanswered: start))?.action == .retryNow)
         #expect(row(job(.held, hold: .signInRequired))?.action == .signIn)
-        #expect(row(job(.held, hold: .accountMismatch))?.action == .signIn)
+        #expect(row(job(.held, hold: .accountMismatch))?.action == .switchAccount)
+        // Every byte on the server, the create held: the hold's reason and fix, a full ring.
+        let sent = row(
+            job(.held, hold: .signInRequired, files: [file(100, confirmed: 100, uid: "u")]))
+        #expect(sent?.reason == "Sign in again to send this memo")
+        #expect(sent?.action == .signIn)
+        #expect(sent?.fraction == 1)
+        #expect(TransfersAction.switchAccount.title == "Sign out and switch account")
         #expect(row(job(.held, hold: .serverRefused))?.action == .retryNow)
         #expect(row(job(.held, hold: .unreadableManifest))?.action == .remove)
         #expect(row(job(.held, hold: .editIncomplete))?.action == .reopen)
@@ -323,6 +330,10 @@ struct TransfersFixTests {
             .signIn, jobID: id, outbox: rig.outbox, uploads: rig.uploads,
             signIn: { routed += 1 }, reopen: { _ in })
         #expect(routed == 1)
+        await TransfersFixer().perform(
+            .switchAccount, jobID: id, outbox: rig.outbox, uploads: rig.uploads,
+            signIn: { routed += 1 }, reopen: { _ in })
+        #expect(routed == 2)
         #expect(await rig.repository.job(id)?.holdReason == .signInRequired)
     }
 

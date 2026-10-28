@@ -22,6 +22,9 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
     case useMobileData
     /// Sign in again — the sign-out that leads to the sign-in screen.
     case signIn
+    /// Sign out of the account on this phone and in as the one the capture was made under — the
+    /// same route as Sign in, named for what it does to the account signed in now.
+    case switchAccount
     /// Throw the capture away — the outbox's own discard.
     case remove
     /// Take the capture back into the editor — the outbox's own cancel.
@@ -32,6 +35,7 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
         case .retryNow: "Retry now"
         case .useMobileData: "Use mobile data"
         case .signIn: "Sign in"
+        case .switchAccount: "Sign out and switch account"
         case .remove: "Remove"
         case .reopen: "Reopen"
         }
@@ -182,7 +186,8 @@ public enum TransfersPresentation {
             case .retry: return retry
             case .remove: return offered.contains(.remove) ? .remove : retry
             case .reopen: return offered.contains(.reopen) ? .reopen : retry
-            case .signIn, .switchAccount: return .signIn
+            case .signIn: return .signIn
+            case .switchAccount: return .switchAccount
             }
         case .waiting, .uploading:
             if case .refused(let refusal) = verdict {
@@ -242,7 +247,7 @@ final class TransfersFixer {
                 outbox.uploadPreferences.apply(true)
                 await outbox.uploadPreferences.drainAfterApply()
             }
-        case .signIn:
+        case .signIn, .switchAccount:
             signIn()
         case .reopen:
             if let draft = await outbox.cancel(jobID) { reopen(draft) }

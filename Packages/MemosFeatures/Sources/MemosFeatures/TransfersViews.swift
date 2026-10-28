@@ -56,10 +56,16 @@ struct TransfersSheet: View {
     let verdict: UploadVerdict
     let perform: (TransfersAction, UUID) -> Void
     @Environment(\.dismiss) private var dismiss
+    /// Written when the next row's stall threshold passes, so the body is read again and that row
+    /// says it has stopped — one wake at the instant a sentence changes, never a repeating timer.
+    @State private var wokeAt = Date.distantPast
 
     var body: some View {
+        let now = Swift.max(Date(), wokeAt)
         let sections = TransfersPresentation.sections(
-            for: ledger, now: Date(), lastProgressAt: lastProgressAt, verdict: verdict)
+            for: ledger, now: now, lastProgressAt: lastProgressAt, verdict: verdict)
+        let stall = PendingMemoPresentation.stallDeadline(
+            for: ledger.jobs.map(\.manifest), lastProgressAt: lastProgressAt, after: now)
         NavigationStack {
             List {
                 if sections.isEmpty {
@@ -75,6 +81,13 @@ struct TransfersSheet: View {
                         }
                     }
                 }
+            }
+            .task(id: stall) {
+                guard let stall else { return }
+                let wait = stall.timeIntervalSince(Date())
+                if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+                guard !Task.isCancelled else { return }
+                wokeAt = stall
             }
             .navigationTitle("Transfers")
             .navigationBarTitleDisplayMode(.inline)

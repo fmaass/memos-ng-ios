@@ -214,9 +214,20 @@ public final class TransferLedger {
     /// The time the rest of the queue will take at the rate the confirmations in the trailing
     /// window measured, or why none is given.
     public func estimate(at now: Date) -> TransferETA {
-        let left = summary.bytesLeft
-        guard left > 0 else { return .remaining(0) }
+        guard summary.bytesLeft > 0 else { return .remaining(0) }
         guard jobs.contains(where: { $0.manifest.state == .uploading }) else { return .paused }
+        // Only what is moving, or waiting on the clock to move again, is divided by the rate: a
+        // held file (too large, a refused grant) never moves, and counting it would stretch every
+        // estimate by bytes the network is not carrying.
+        let left = jobs.flatMap(\.files).reduce(Int64(0)) { sum, file in
+            let moving: Bool
+            switch (file.state, file.reason) {
+            case (.uploading, _), (.waiting, .some(.retrying)): moving = true
+            default: moving = false
+            }
+            return moving ? sum + Swift.max(file.byteSize - file.bytesConfirmed, 0) : sum
+        }
+        guard left > 0 else { return .paused }
         let window = confirmations.filter {
             $0.at <= now && now.timeIntervalSince($0.at) <= Self.rateWindow
         }
@@ -259,13 +270,16 @@ public final class TransferLedger {
     nonisolated static func state(
         of file: OutboxFile, in job: UploadJob, now: Date
     ) -> (TransferFileState, TransferReason?) {
-        if file.isComplete || job.state == .creating { return (.done, nil) }
+        // The capture's own stop wins over a file's completion: every byte can be on the server
+        // while the memo's create is held or waiting, and a row that read done would hide the
+        // reason and the one fix that capture needs. The bytes still read whole.
         switch job.state {
         case .held:
             return (.held, .held(job.holdReason))
         case .waiting:
             return (.waiting, .waiting(job.waitReason))
         case .uploading:
+            if file.isComplete { return (.done, nil) }
             if let next = file.nextAttemptAt, next > now {
                 return (.waiting, .retrying(until: next))
             }

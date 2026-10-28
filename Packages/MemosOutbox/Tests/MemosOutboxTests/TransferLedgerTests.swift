@@ -99,6 +99,20 @@ struct TransferLedgerProjectionTests {
         #expect(whole.fraction == 1)
     }
 
+    @Test("a capture held after every byte landed reads held, its bytes whole")
+    func heldAfterUploadWins() {
+        let sent = job(
+            [file("a", size: 100, confirmed: 100), file("b", size: 50, confirmed: 50)],
+            state: .held, hold: .signInRequired)
+        let files = TransferLedger.project(sent, now: start)?.files ?? []
+        #expect(files.map(\.state) == [.held, .held])
+        #expect(files.map(\.reason) == [.held(.signInRequired), .held(.signInRequired)])
+        #expect(files.map(\.bytesConfirmed) == [100, 50])
+        let waiting = job(
+            [file("a", size: 100, confirmed: 100)], state: .waiting, wait: .noNetwork)
+        #expect(TransferLedger.project(waiting, now: start)?.files.first?.state == .waiting)
+    }
+
     @Test("a creating capture's files are all done")
     func creatingIsDone() {
         let creating = job([file("a", size: 100, confirmed: 100, uid: nil)], state: .creating)
@@ -184,6 +198,48 @@ struct TransferLedgerETATests {
         ledger.apply([uploading(2000, id: id, fileID: fileID)], generation: 3)
         // 1000 bytes in 10 s, 8000 left: 80 s.
         #expect(ledger.estimate(at: clock.now) == .remaining(80))
+    }
+
+    @Test("a held capture's bytes are not divided by the rate: they never move")
+    func heldBytesAreNotInTheEstimate() {
+        let clock = MutableClock(start)
+        let ledger = TransferLedger(clock: { clock.now })
+        let (id, fileID) = (UUID(), UUID())
+        let stuck = job(
+            [file("big.mov", size: 1_000_000, confirmed: 0, uid: nil)], state: .held,
+            hold: .tooLarge)
+        ledger.apply([uploading(0, id: id, fileID: fileID), stuck], generation: 1)
+        clock.advance(10)
+        ledger.apply([uploading(1000, id: id, fileID: fileID), stuck], generation: 2)
+        clock.advance(10)
+        ledger.apply([uploading(2000, id: id, fileID: fileID), stuck], generation: 3)
+        // 1000 bytes in 10 s, 8000 of the moving file left: 80 s, the held million ignored.
+        #expect(ledger.estimate(at: clock.now) == .remaining(80))
+    }
+
+    @Test("a confirmed count the planner reset to zero is no confirmation, and others still count")
+    func resetIsNoConfirmation() {
+        let clock = MutableClock(start)
+        let ledger = TransferLedger(clock: { clock.now })
+        let (id, a, b) = (UUID(), UUID(), UUID())
+        func read(_ first: Int64, _ second: Int64) -> UploadJob {
+            var one = file("a", size: 10_000, confirmed: first)
+            one.id = a
+            var two = file("b", size: 10_000, confirmed: second)
+            two.id = b
+            return job([one, two], id: id)
+        }
+        ledger.apply([read(0, 0)], generation: 1)
+        clock.advance(10)
+        ledger.apply([read(1000, 0)], generation: 2)
+        clock.advance(10)
+        ledger.apply([read(2000, 0)], generation: 3)
+        clock.advance(10)
+        // The upload session was lost and `a` starts over (OutboxPlanner, WholePlanner) while
+        // `b` moves 500: the drop is not a confirmation of 2000, and does not cancel b's 500.
+        ledger.apply([read(0, 500)], generation: 4)
+        // 1500 bytes over 20 s = 75 B/s; 10_000 + 9_500 left: 260 s.
+        #expect(ledger.estimate(at: clock.now) == .remaining(260))
     }
 
     @Test("a read that confirmed nothing new is not a confirmation")
