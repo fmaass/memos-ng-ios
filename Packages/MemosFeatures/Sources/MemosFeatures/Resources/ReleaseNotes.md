@@ -5,6 +5,11 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (73)
+
+- The edit sheet now has the visibility menu. Making a memo more private saves straight away; making it more public asks once first, and Cancel changes nothing. Long-pressing a memo follows the same rule.
+- A test switch for uploads started from the share sheet: Settings, memos, Upload spike (debug). It is off by default and changes nothing while off. With it on, Manage tokens can mint a one-day test token and share the spike log.
+
 ## 2.4.0 (72)
 
 - Pictures I keep to the household now show up only inside their trip or album. The Library, Years, Months and Tags start on Public, and Any in the Visibility menu shows everything again.
