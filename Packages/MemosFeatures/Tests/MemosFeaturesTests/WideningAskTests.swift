@@ -1,0 +1,180 @@
+import Foundation
+import HTTPTypes
+import MemosAPI
+import MemosCore
+import OpenAPIRuntime
+import Testing
+
+@testable import MemosFeatures
+
+/// The server a visibility change talks to: one memo "m1" to load, at `start`, and every PATCH body
+/// kept as it was sent and answered with the memo at the audience it asked for. While `holding` is
+/// set a PATCH waits before it answers, so a test can queue a second change behind the first.
+nonisolated private final class AudienceServer: ClientTransport, @unchecked Sendable {
+    static let list = "list_memos_api_memos_get"
+    static let patch = "patch_memo_api_memos__uid__patch"
+
+    private let lock = NSLock()
+    private let start: String
+    private var sent: [String] = []
+    private var held = false
+
+    init(start: String) { self.start = start }
+
+    /// The visibility each PATCH carried, in the order they reached the wire.
+    var visibilities: [String] { lock.withLock { sent } }
+    var holding: Bool {
+        get { lock.withLock { held } }
+        set { lock.withLock { held = newValue } }
+    }
+
+    private static func memo(_ visibility: String) -> String {
+        """
+        {"uid":"m1","owner":"fabian","mine":true,"content":"Lisbon at dusk",\
+        "visibility":"\(visibility)","pinned":false,"created_at":"2026-08-23T09:00:00Z",\
+        "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":null,"tags":[],\
+        "attachments":[]}
+        """
+    }
+
+    func send(
+        _ request: HTTPRequest,
+        body: HTTPBody?,
+        baseURL: URL,
+        operationID: String
+    ) async throws -> (HTTPResponse, HTTPBody?) {
+        var response = HTTPResponse(status: .ok)
+        response.headerFields[.contentType] = "application/json"
+        switch operationID {
+        case Self.list:
+            let page = #"{"items":[\#(Self.memo(start))],"nextCursor":null,"totalCount":null}"#
+            return (response, HTTPBody(page))
+        case Self.patch:
+            let data = try await Data(collecting: body ?? HTTPBody(), upTo: 1 << 20)
+            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let visibility = object?["visibility"] as? String ?? "absent"
+            lock.withLock { sent.append(visibility) }
+            while holding { try await Task.sleep(for: .milliseconds(1)) }
+            return (response, HTTPBody(Self.memo(visibility)))
+        default:
+            return (HTTPResponse(status: .internalServerError), nil)
+        }
+    }
+}
+
+/// The confirm/dismiss decision both screens hand a widening to (MEMNG-981), driven the way the
+/// screens drive it and sent through the real store and the real generated client.
+@MainActor
+@Suite("Widening: one conversation for the edit sheet and the long press")
+struct WideningAskTests {
+    private static let base = URL(string: "https://memos.example.invalid")!
+
+    private static func handle(_ server: AudienceServer) -> SessionHandle {
+        SessionHandle(
+            client: APIClientFactory.make(
+                configuration: ServerConfiguration(baseURL: base),
+                token: { "memos_pat_widening" }, transport: server),
+            generation: 1)
+    }
+
+    private static func loaded(_ server: AudienceServer) async -> TimelineStore {
+        let store = TimelineStore()
+        await store.refresh(using: handle(server), baseURL: base)
+        return store
+    }
+
+    /// What both screens do with an answer: send the yes, and hear what the store said.
+    private static func act(
+        on answer: WideningAsk.Send?, _ ask: inout WideningAsk, in store: TimelineStore,
+        server: AudienceServer
+    ) async {
+        guard let answer else { return }
+        let outcome = await store.setVisibility(
+            answer.change, uid: answer.uid, using: handle(server), baseURL: base)
+        ask.heard(outcome, on: answer.uid)
+    }
+
+    @Test("a narrowing pick goes as it is, the memo's own audience sends nothing, no question")
+    func narrowingAndUnchangedPicks() throws {
+        var ask = WideningAsk()
+        guard case .send(let change?) = ask.pick(.private, from: .public, on: "m1") else {
+            Issue.record("Public → Private did not go")
+            return
+        }
+        #expect(change.to == .private && !change.confirmed)
+        let unchanged = ask.pick(.public, from: .public, on: "m1")
+        #expect(unchanged == .send(nil))
+        #expect(ask.pending == nil)
+    }
+
+    @Test("a dismissed widening sends nothing")
+    func dismissSendsNothing() async throws {
+        let server = AudienceServer(start: "PRIVATE")
+        let store = await Self.loaded(server)
+        var ask = WideningAsk()
+        let next = ask.pick(.public, from: .private, on: "m1")
+        #expect(next == .asking)
+        let shown = try #require(ask.pending)
+        #expect(ask.title == "Make this memo \(MemoVisibility.public.label)?")
+        let answer = ask.answer(shown, confirmed: false)
+        await Self.act(on: answer, &ask, in: store, server: server)
+        #expect(answer == nil, "a dismissal answered with a change")
+        #expect(ask.pending == nil, "the question is still up after its dismissal")
+        #expect(server.visibilities.isEmpty, "a dismissal reached the wire: \(server.visibilities)")
+        #expect(store.memos.first?.visibility == .private)
+    }
+
+    @Test("the yes tapped twice is ONE PATCH")
+    func confirmTwiceIsOnePatch() async throws {
+        let server = AudienceServer(start: "PRIVATE")
+        let store = await Self.loaded(server)
+        var ask = WideningAsk()
+        let next = ask.pick(.public, from: .private, on: "m1")
+        #expect(next == .asking)
+        let shown = try #require(ask.pending)
+        // Two taps in one frame: both answer the question that was on screen.
+        let first = ask.answer(shown, confirmed: true)
+        let second = ask.answer(shown, confirmed: true)
+        await Self.act(on: first, &ask, in: store, server: server)
+        await Self.act(on: second, &ask, in: store, server: server)
+        #expect(first?.change.confirmed == true, "control: the yes sent the confirmed change")
+        #expect(server.visibilities == ["PUBLIC"], "the yes went \(server.visibilities.count)×")
+        #expect(store.memos.first?.visibility == .public)
+    }
+
+    @Test("a change that became a widening while it queued is asked again; its yes is one PATCH")
+    func queuedWideningIsReasked() async throws {
+        let server = AudienceServer(start: "PUBLIC")
+        let store = await Self.loaded(server)
+        var ask = WideningAsk()
+        // Both picked while the row read Public: two narrowings, no question.
+        guard case .send(let toPrivate?) = ask.pick(.private, from: .public, on: "m1"),
+            case .send(let toUs?) = ask.pick(.protected, from: .public, on: "m1")
+        else {
+            Issue.record("a narrowing from Public asked")
+            return
+        }
+        server.holding = true
+        let first = Task {
+            await store.setVisibility(
+                toPrivate, uid: "m1", using: Self.handle(server), baseURL: Self.base)
+        }
+        while server.visibilities.isEmpty { await Task.yield() }
+        let second = Task {
+            await store.setVisibility(
+                toUs, uid: "m1", using: Self.handle(server), baseURL: Self.base)
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        server.holding = false
+        #expect(await first.value.isSaved, "control: the narrowing landed")
+        let outcome = await second.value
+        ask.heard(outcome, on: "m1")
+        let shown = try #require(ask.pending, "Private → Just us was not asked again")
+        #expect(shown.question.from == .private && shown.question.to == .protected)
+        #expect(server.visibilities == ["PRIVATE"], "Just us went out unconfirmed")
+        let yes = ask.answer(shown, confirmed: true)
+        await Self.act(on: yes, &ask, in: store, server: server)
+        #expect(server.visibilities == ["PRIVATE", "PROTECTED"])
+        #expect(ask.pending == nil)
+    }
+}

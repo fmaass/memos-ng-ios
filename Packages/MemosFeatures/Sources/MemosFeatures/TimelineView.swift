@@ -51,8 +51,9 @@ public struct TimelineView: View {
     /// replaces the whole list, and the scroll it was read at belongs to a list that is gone.
     @State private var jumps = 0
     @State private var composing: ComposeView.Mode?
-    /// The one question a long-press widening asks before anything is sent (`VisibilityChange`).
-    @State private var widening: PendingWidening?
+    /// The one question a long-press widening asks before anything is sent — at the press, or when
+    /// the store finds the change has become one while it queued (`WideningAsk`).
+    @State private var widening = WideningAsk()
     /// The delete conversation the edit sheet can start, and the one thing that decides what its
     /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
     /// would be a second set of rules about when a memo may be removed.
@@ -516,20 +517,20 @@ public struct TimelineView: View {
         .scrollEdgeEffectStyle(.soft, for: .top)
         .refreshable { await load() }
         .alert(
-            widening.map { "Make this memo \($0.question.to.label)?" } ?? "",
+            widening.title,
             isPresented: Binding(
-                get: { widening != nil },
-                set: { if !$0 { widening = nil } }
+                get: { widening.pending != nil },
+                set: { if !$0 { _ = widening.answer(widening.pending, confirmed: false) } }
             ),
-            presenting: widening
+            presenting: widening.pending
         ) { pending in
             Button("Make \(pending.question.to.label)") {
-                // Claimed synchronously: two taps on the yes are one change.
-                guard widening == pending else { return }
-                widening = nil
-                send(pending.question.confirmed(), uid: pending.uid, in: timeline)
+                // Claimed synchronously in `answer`: two taps on the yes are one change.
+                if let yes = widening.answer(pending, confirmed: true) {
+                    send(yes.change, uid: yes.uid, in: timeline)
+                }
             }
-            Button("Cancel", role: .cancel) { widening = nil }
+            Button("Cancel", role: .cancel) { _ = widening.answer(pending, confirmed: false) }
         } message: { pending in
             Text(pending.question.sentence)
         }
@@ -607,12 +608,8 @@ public struct TimelineView: View {
                 Button {
                     // Narrowing goes at once; widening asks first; the memo's own audience is
                     // nothing to send. The rule is `VisibilityChange`'s, the edit sheet's too.
-                    switch VisibilityChange.propose(option, from: memo.visibility) {
-                    case .unchanged: break
-                    case .ready(let change): send(change, uid: memo.uid, in: timeline)
-                    case .ask(let question):
-                        widening = PendingWidening(uid: memo.uid, question: question)
-                    }
+                    let next = widening.pick(option, from: memo.visibility, on: memo.uid)
+                    if case .send(let change?) = next { send(change, uid: memo.uid, in: timeline) }
                 } label: {
                     if memo.visibility == option {
                         Label(option.label, systemImage: "checkmark")
@@ -626,18 +623,16 @@ public struct TimelineView: View {
         }
     }
 
-    /// A long-press widening waiting for its answer, and the memo it is about.
-    struct PendingWidening: Equatable {
-        let uid: String
-        let question: VisibilityChange.Question
-    }
-
     private func send(_ change: VisibilityChange, uid: String, in timeline: TimelineStore) {
         Task {
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return
             }
-            await timeline.setVisibility(change, uid: uid, using: handle, baseURL: baseURL)
+            // A change that became a widening while it queued comes back as its question, and is
+            // asked like any widening (MEMNG-981).
+            let outcome = await timeline.setVisibility(
+                change, uid: uid, using: handle, baseURL: baseURL)
+            widening.heard(outcome, on: uid)
         }
     }
 

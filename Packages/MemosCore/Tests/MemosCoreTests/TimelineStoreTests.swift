@@ -396,7 +396,7 @@ extension TimelineStoreTests {
                 uid: "a",
                 using: client.handle,
                 baseURL: Stub.baseURL
-            )
+            ).isSaved
         )
         #expect(store.memos.first?.visibility == .public)
     }

@@ -171,14 +171,14 @@ struct VisibilityChangeTests {
         }
         try? await Task.sleep(for: .milliseconds(100))
         release.set(true)
-        let firstAnswer = await first.value
-        let secondAnswer = await second.value
+        let firstAnswer = await first.value.isSaved
+        let secondAnswer = await second.value.isSaved
         #expect(wire.log.all.count == 1, "one tap's change reached the server twice")
         #expect(firstAnswer && secondAnswer, "one request, answered to both")
         #expect(store.memos.first?.visibility == .private)
     }
 
-    @Test("a narrowing queued behind another change is not sent once it has become a widening")
+    @Test("a narrowing queued behind another change is ASKED again once it has become a widening")
     func queuedNarrowingRevalidated() async throws {
         let release = LockedValue<Bool>(false)
         let wire = server(answer: { Stub.memo(uid: "a", visibility: "PRIVATE") }, release: release)
@@ -201,19 +201,116 @@ struct VisibilityChangeTests {
         }
         try? await Task.sleep(for: .milliseconds(100))
         release.set(true)
-        #expect(await first.value, "control: the narrowing landed")
-        let sent = await second.value
-        #expect(!sent, "Private → Just us went out unconfirmed")
-        #expect(wire.log.all.map { $0["visibility"] as? String } == ["PRIVATE"])
-        // The same change confirmed is the person's yes, and goes.
-        guard case .ask(let question) = VisibilityChange.propose(.protected, from: .private) else {
-            Issue.record("Private → Just us did not ask")
+        #expect(await first.value.isSaved, "control: the narrowing landed")
+        // Not refused: re-asked, as the widening it now is, from where the memo now stands.
+        let outcome = await second.value
+        guard case .ask(let question) = outcome else {
+            Issue.record("Private → Just us was not re-asked: \(outcome)")
             return
         }
+        #expect(question.from == .private && question.to == .protected)
+        #expect(wire.log.all.map { $0["visibility"] as? String } == ["PRIVATE"])
+        // The question's yes goes, once.
         #expect(
             await store.setVisibility(
-                question.confirmed(), uid: "a", using: wire.client.handle, baseURL: Stub.baseURL))
-        #expect(wire.log.all.count == 2)
+                question.confirmed(), uid: "a", using: wire.client.handle, baseURL: Stub.baseURL
+            ).isSaved)
+        #expect(wire.log.all.map { $0["visibility"] as? String } == ["PRIVATE", "PROTECTED"])
+    }
+
+    @Test("an edit whose audience has become a widening while it queued is asked, not sent")
+    func queuedEditReasked() async throws {
+        let release = LockedValue<Bool>(false)
+        let wire = server(answer: { Stub.memo(uid: "a", visibility: "PRIVATE") }, release: release)
+        let store = TimelineStore()
+        await store.refresh(using: wire.client.handle, baseURL: Stub.baseURL)
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let first = Task {
+            await store.setVisibility(
+                .cleared(.private, from: .public), uid: "a", using: wire.client.handle,
+                baseURL: Stub.baseURL)
+        }
+        while wire.log.all.isEmpty { await Task.yield() }
+        let edit = Task {
+            await store.edit(
+                uid: "a", content: "words", visibility: toUs,
+                using: wire.client.handle, baseURL: Stub.baseURL)
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        release.set(true)
+        #expect(await first.value.isSaved, "control: the narrowing landed")
+        let outcome = await edit.value
+        #expect(outcome == .ask(VisibilityChange.Question(from: .private, to: .protected)))
+        #expect(wire.log.all.count == 1, "the edit went out with an unconfirmed widening")
+    }
+
+    @Test("archived between two queued changes: the second is judged against what was sent")
+    func absentRowJudgedAgainstLastSent() async throws {
+        let release = LockedValue<Bool>(false)
+        let log = PatchLog()
+        // The server answers each PATCH with the memo as it then is: made Private, then archived.
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+            }
+            log.record(Stub.object(try await Stub.bytes(body)))
+            try await held(until: release)
+            let archived = log.all.contains { $0["archived"] as? Bool == true }
+            return Stub.json(
+                Stub.memo(
+                    uid: "a", visibility: "PRIVATE",
+                    archivedAt: archived ? "2026-08-23T10:00:00Z" : nil))
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let first = Task {
+            await store.setVisibility(
+                .cleared(.private, from: .public), uid: "a", using: client.handle,
+                baseURL: Stub.baseURL)
+        }
+        while log.all.isEmpty { await Task.yield() }
+        let archive = Task {
+            await store.setArchived(true, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        let second = Task {
+            await store.setVisibility(
+                toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        release.set(true)
+        #expect(await first.value.isSaved, "control: the narrowing landed")
+        #expect(await archive.value, "control: the archive landed")
+        #expect(store.memos.isEmpty, "control: the archived row left the timeline")
+        let outcome = await second.value
+        #expect(!outcome.isSaved, "Private → Just us went out unconfirmed on an absent row")
+        #expect(outcome == .ask(VisibilityChange.Question(from: .private, to: .protected)))
+        #expect(
+            log.all.compactMap { $0["visibility"] as? String } == ["PRIVATE"],
+            "a second visibility reached the wire: \(log.all)")
+    }
+
+    @Test("a narrowing on a memo outside the loaded list goes as it is (absent is not unknown)")
+    func absentRowNarrowingGoes() async throws {
+        let wire = server(
+            rows: [Stub.memo(uid: "b", visibility: "PUBLIC")],
+            answer: { Stub.memo(uid: "a", visibility: "PROTECTED") })
+        let store = TimelineStore()
+        await store.refresh(using: wire.client.handle, baseURL: Stub.baseURL)
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let outcome = await store.setVisibility(
+            toUs, uid: "a", using: wire.client.handle, baseURL: Stub.baseURL)
+        #expect(outcome.isSaved, "an ordinary narrowing was refused for a memo not on screen")
+        #expect(wire.log.all.map { $0["visibility"] as? String } == ["PROTECTED"])
     }
 
     @Test("an older edit's answer does not revert a newer long-press change (updated_at)")
@@ -235,7 +332,7 @@ struct VisibilityChangeTests {
         let changed = await store.setVisibility(
             .cleared(.private, from: .public), uid: "a",
             using: wire.client.handle, baseURL: Stub.baseURL)
-        #expect(changed)
+        #expect(changed.isSaved)
         #expect(store.memos.first?.visibility == .private, "control: the change landed")
 
         // The edit was written at :01, BEFORE the visibility change, and its answer arrives last.

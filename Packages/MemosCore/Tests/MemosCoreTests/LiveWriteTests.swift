@@ -103,7 +103,7 @@ struct LiveWriteTests {
         #expect(
             await store.setVisibility(
                 .cleared(.private), uid: uid, using: client.handle, baseURL: configuration.baseURL
-            )
+            ).isSaved
         )
         #expect(await store.delete(uid: uid, using: client.handle))
         #expect(!store.memos.contains { $0.uid == uid })

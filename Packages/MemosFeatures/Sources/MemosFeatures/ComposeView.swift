@@ -213,8 +213,9 @@ public struct ComposeView: View {
     @State private var hasRestoredPictures = false
     /// The pinned trip's chip, and whether its ✕ was pressed in THIS sheet (`ComposeTripChip`).
     @State private var tripChip: ComposeTripChip
-    /// The one question a widening edit asks before its Save goes, or nil (`VisibilityChange`).
-    @State private var wideningQuestion: VisibilityChange.Question?
+    /// The one question a widening edit asks before its Save goes — at the Save, or when the store
+    /// finds the change has become one while it queued (`WideningAsk`).
+    @State private var widening = WideningAsk()
     @FocusState private var editorFocused: Bool
 
     /// - Parameter pinnedTrip: the trip a new memo is offered, decided by the presenter when the
@@ -465,17 +466,25 @@ public struct ComposeView: View {
             } else {
                 editRow
                     .alert(
-                        wideningQuestion.map { "Make this memo \($0.to.label)?" } ?? "",
+                        widening.title,
                         isPresented: Binding(
-                            get: { wideningQuestion != nil },
-                            set: { if !$0 { wideningQuestion = nil } }
+                            get: { widening.pending != nil },
+                            set: {
+                                if !$0 { _ = widening.answer(widening.pending, confirmed: false) }
+                            }
                         ),
-                        presenting: wideningQuestion
-                    ) { question in
-                        Button("Make \(question.to.label)") { confirmWidening() }
-                        Button("Cancel", role: .cancel) { wideningQuestion = nil }
-                    } message: { question in
-                        Text(question.sentence)
+                        presenting: widening.pending
+                    ) { pending in
+                        Button("Make \(pending.question.to.label)") {
+                            if let yes = widening.answer(pending, confirmed: true) {
+                                send(visibility: yes.change)
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {
+                            _ = widening.answer(pending, confirmed: false)
+                        }
+                    } message: { pending in
+                        Text(pending.question.sentence)
                     }
                 if let delete {
                     deleteRow(delete)
@@ -734,23 +743,16 @@ public struct ComposeView: View {
     /// control is then refused on (`mayChangeAttachments`).
     private func post() {
         guard !imports.isSubmitting else { return }
-        guard case .edit(_, _, _, _, let original) = mode else {
+        guard case .edit(let uid, _, _, _, let original) = mode else {
             send(visibility: nil)
             return
         }
-        switch VisibilityChange.propose(visibilityPick.selection ?? original, from: original) {
-        case .unchanged: send(visibility: nil)
-        case .ready(let change): send(visibility: change)
-        case .ask(let question): wideningQuestion = question
+        // The yes to a widening is claimed synchronously in `WideningAsk.answer`, so two taps on it
+        // are one Save; the store would join them anyway (`claimMutation`).
+        switch widening.pick(visibilityPick.selection ?? original, from: original, on: uid) {
+        case .send(let change): send(visibility: change)
+        case .asking: break
         }
-    }
-
-    /// The yes to a widening. The question is claimed synchronously, before anything else, so two
-    /// taps on the answer are one Save; the store would join them anyway (`claimMutation`).
-    private func confirmWidening() {
-        guard let question = wideningQuestion else { return }
-        wideningQuestion = nil
-        send(visibility: question.confirmed())
     }
 
     private func send(visibility change: VisibilityChange?) {
@@ -787,6 +789,10 @@ public struct ComposeView: View {
             switch outcome {
             case .saved:
                 dismiss()
+            case .ask:
+                // Nothing was sent: the audience this Save carried has become a widening while it
+                // queued, and it is asked as one. The sheet stays as it was (MEMNG-981).
+                if case .edit(let uid, _, _, _, _) = mode { widening.heard(outcome, on: uid) }
             case .failed(let failure):
                 // The sheet stays open with everything still in it — the words, the date mode, the
                 // files and their identities. That is the whole of what "preserved" means here: it

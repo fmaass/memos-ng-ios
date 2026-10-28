@@ -52,6 +52,11 @@ public enum ComposeFailure: Sendable, Equatable {
 public enum ComposeOutcome: Sendable, Equatable {
     case saved
     case failed(ComposeFailure)
+    /// Nothing was sent: the visibility change this carried was a narrowing when it was proposed
+    /// and had become a widening by the time its memo's line reached it (MEMNG-981). It is neither
+    /// a failure nor a refusal — the caller asks this question exactly as it asks any widening,
+    /// and sends only its `confirmed()` change; a dismissal sends nothing.
+    case ask(VisibilityChange.Question)
 
     public var isSaved: Bool { self == .saved }
 

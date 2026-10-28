@@ -284,6 +284,7 @@ public final class TimelineStore {
         // The tasks standing in it keep running under the handles they captured and refuse
         // themselves on arrival; their places are not the incoming identity's to wait behind.
         mutations.removeAll()
+        sentVisibility.removeAll()
         // And so do the fences and the debts they left: they hold one account's rows against one
         // account's reads, and there are no rows left here to hold. The sequence itself is a
         // counter like `mutationClaim` and is never reset — a stamp from the line that has gone
@@ -1083,11 +1084,16 @@ public final class TimelineStore {
         // have been taken away while they queued. The answer stands in for the 404 the server
         // would give them, and it is reported rather than swallowed — a save nobody can keep is
         // not a save that went through.
-        guard !serverConfirmedDeletion(of: attempt.uid),
-            visibilityMaySend(attempt.visibility, on: attempt.uid)
-        else {
+        guard !serverConfirmedDeletion(of: attempt.uid) else {
             mutationChangedNothing(claim, on: attempt.uid)
             return .failed(.rejection)
+        }
+        // And the audience this save carries, judged where the memo now stands: a narrowing that
+        // has become a widening while it queued goes back to the sheet as its question, with
+        // nothing sent and no key minted.
+        if let question = visibilityReask(attempt.visibility, on: attempt.uid) {
+            mutationChangedNothing(claim, on: attempt.uid)
+            return .ask(question)
         }
 
         // The client and the incarnation it belongs to arrive as ONE value and are carried
@@ -1546,30 +1552,46 @@ public final class TimelineStore {
     /// It takes a `VisibilityChange` rather than a bare visibility so that a widening reaches the
     /// wire only as the yes to its question: the rule lives in that type, not in the screens that
     /// call this. Two identical changes overlapping are JOINED into one request (`claimMutation`).
+    ///
+    /// A change that has become a widening while it waited answers `.ask` with its question and
+    /// sends nothing (MEMNG-981); the caller asks it like any widening and sends only the yes.
     @discardableResult
     public func setVisibility(
         _ change: VisibilityChange,
         uid: String,
         using handle: SessionHandle,
         baseURL: URL
-    ) async -> Bool {
+    ) async -> ComposeOutcome {
         await claimMutation(.visibility(change.to), on: uid) { [self] claim in
-            guard visibilityMaySend(change, on: uid) else {
+            if let question = visibilityReask(change, on: uid) {
                 mutationChangedNothing(claim, on: uid)
-                return .failed(.rejection)
+                return .ask(question)
             }
             return await patchOutcome(
                 uid: uid, .init(visibility: change.generated), claim: claim, using: handle,
                 baseURL: baseURL)
-        }.value.isSaved
+        }.value
     }
 
-    /// The widening rule asked again against the row as it stands once the line reached the
-    /// change. REFUSED rather than re-asked: nothing is sent and the caller hears a rejection.
-    private func visibilityMaySend(_ change: VisibilityChange?, on uid: String) -> Bool {
-        guard let change else { return true }
-        return change.maySend(over: memos.first { $0.uid == uid }?.visibility)
+    /// The widening rule asked again once the line reached the change, against where the memo now
+    /// stands: the loaded row, else the audience this store last put on the wire for it, else the
+    /// change's own `from`. The middle term is the memo that LEFT the list while its line ran — an
+    /// archive between two changes takes the row away, and the change behind it must not then be
+    /// judged against the audience it was proposed over (MEMNG-981). An absent row with nothing
+    /// sent is not "unknown": a narrowing from a memo outside the loaded list goes as it is.
+    private func visibilityReask(_ change: VisibilityChange?, on uid: String)
+        -> VisibilityChange.Question?
+    {
+        guard let change else { return nil }
+        let current = memos.first { $0.uid == uid }?.visibility ?? sentVisibility[uid]
+        return change.reask(over: current)
     }
+
+    /// The audience each memo was last asked to have by a request this store SENT, written the
+    /// moment the PATCH goes (`patchOutcome`), whatever its answer turns out to be: a request that
+    /// went may have been applied, so it is the memo's last known audience until a row says
+    /// otherwise. One account's memos, so it goes with the identity (`sessionIdentityChanged`).
+    private var sentVisibility: [String: MemoVisibility] = [:]
 
     /// Archives a memo, or takes it back out of the archive.
     ///
@@ -2694,6 +2716,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        if let visibility = body.visibility { sentVisibility[uid] = MemoVisibility(visibility) }
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
                 .init(path: .init(uid: uid), body: .json(body))

@@ -816,8 +816,8 @@ struct TimelineMutationGateTests {
         }
         await timeForARequestToArrive()
         release.set(true)
-        let firstChanged = await first.value
-        let secondChanged = await second.value
+        let firstChanged = await first.value.isSaved
+        let secondChanged = await second.value.isSaved
 
         #expect(patches.count == 1, "one memo's visibility was sent to the server twice")
         #expect(firstChanged, "control: the change landed")

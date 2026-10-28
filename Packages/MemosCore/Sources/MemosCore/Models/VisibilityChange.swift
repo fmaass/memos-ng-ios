@@ -38,6 +38,14 @@ public struct VisibilityChange: Hashable, Sendable {
         confirmed || !Self.widens(from: current ?? from, to: to)
     }
 
+    /// The question this change has to be asked AGAIN with once its memo's line reaches it, or nil
+    /// when it may simply go (MEMNG-981). A narrowing that has become a widening is not refused:
+    /// it is the same widening any screen asks about, from where the memo now stands, and only
+    /// that question's yes sends it.
+    public func reask(over current: MemoVisibility?) -> Question? {
+        maySend(over: current) ? nil : Question(from: current ?? from, to: to)
+    }
+
     /// What asking for `to` on a memo that is `from` amounts to.
     public enum Proposal: Hashable, Sendable {
         /// The memo is already there: nothing is sent.
