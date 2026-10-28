@@ -56,7 +56,8 @@ struct PostWhileImportingTests {
         let stamp = imports.selected()
         let loading = Task {
             await imports.load(["a", "b"], stamp: stamp) { item in
-                item == "a" ? .file(Self.media("a.heic")) : await second.load()
+                if item == "a" { return .file(Self.media("a.heic")) }
+                return await second.load()
             }
         }
         await second.waitUntilStarted()
