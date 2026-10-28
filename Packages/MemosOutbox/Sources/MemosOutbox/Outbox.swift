@@ -42,6 +42,9 @@ public final class Outbox {
     /// the timeline's cue to reload: a capture that vanishes from Pending and does not reappear
     /// as a memo looks exactly like a lost one.
     public private(set) var lastCompletedAt: Date?
+    /// The memo each recently finished capture became, by job id, as the engine noted it — read
+    /// together with `jobs`, so a capture missing from one is found in the other (MEMNG-951).
+    public private(set) var resolvedMemos: [UUID: String] = [:]
     /// When each job's CONFIRMED bytes last changed, by job id.
     ///
     /// In memory and never a manifest field: it is a fact about what this device has SEEN, and
@@ -283,6 +286,9 @@ public final class Outbox {
         let work = Task { @MainActor [self] in
             _ = await attachScheduler?(engine)
             await uploads?.attach(engine)
+            // A capture an editor of a launch that has since died was still bringing files into:
+            // nothing more will arrive, so it is let go with what it holds before any drain.
+            _ = try? await repository.releaseStaging(leftOverBefore: launch)
             // A withdrawal whose cancellation the last process never issued, issued now — in
             // every launch, whether or not anyone is signed in to drain with — and before any
             // drain, which waits for this adoption.
@@ -312,7 +318,11 @@ public final class Outbox {
         let ticket = queueReadsBegun
         do {
             let loaded = try await repository.loadJobs()
+            // After the jobs, never before: the engine notes a resolution before the job leaves
+            // the disk, so a read that misses the job finds the memo it became.
+            let resolved = await engine.resolvedMemos
             jobs = loaded
+            resolvedMemos = resolved
             noteProgress(in: loaded)
             transfers.apply(loaded, generation: ticket)
             queueError = nil
@@ -452,31 +462,113 @@ public final class Outbox {
         sources: [StagedSource],
         composedUnder account: AccountBinding? = nil
     ) async -> Bool {
+        await enqueueJob(
+            content: content, visibility: visibility, capturedAt: capturedAt, sources: sources,
+            composedUnder: account, stagingLaunch: nil
+        ) != nil
+    }
+
+    /// `enqueue`, for a capture Post took while some of its files were still loading (MEMNG-951):
+    /// the files that ARE here are copied and the capture is written now — so the editor can
+    /// close — marked as still arriving from this launch, which keeps its create back until the
+    /// editor lets it go (`release`). Answers the job's id, which is what the late files are
+    /// appended to, or nil exactly where `enqueue` answers false.
+    public func stage(
+        content: String,
+        visibility: String?,
+        capturedAt: Date = Date(),
+        sources: [StagedSource],
+        composedUnder account: AccountBinding? = nil
+    ) async -> UUID? {
+        await enqueueJob(
+            content: content, visibility: visibility, capturedAt: capturedAt, sources: sources,
+            composedUnder: account, stagingLaunch: launch
+        )?.id
+    }
+
+    /// This process's launch: what a capture still taking files is marked with, so the next
+    /// launch can tell a mark nobody will ever clear from one an editor here still holds.
+    private var launch: UUID { uploads?.launch ?? OutboxUploadSession.processLaunch }
+
+    /// Adds a file that landed after Post to the capture it was picked for. False when the capture
+    /// no longer takes files — let go, taken back, or gone — or the copy failed; what the capture
+    /// already holds is untouched either way (`OutboxRepository.append`).
+    public func append(_ sources: [StagedSource], to jobID: UUID) async -> Bool {
+        let appended =
+            (try? await repository.append(sources, to: jobID, arrivingFrom: launch)) ?? nil
+        await refresh()
+        guard appended != nil else { return false }
+        await drainAfterAdoption()
+        return true
+    }
+
+    /// The editor is done bringing files into this capture: the last landed or failed, or its time
+    /// ran out. The create may go once what is here is up.
+    public func release(_ jobID: UUID) async {
+        _ = try? await repository.releaseStaging(jobID, arrivingFrom: launch)
+        await refresh()
+        await drainAfterAdoption()
+    }
+
+    /// Removes a capture that has not become a memo — "Remove" on its card.
+    ///
+    /// Refused while the create may be on the wire or has been answered: the server may then hold
+    /// the memo, and a card removed here would come back with the next read of the list. So the
+    /// refusal is the state the capture is in, read and fenced in the same write that marks it:
+    /// a pass that claimed the create first makes this write lose, and nothing is removed.
+    public func withdraw(_ jobID: UUID) async -> Bool {
+        guard let snapshot = await repository.job(jobID), !snapshot.createMayHaveBeenSent,
+            snapshot.editUnansweredSince == nil
+        else { return false }
+        let taken = snapshot.cancelled(at: Date())
+        let written = try? await repository.save(
+            taken, ifStillCurrent: nil, matching: snapshot, else: taken
+        )
+        guard let landed = written ?? nil else {
+            await refresh()
+            return false
+        }
+        await engine.abandonTasks(jobID: jobID)
+        _ = await repository.delete(landed, ifStillCurrent: landed)
+        await refresh()
+        return true
+    }
+
+    private func enqueueJob(
+        content: String,
+        visibility: String?,
+        capturedAt: Date,
+        sources: [StagedSource],
+        composedUnder account: AccountBinding?,
+        stagingLaunch: UUID?
+    ) async -> UploadJob? {
         guard let credentials = await credentials.currentCredentials(),
             self.credentials.isCurrent(credentials)
         else {
             enqueueError = "Sign in before writing a memo."
             lastEnqueueFailure = .notSignedIn
-            return false
+            return nil
         }
         // The same answer a grant withdrawn during the copy gets below: the session this capture
         // was written in is not the one that would send it.
         if let account, account != credentials.binding {
             enqueueError = "Sign in before writing a memo."
             lastEnqueueFailure = .notSignedIn
-            return false
+            return nil
         }
         // The binding stamped on the job decides whose account this capture is ever sent into, and
         // the repository copies every file before it commits one. So the authority travels INTO
         // that actor and is asked again immediately before the commit, rather than only here.
         let authority = self.credentials
+        let job: UploadJob
         do {
-            _ = try await repository.enqueue(
+            job = try await repository.enqueue(
                 content: content,
                 visibility: visibility,
                 capturedAt: capturedAt,
                 binding: credentials.binding,
                 sources: sources,
+                stagingLaunch: stagingLaunch,
                 under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil
@@ -484,16 +576,16 @@ public final class Outbox {
         } catch is SendAuthorityWithdrawn {
             enqueueError = "Sign in before writing a memo."
             lastEnqueueFailure = .notSignedIn
-            return false
+            return nil
         } catch {
             enqueueError =
                 "This memo could not be saved on the device: \(error.localizedDescription)"
             lastEnqueueFailure = .storage
-            return false
+            return nil
         }
         await refresh()
         Task { await self.drainAfterAdoption() }
-        return true
+        return job
     }
 
     /// Clears a hold and tries again — the "Try again" a stuck pending row offers.

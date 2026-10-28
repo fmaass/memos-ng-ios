@@ -49,6 +49,8 @@ public enum MemoPictureEntry: Equatable, Sendable {
 @Observable
 public final class TimelineStore {
     public private(set) var memos: [Memo] = []
+    /// The captures still in the queue, drawn as cards above the memos (MEMNG-951).
+    public private(set) var pending = PendingMemoBoard()
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
     /// A page towards now is in flight.
@@ -903,8 +905,38 @@ public final class TimelineStore {
     /// and rows from the previous question left under "can't search right now" read as this
     /// question's answer. The lineage moves with them, so a page still in the air cannot put them
     /// back.
+    // MARK: - pending memos (MEMNG-951)
+
+    /// The queue as last read, and the memos its finished captures became. Only captures bound
+    /// to `identity` are this timeline's: a capture made under another account is that
+    /// account's, and nil — nobody signed in — shows none.
+    public func showPending(
+        _ jobs: [UploadJob], resolved: [UUID: String], for identity: TimelineSnapshotIdentity?
+    ) {
+        let mine = jobs.filter { job in
+            guard let identity else { return false }
+            return job.binding.serverBaseURL == identity.server
+                && job.binding.ownerSubject == identity.subject
+        }
+        pending.show(mine, resolved: resolved)
+    }
+
+    /// A person removed this capture; nothing that arrives later puts its card back.
+    public func withdrawPending(_ jobID: UUID) { pending.withdraw(jobID) }
+
+    /// The cards to draw, newest first: a card whose memo the list already holds is that memo.
+    public var pendingCards: [PendingMemo] { pending.visible(present: Set(memos.map(\.uid))) }
+
+    /// The list was read again after a capture became a memo.
+    public func settlePending() { pending.settle() }
+
+    /// The key a memo's row is drawn under — its card's, when it was one, so the swap is one row.
+    public func identityKey(for memo: Memo) -> String { identityKey(forUID: memo.uid) }
+    public func identityKey(forUID uid: String) -> String { pending.key(for: uid) }
+
     public func clearRows() {
         memos = []
+        pending.reset()
         nextCursor = nil
         hasMore = true
         hasNewer = false

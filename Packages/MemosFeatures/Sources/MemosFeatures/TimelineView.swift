@@ -277,8 +277,17 @@ public struct TimelineView: View {
         // A capture that leaves the queue has become a memo on the server; the list it belongs in
         // is reloaded so it does not appear to have vanished.
         .onChange(of: outbox?.lastCompletedAt) { _, _ in
-            Task { await load() }
+            Task {
+                await load()
+                // This read began after the capture became a memo: its card has said its piece.
+                timeline?.settlePending()
+            }
         }
+        // The queue as the pending cards draw it (MEMNG-951): what is queued, and what each
+        // finished capture became, read together.
+        .onChange(of: outbox?.jobs, initial: true) { _, _ in feedPending() }
+        .onChange(of: outbox?.resolvedMemos) { _, _ in feedPending() }
+        .onChange(of: timeline == nil) { _, _ in feedPending() }
         // The server is answering again, and this list was read while it was not.
         .reloadsOnRecovery(session.reachabilityRecoveries) { await load() }
         // A memo asked for from the Library. Keyed on the request rather than run from an
@@ -424,7 +433,24 @@ public struct TimelineView: View {
                 .cardRow()
                 .id(Self.jumpTop)
             }
-            if let outbox, !outbox.jobs.isEmpty {
+            if let outbox, PendingCardFlag.isEnabled(SettingsBundleSync.paneDefaults) {
+                let cards = timeline.pendingCards
+                if !cards.isEmpty {
+                    PendingSection(
+                        jobs: cards.map(\.job),
+                        lastProgressAt: outbox.lastProgressAt,
+                        verdict: outbox.uploadVerdict,
+                        retry: { id in Task { await outbox.retry(id) } },
+                        remove: { id in Task { await outbox.discard(id) } },
+                        restore: { id in Task { await restore(id, from: outbox) } },
+                        cards: cards,
+                        ledger: outbox.transfers,
+                        withdraw: { id in
+                            Task { if await outbox.withdraw(id) { timeline.withdrawPending(id) } }
+                        }
+                    )
+                }
+            } else if let outbox, !outbox.jobs.isEmpty {
                 PendingSection(
                     jobs: outbox.jobs,
                     lastProgressAt: outbox.lastProgressAt,
@@ -474,6 +500,8 @@ public struct TimelineView: View {
                             openAttachment: { open($0, of: memo) }
                         )
                         .cardRow()
+                        // The key its pending card was drawn under, when it was one (MEMNG-951).
+                        .id(timeline.identityKey(for: memo))
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             if memo.mine {
                                 Button(role: .destructive) {
@@ -571,6 +599,21 @@ public struct TimelineView: View {
             if timeline.memos.isEmpty && !timeline.isLoading && (outbox?.jobs.isEmpty ?? true) {
                 ContentUnavailableView("No memos yet", systemImage: "note.text")
             }
+        }
+    }
+
+    /// Hands the timeline the queue as the outbox last read it (MEMNG-951).
+    private func feedPending() {
+        guard let outbox, let timeline else { return }
+        timeline.showPending(outbox.jobs, resolved: outbox.resolvedMemos, for: snapshotIdentity)
+    }
+
+    /// Cancel or Reopen on a pending row, and Edit on a pending card: the queue hands the draft
+    /// back or it does not; a change the server has not answered yet is refused, and a restore
+    /// that found nothing to stop opens no sheet.
+    private func restore(_ id: UUID, from outbox: Outbox) async {
+        if let draft = await outbox.cancel(id) {
+            composing = .create(restoring: ComposeRestore(draft))
         }
     }
 
@@ -934,17 +977,32 @@ public struct TimelineView: View {
         into outbox: Outbox,
         accountDefault composed: ComposedAccountDefault?
     ) async -> Bool {
-        await outbox.enqueue(
-            content: submission.content,
-            visibility: (submission.visibility ?? composed?.visibility)?.rawValue,
-            // A backdated capture keeps the date it was given all the way through the queue: the
-            // job's capture stamp IS what the create call sends as `created_at`. On Auto that date
-            // is the earliest instant the attached files carried, resolved before the sheet would
-            // let this be tapped.
-            capturedAt: submission.capturedAt(),
-            sources: submission.attachments.map(\.stagedSource),
-            composedUnder: composed?.account
-        )
+        let visibility = (submission.visibility ?? composed?.visibility)?.rawValue
+        // A backdated capture keeps the date it was given all the way through the queue: the
+        // job's capture stamp IS what the create call sends as `created_at`. On Auto that date
+        // is the earliest instant the attached files carried, resolved before the sheet would
+        // let this be tapped.
+        let capturedAt = submission.capturedAt()
+        let sources = submission.attachments.map(\.stagedSource)
+        guard let arriving = submission.arriving else {
+            return await outbox.enqueue(
+                content: submission.content, visibility: visibility, capturedAt: capturedAt,
+                sources: sources, composedUnder: composed?.account
+            )
+        }
+        // Files still loading follow the capture in (MEMNG-951): it is written now with what is
+        // here, and the sheet closes on that.
+        return await ComposeArrivals.stageThenFollow(
+            arriving,
+            stage: {
+                await outbox.stage(
+                    content: submission.content, visibility: visibility, capturedAt: capturedAt,
+                    sources: sources, composedUnder: composed?.account
+                )
+            },
+            append: { jobID, media in await outbox.append([media.stagedSource], to: jobID) },
+            release: { jobID in await outbox.release(jobID) }
+        ).written
     }
 
     /// Whose timeline this screen is showing — the pair a snapshot on disk is filed under.

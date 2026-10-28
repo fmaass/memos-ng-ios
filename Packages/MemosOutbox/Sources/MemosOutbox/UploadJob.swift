@@ -312,6 +312,27 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// The lane this capture's bytes travel on, once one was chosen. Optional and last, so a
     /// manifest written before the choice existed decodes unchanged — `lane` says what nil means.
     public var transport: UploadTransport?
+    /// The launch whose editor is still bringing files into this capture: Post was pressed while
+    /// some of them were loading, and they are appended here as they land (MEMNG-951). While it is
+    /// set the create is not sent — a create replayed under the same key with more files would be
+    /// a different request the server answers with the first memo — and the files already here
+    /// upload meanwhile. Cleared by that editor when its last file has landed or its time is up,
+    /// and by the next launch's adoption when the process that set it died first. Optional and
+    /// absent on every manifest written before it, which is "nothing is still arriving".
+    public var stagingLaunch: UUID?
+
+    /// Whether files are still arriving from the editor, so the create must wait for them.
+    public var stillArriving: Bool { stagingLaunch != nil }
+
+    /// Whether the server may already hold this capture's memo: a create is on the wire, has been
+    /// answered, or went out once and came back with no answer (a replay under the same key
+    /// would return that memo). Removing such a capture here would not remove the memo, so the
+    /// one decision that hangs on it — whether "Remove" may be offered — reads it from here.
+    /// Conservative on purpose: a failed attempt with every file up counts, whatever failed.
+    public var createMayHaveBeenSent: Bool {
+        state == .creating || resolvedMemoUID != nil
+            || (attemptCount > 0 && files.allSatisfy(\.isComplete))
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id, idempotencyKey, content, visibility, capturedAt, files, binding, state
@@ -321,6 +342,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         // read as "no change is owed" on every capture a person is already carrying.
         case editUnansweredSince = "editSentAt"
         case transport
+        case stagingLaunch
     }
 
     public init(
@@ -343,7 +365,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
         editUnansweredSince: Date? = nil,
-        transport: UploadTransport? = nil
+        transport: UploadTransport? = nil,
+        stagingLaunch: UUID? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -365,6 +388,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.pendingEdit = pendingEdit
         self.editUnansweredSince = editUnansweredSince
         self.transport = transport
+        self.stagingLaunch = stagingLaunch
     }
 
     /// The lane a capture is on. Nil is every row begun before the lane was recorded, and those

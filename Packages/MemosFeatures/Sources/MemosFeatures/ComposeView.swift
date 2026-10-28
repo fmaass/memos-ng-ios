@@ -28,6 +28,9 @@ public struct ComposeSubmission: Sendable, Equatable {
     /// then says nothing about visibility at all. A widening is only ever here as a confirmed one
     /// (`VisibilityChange`). A create carries its audience in `visibility` instead.
     public var visibilityChange: VisibilityChange?
+    /// The files Post left loading, which follow this capture into the queue (MEMNG-951). Nil
+    /// when everything attached had arrived.
+    var arriving: ComposeArrivals?
 
     public init(
         content: String,
@@ -306,11 +309,18 @@ public struct ComposeView: View {
     /// the refusal is a SENTENCE naming the item (`ComposeAttachments.postRefusal`), and the items
     /// that did arrive are never lost in the process.
     private var canSave: Bool {
-        ComposeAttachments.canPost(
-            text: content,
-            imported: imports.attachments.count + existing.count,
-            isBusy: imports.isSubmitting || imports.isImporting
-        )
+        imports.mayPost(
+            text: content, existing: existing.count, whileImporting: postsWhileImporting)
+    }
+
+    /// Whether Post may leave files loading behind it (MEMNG-951): only a NEW capture, whose
+    /// queue can take the rest as they land, and only behind the `compose.pending-card` switch.
+    /// An edit uploads in the foreground, and a capture handed back from the queue goes back to
+    /// its own job by a re-submit — neither has anywhere for a late file to go, so both keep
+    /// waiting for their files.
+    private var postsWhileImporting: Bool {
+        guard case .create(nil) = mode else { return false }
+        return PendingCardFlag.isEnabled(SettingsBundleSync.paneDefaults)
     }
 
     /// Whether input that changes what is attached may be taken at this instant.
@@ -759,7 +769,8 @@ public struct ComposeView: View {
         guard !imports.isSubmitting else { return }
         // The marks the LAST attempt left are cleared before this attempt is judged — otherwise a
         // save that failed on transport can never be tried again (`ComposeImports.beginPostAttempt`).
-        if let refusal = imports.beginPostAttempt() {
+        let goesLater = postsWhileImporting
+        if let refusal = imports.beginPostAttempt(loadingGoesLater: goesLater) {
             problem = refusal
             return
         }
@@ -770,7 +781,7 @@ public struct ComposeView: View {
         let pressedAt = Date()
         Task {
             defer { imports.endSubmission() }
-            let submission = ComposeSubmission(
+            var submission = ComposeSubmission(
                 // The pinned trip's tag is added here, to what is SENT, and never to the
                 // editor: a failed post tried again builds this from the same unmodified words.
                 content: tripChip.submittedContent(content, at: pressedAt),
@@ -785,6 +796,9 @@ public struct ComposeView: View {
                 pictures: isEdit ? ComposePictureList.entries(items: rowItems) : nil,
                 visibilityChange: change
             )
+            // Read in the same synchronous step as `attachments` above: an item that landed in
+            // between is in one list or the other, never both and never neither.
+            if goesLater { submission.arriving = ComposeArrivals(imports) }
             let outcome = await submit(submission)
             switch outcome {
             case .saved:

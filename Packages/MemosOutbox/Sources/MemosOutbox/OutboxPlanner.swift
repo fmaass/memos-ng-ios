@@ -64,6 +64,9 @@ public enum OutboxPlanner {
             else { continue }
             return .uploadChunk(fileID: file.id, offset: file.bytesConfirmed, length: length)
         }
+        // Files are still arriving from the editor: the create waits for the last of them, and the
+        // release that clears the mark drains again (`UploadJob.stagingLaunch`).
+        if job.stillArriving { return .wait(until: .distantFuture) }
         return .createMemo
     }
 

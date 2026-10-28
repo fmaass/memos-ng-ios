@@ -136,6 +136,21 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// signal a device pass has that the exclusion is not really there.
     public private(set) var lastPersistenceFailure: String?
 
+    /// The memo each recently finished capture became, by job id — the one fact a timeline needs
+    /// to put the real memo where the capture's card stood (MEMNG-951). Written only when the
+    /// capture actually left the queue on that answer, and BEFORE the change is announced, so a
+    /// read that no longer finds the job finds this. Bounded: it is a hand-over, not a history.
+    public private(set) var resolvedMemos: [UUID: String] = [:]
+    private var resolvedOrder: [UUID] = []
+    static let resolvedMemoLimit = 64
+
+    private func noteResolved(_ jobID: UUID, as uid: String) {
+        if resolvedMemos.updateValue(uid, forKey: jobID) == nil { resolvedOrder.append(jobID) }
+        while resolvedOrder.count > Self.resolvedMemoLimit {
+            resolvedMemos[resolvedOrder.removeFirst()] = nil
+        }
+    }
+
     public init(
         repository: any OutboxPersisting,
         credentials: any OutboxCredentialsProviding,
@@ -881,7 +896,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                     matching: creating
                 )
             }
-            await repository.delete(creating, ifStillCurrent: creating)
+            if await repository.delete(creating, ifStillCurrent: creating) {
+                noteResolved(creating.id, as: uid)
+            }
             await onChange()
             return nil
         case .unlinkable(let failure):

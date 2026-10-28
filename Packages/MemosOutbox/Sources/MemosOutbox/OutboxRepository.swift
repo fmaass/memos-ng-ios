@@ -698,6 +698,7 @@ public actor OutboxRepository {
         sources: [StagedSource],
         id: UUID = UUID(),
         idempotencyKey: UUID = UUID(),
+        stagingLaunch: UUID? = nil,
         under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
         let lease: OutboxLease
@@ -724,7 +725,8 @@ public actor OutboxRepository {
                 visibility: visibility,
                 capturedAt: capturedAt,
                 files: files,
-                binding: binding
+                binding: binding,
+                stagingLaunch: stagingLaunch
             )
             // The LAST word, on this executor, immediately before the manifest is committed.
             // Copying the files above is the slow part of a capture and the caller's check was
@@ -738,6 +740,91 @@ public actor OutboxRepository {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
+    }
+
+    // MARK: - files still arriving (MEMNG-951)
+
+    /// Adds files that landed after Post to the capture whose editor is still bringing them in.
+    ///
+    /// Only while the capture is still marked as arriving from `launch` and nobody has taken it
+    /// back: from the release on, the create may be on the wire, and a file added under its key
+    /// then is a different request the server answers with the first memo — the file would be on
+    /// this device and in no memo. So a refusal copies nothing and writes nothing (nil). The
+    /// question and the write are one call on this actor, with no suspension between them, which
+    /// is what makes the release below and this append fall one on each side of the other.
+    ///
+    /// Every file is copied before the manifest names it; a copy that fails throws and leaves the
+    /// manifest — and every file it already held — exactly as it was.
+    public func append(
+        _ sources: [StagedSource], to id: UUID, arrivingFrom launch: UUID
+    ) throws -> UploadJob? {
+        guard let job = job(id), job.stagingLaunch == launch, job.cancelledAt == nil else {
+            return nil
+        }
+        let lease: OutboxLease
+        switch lock.acquire(.shared) {
+        case .leased(let held):
+            lease = held
+        case .refused(let failure):
+            throw OutboxStorageError.queueBusy(failure)
+        }
+        defer { lease.release() }
+        let directory = mediaDirectory(id)
+        var copied: [OutboxFile] = []
+        do {
+            for source in sources {
+                copied.append(try copy(source, into: directory))
+            }
+        } catch {
+            for file in copied {
+                let stored = directory.appending(path: file.relativePath)
+                try? FileManager.default.removeItem(at: stored)
+            }
+            throw error
+        }
+        var next = job
+        next.files.append(contentsOf: copied)
+        return try persist(next)
+    }
+
+    /// What letting a capture go found.
+    public enum StagingRelease: Sendable, Equatable {
+        /// The mark is gone; the create may be sent once its files are up.
+        case released
+        /// Nothing arrived and there were no words: a memo of nothing is not a memo, so the
+        /// capture was removed rather than handed to a create the server would refuse.
+        case emptied
+        /// The capture was not arriving from that launch — already let go, or gone.
+        case notArriving
+    }
+
+    /// The editor that set the mark is done with this capture: its last file landed, failed, or
+    /// its time ran out. From here no append is taken (`append`).
+    public func releaseStaging(_ id: UUID, arrivingFrom launch: UUID) throws -> StagingRelease {
+        guard var job = job(id), job.stagingLaunch == launch else { return .notArriving }
+        if job.files.isEmpty, job.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            delete(job)
+            return .emptied
+        }
+        job.stagingLaunch = nil
+        _ = try persist(job)
+        return .released
+    }
+
+    /// Lets go of every capture an editor of ANOTHER launch was still bringing files into. That
+    /// process is gone and its loads with it, so nothing more will ever arrive: what it appended
+    /// before it died is kept, and the capture is sent with that. Called once per launch, at
+    /// adoption, before any drain.
+    @discardableResult
+    public func releaseStaging(leftOverBefore launch: UUID) throws -> [UUID] {
+        var released: [UUID] = []
+        for job in try loadJobs() {
+            guard let staged = job.stagingLaunch, staged != launch else { continue }
+            if try releaseStaging(job.id, arrivingFrom: staged) == .released {
+                released.append(job.id)
+            }
+        }
+        return released
     }
 
     private func copy(_ source: StagedSource, into directory: URL) throws -> OutboxFile {

@@ -41,6 +41,9 @@ final class ComposeImports {
     /// moment they did — before `load` has installed a single placeholder there is nothing in the
     /// list to read it from, so this is what carries it across that gap.
     private var awaitingPick = false
+    /// Where a settled item is announced while a hand-off is following the items Post left
+    /// loading (`handOff`); nil otherwise.
+    private var arrivals: AsyncStream<UUID>.Continuation?
     /// Whether a submission built from this list is on the wire.
     ///
     /// What a save carries is fixed when Save is pressed — the submission takes the list as it then
@@ -261,6 +264,8 @@ final class ComposeImports {
             }
             self.items[index] = Self.settle(self.items[index], with: answer)
             if self.items[index].media != nil { beginCaptureRead(for: placeholder.id) }
+            // Said after the item is settled, so a hand-off reading it finds it final.
+            arrivals?.yield(placeholder.id)
         }
         guard stamp == current else { return false }
         return true
@@ -408,9 +413,71 @@ final class ComposeImports {
     /// still on, the very next tap is refused as "could not be read" — so the one thing somebody
     /// can do about an upload that failed, which is to try it again, would be the one thing the
     /// sheet would not let them do.
-    func beginPostAttempt() -> String? {
+    func beginPostAttempt(loadingGoesLater: Bool = false) -> String? {
         clearUploadFailures()
-        return ComposeAttachments.postRefusal(items: items)
+        return ComposeAttachments.postRefusal(items: items, loadingGoesLater: loadingGoesLater)
+    }
+
+    // MARK: - Post while importing (MEMNG-951)
+
+    /// Whether Post may be pressed.
+    ///
+    /// `whileImporting` is a capture whose loads can outlive this sheet: what has loaded goes at
+    /// once and the rest follows it into the queue (`handOff`), so an item still loading neither
+    /// greys the button nor counts as nothing — a photograph on its way is something to post. A
+    /// pick that has landed with no tile on the row yet still holds Post for that instant: there
+    /// is nothing to hand off until its placeholders exist.
+    func mayPost(text: String, existing: Int, whileImporting: Bool) -> Bool {
+        let arriving = whileImporting ? items.filter(\.isLoading).count : 0
+        return ComposeAttachments.canPost(
+            text: text,
+            imported: attachments.count + existing + arriving,
+            isBusy: isSubmitting || awaitingPick || (!whileImporting && isImporting)
+        )
+    }
+
+    /// The items still loading, read at the instant Post takes the list.
+    var stillLoading: [UUID] { items.filter(\.isLoading).map(\.id) }
+
+    /// Follows `ids` as they land, handing each file that arrived to `deliver`, one at a time and
+    /// in the order they land, until every one has settled or `limit` has passed.
+    ///
+    /// It belongs to no sheet: it runs on whatever task called it, and the sheet closing cancels
+    /// nothing. An item that failed is counted and nothing is delivered for it; an item still
+    /// loading at the limit is abandoned, and anything it brings afterwards is not delivered —
+    /// the capture it was meant for has been let go by then.
+    func handOff(
+        _ ids: [UUID],
+        within limit: Duration,
+        deliver: @escaping @MainActor (PickedMedia) async -> Void
+    ) async -> ComposeHandOff {
+        var outstanding = Set(ids)
+        var outcome = ComposeHandOff()
+        let (stream, continuation) = AsyncStream<UUID>.makeStream()
+        arrivals = continuation
+        // What settled between Post and here is said now, in the list's own order.
+        for id in ids where items.first(where: { $0.id == id })?.isLoading != true {
+            continuation.yield(id)
+        }
+        let timer = Task { @MainActor in
+            try? await Task.sleep(for: limit)
+            continuation.finish()
+        }
+        for await id in stream {
+            guard outstanding.remove(id) != nil else { continue }
+            if let media = items.first(where: { $0.id == id })?.media {
+                outcome.delivered += 1
+                await deliver(media)
+            } else {
+                outcome.failed += 1
+            }
+            if outstanding.isEmpty { break }
+        }
+        timer.cancel()
+        continuation.finish()
+        arrivals = nil
+        outcome.abandoned = outstanding.count
+        return outcome
     }
 
     /// Claimed as the submission is taken, and released when the save has come back
@@ -517,4 +584,11 @@ final class ComposeImports {
                 captureZone: attachment.captureZone)
         }
     }
+}
+
+/// What following the items Post left loading came to.
+struct ComposeHandOff: Equatable {
+    var delivered = 0
+    var failed = 0
+    var abandoned = 0
 }

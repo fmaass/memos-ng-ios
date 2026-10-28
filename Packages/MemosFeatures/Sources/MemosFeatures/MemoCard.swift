@@ -387,6 +387,13 @@ struct PendingSection: View {
     /// Cancel on a capture still moving, and Reopen on one already stopped: both ask the queue
     /// for the draft and open the editor on what comes back.
     let restore: (UUID) -> Void
+    /// The pending memo cards these rows are, when the `compose.pending-card` switch is on: each
+    /// row then carries its capture's date, tags and tiles and the memo card's actions
+    /// (MEMNG-951). Nil draws the rows as they were.
+    var cards: [PendingMemo]? = nil
+    var ledger: TransferLedger? = nil
+    /// "Remove" on a pending card: out of the queue while nothing may have reached the server.
+    var withdraw: (UUID) -> Void = { _ in }
 
     /// The instant the last arming was measured from. Read here so that writing it re-runs this
     /// body.
@@ -401,14 +408,21 @@ struct PendingSection: View {
                 PendingMemoPresentation.rows(
                     for: jobs, now: now, lastProgressAt: lastProgressAt, verdict: verdict)
             ) { row in
+                let memo = cards?.first { $0.job.id == row.id }
                 PendingCard(
                     row: row,
                     retry: { retry(row.id) },
                     remove: { remove(row.id) },
                     cancel: { restore(row.id) },
-                    reopen: { restore(row.id) }
+                    reopen: { restore(row.id) },
+                    memo: memo,
+                    ledger: ledger,
+                    edit: { restore(row.id) },
+                    withdraw: { withdraw(row.id) }
                 )
                 .cardRow()
+                // The key the memo it becomes is drawn under (`TimelineStore.identityKey`).
+                .id(memo?.id ?? row.id.uuidString)
             }
         } header: {
             SectionHeading(title: "Pending")
@@ -431,9 +445,16 @@ struct PendingCard: View {
     let remove: () -> Void
     let cancel: () -> Void
     let reopen: () -> Void
+    var memo: PendingMemo? = nil
+    var ledger: TransferLedger? = nil
+    var edit: () -> Void = {}
+    var withdraw: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
+            if let memo {
+                PendingMemoHeader(memo: memo, ledger: ledger, edit: edit, withdraw: withdraw)
+            }
             HStack(spacing: DesignTokens.Space.tight) {
                 Image(
                     systemName: row.needsAttention
