@@ -208,6 +208,7 @@ struct PostWhileImportingTests {
 
 /// Every action a memo card has, on a pending card: applied to the capture, or disabled with the
 /// reason (MEMNG-951).
+@MainActor
 @Suite("Pending memo card actions")
 struct PendingMemoActionTests {
     private func job(_ change: (inout UploadJob) -> Void = { _ in }) -> UploadJob {
