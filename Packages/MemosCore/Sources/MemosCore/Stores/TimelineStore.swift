@@ -898,13 +898,6 @@ public final class TimelineStore {
         lastError = apiError.errorDescription
     }
 
-    /// Empties the loaded list.
-    ///
-    /// The timeline never does this — a list that blanks because one refresh failed is a worse lie
-    /// than a stale one — but a SEARCH is a different case: its rows are the answer to a question,
-    /// and rows from the previous question left under "can't search right now" read as this
-    /// question's answer. The lineage moves with them, so a page still in the air cannot put them
-    /// back.
     // MARK: - pending memos (MEMNG-951)
 
     /// The queue as last read, and the memos its finished captures became. Only captures bound
@@ -934,6 +927,13 @@ public final class TimelineStore {
     public func identityKey(for memo: Memo) -> String { identityKey(forUID: memo.uid) }
     public func identityKey(forUID uid: String) -> String { pending.key(for: uid) }
 
+    /// Empties the loaded list.
+    ///
+    /// The timeline never does this — a list that blanks because one refresh failed is a worse lie
+    /// than a stale one — but a SEARCH is a different case: its rows are the answer to a question,
+    /// and rows from the previous question left under "can't search right now" read as this
+    /// question's answer. The lineage moves with them, so a page still in the air cannot put them
+    /// back.
     public func clearRows() {
         memos = []
         pending.reset()

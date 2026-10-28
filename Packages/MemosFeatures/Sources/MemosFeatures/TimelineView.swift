@@ -386,7 +386,8 @@ public struct TimelineView: View {
                 // move, so nothing should appear to.
                 .onChange(of: restores) { _, _ in
                     guard let restoreTop else { return }
-                    proxy.scrollTo(restoreTop, anchor: .top)
+                    // A row is drawn under its card's key when it was one (MEMNG-951).
+                    proxy.scrollTo(timeline.identityKey(forUID: restoreTop), anchor: .top)
                 }
                 // An anchored list has memos above it, and until MEMNG-179 nothing in this app
                 // could ask for them: the cursor only ever descends. Arriving at the top is what
@@ -457,16 +458,7 @@ public struct TimelineView: View {
                     verdict: outbox.uploadVerdict,
                     retry: { id in Task { await outbox.retry(id) } },
                     remove: { id in Task { await outbox.discard(id) } },
-                    restore: { id in
-                        Task {
-                            // The queue hands the draft back or it does not; a change the server
-                            // has not answered yet is refused, and a restore that found nothing to
-                            // stop opens no sheet.
-                            if let draft = await outbox.cancel(id) {
-                                composing = .create(restoring: ComposeRestore(draft))
-                            }
-                        }
-                    }
+                    restore: { id in Task { await restore(id, from: outbox) } }
                 )
             }
             // Session-level notices (a credential that could not be saved, a failed revoke)

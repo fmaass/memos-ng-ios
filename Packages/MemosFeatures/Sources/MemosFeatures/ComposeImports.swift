@@ -453,6 +453,8 @@ final class ComposeImports {
     ) async -> ComposeHandOff {
         var outstanding = Set(ids)
         var outcome = ComposeHandOff()
+        // Nothing to follow is nothing to wait for: the stream below would only end at the limit.
+        guard !outstanding.isEmpty else { return outcome }
         let (stream, continuation) = AsyncStream<UUID>.makeStream()
         arrivals = continuation
         // What settled between Post and here is said now, in the list's own order.
