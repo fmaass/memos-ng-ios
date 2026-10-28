@@ -20,6 +20,9 @@ public struct TimelineView: View {
     // Optional: a preview or a test host has no outbox, and a missing environment value must not
     // be a crash on the app's main screen.
     @Environment(Outbox.self) private var outbox: Outbox?
+    /// The upload preference the Settings pane holds; the transfers sheet's Use mobile data sets
+    /// it.
+    @Environment(UploadSettings.self) private var uploadSettings: UploadSettings?
     @Environment(\.scenePhase) private var scenePhase
     /// A memo the Library asked this tab to open. Optional for the same reason the outbox is: a
     /// preview or a test host has no router.
@@ -56,6 +59,11 @@ public struct TimelineView: View {
     /// The one question a long-press widening asks before anything is sent — at the press, or when
     /// the store finds the change has become one while it queued (`WideningAsk`).
     @State private var widening = WideningAsk()
+    /// The transfers sheet (MEMNG-947), what its fixes run through, and the move a fix leaves for
+    /// after the sheet has gone — a sign-in alert or the editor cannot present over it.
+    @State private var transfersOpen = false
+    @State private var transfersFixer = TransfersFixer()
+    @State private var transfersFollowUp: TransfersFollowUp?
     /// The delete conversation the edit sheet can start, and the one thing that decides what its
     /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
     /// would be a second set of rules about when a memo may be removed.
@@ -401,6 +409,12 @@ public struct TimelineView: View {
             uniqueKeysWithValues: timeline.memos.enumerated().map { ($1.uid, $0) }
         )
         List {
+            // The transfers strip: above the first card, under the pull-to-refresh, never in the
+            // bar (ADR-0008). Behind the `transfers.sheet` switch.
+            if let outbox, TransfersFlag.isEnabled(SettingsBundleSync.paneDefaults) {
+                TransfersStrip(ledger: outbox.transfers) { transfersOpen = true }
+                    .cardRow()
+            }
             // Why this list is not the one that was here a moment ago, and the way back to now.
             if let anchor = timeline.query.anchor {
                 TimelineAnchorNotice(
@@ -520,6 +534,19 @@ public struct TimelineView: View {
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .refreshable { await load() }
+        // On the list rather than the screen: the compose sheet is presented from the screen, and
+        // two presentations on one view is how one of them silently stops appearing.
+        .sheet(isPresented: $transfersOpen, onDismiss: runTransfersFollowUp) {
+            if let outbox {
+                TransfersSheet(
+                    ledger: outbox.transfers,
+                    lastProgressAt: outbox.lastProgressAt,
+                    verdict: outbox.uploadVerdict
+                ) { action, jobID in
+                    Task { await fix(action, jobID: jobID, outbox: outbox) }
+                }
+            }
+        }
         .alert(
             widening.title,
             isPresented: Binding(
@@ -545,6 +572,36 @@ public struct TimelineView: View {
                 ContentUnavailableView("No memos yet", systemImage: "note.text")
             }
         }
+    }
+
+    /// A transfers row's fix, through the outbox's own operations. The two that open something
+    /// else close the sheet first and leave the opening for its dismissal.
+    private func fix(_ action: TransfersAction, jobID: UUID, outbox: Outbox) async {
+        await transfersFixer.perform(
+            action, jobID: jobID, outbox: outbox, uploads: uploadSettings,
+            signIn: {
+                transfersFollowUp = .signIn
+                transfersOpen = false
+            },
+            reopen: { draft in
+                transfersFollowUp = .reopen(draft)
+                transfersOpen = false
+            }
+        )
+    }
+
+    private func runTransfersFollowUp() {
+        guard let next = transfersFollowUp else { return }
+        transfersFollowUp = nil
+        switch next {
+        case .signIn: signOut.send(.requested, to: session)
+        case .reopen(let draft): composing = .create(restoring: ComposeRestore(draft))
+        }
+    }
+
+    enum TransfersFollowUp: Equatable {
+        case signIn
+        case reopen(RestoredDraft)
     }
 
     /// What the long-press Edit opens on: the memo as it stands, its pictures included.
