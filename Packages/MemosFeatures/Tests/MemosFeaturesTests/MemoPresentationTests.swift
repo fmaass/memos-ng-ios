@@ -278,7 +278,7 @@ struct AttachmentSlotTests {
             mode
                 == ComposeView.Mode.edit(
                     uid: "m7", content: "- [ ] ring the plumber", createdAt: created,
-                    attachments: []
+                    attachments: [], visibility: .protected
                 )
         )
     }

@@ -146,8 +146,9 @@ struct ComposeVisibilityPick: Equatable {
                 selection = .protected
                 isSuggested = true
             }
-        case .edit:
-            selection = nil
+        case .edit(_, _, _, _, let visibility):
+            // The memo's own audience, never "Default": a memo that exists already has one.
+            selection = visibility
         }
     }
 

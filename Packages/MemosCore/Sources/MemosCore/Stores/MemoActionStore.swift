@@ -190,30 +190,33 @@ public final class MemoActionStore {
     /// with `visibility` alone in its body — never `attachment_uids`, whose empty list would remove
     /// the memo's pictures. A memo the server refuses is counted out and the run goes on; a
     /// rejected credential or an unreachable server stops it.
+    ///
+    /// A batch is a `VisibilityChange` like any other (MEMNG-969): its memos' audiences were never
+    /// read, so anything but Private is a widening and reaches here only as a confirmed answer.
     public func setVisibility(
-        _ visibility: MemoVisibility, forMemos memos: [String], using handle: SessionHandle,
+        _ change: VisibilityChange, forMemos memos: [String], using handle: SessionHandle,
         baseURL: URL
     ) async -> MemoActionResult {
         var seen: Set<String> = []
         let targets = memos.filter { seen.insert($0).inserted }
         let key = Key(
-            kind: .visibility, targets: Set(targets), payload: visibility.rawValue,
+            kind: .visibility, targets: Set(targets), payload: change.to.rawValue,
             generation: handle.generation)
         return await run(key, handle) {
-            await self.runVisibility(visibility, targets, handle, baseURL)
+            await self.runVisibility(change, targets, handle, baseURL)
         }
     }
 
     private func runVisibility(
-        _ visibility: MemoVisibility, _ targets: [String], _ handle: SessionHandle, _ baseURL: URL
+        _ change: VisibilityChange, _ targets: [String], _ handle: SessionHandle, _ baseURL: URL
     ) async -> MemoActionResult {
-        let action = MemoAction.visibility(visibility)
+        let action = MemoAction.visibility(change.to)
         var changed = 0
         var failure: String?
         memos: for memo in targets {
             guard sessionStillCurrent(handle.generation) else { return .superseded }
             do {
-                try await Self.patchVisibility(handle.client, memo: memo, to: visibility)
+                try await Self.patchVisibility(handle.client, memo: memo, to: change)
                 session?.noteTransportSuccess(issuedUnder: handle.generation)
                 changed += 1
             } catch {
@@ -379,10 +382,10 @@ public final class MemoActionStore {
 
     /// One memo's visibility, and nothing else of it.
     static func patchVisibility(
-        _ client: any APIProtocol, memo: String, to visibility: MemoVisibility
+        _ client: any APIProtocol, memo: String, to change: VisibilityChange
     ) async throws {
         let response = try await client.patchMemoApiMemosUidPatch(
-            .init(path: .init(uid: memo), body: .json(.init(visibility: visibility.generated))))
+            .init(path: .init(uid: memo), body: .json(.init(visibility: change.generated))))
         switch response {
         case .ok: return
         case .notFound: throw APIError.notFound

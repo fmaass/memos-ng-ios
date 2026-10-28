@@ -142,7 +142,7 @@ struct ComposeExistingPicturesTests {
     }
 
     private func uids(of mode: ComposeView.Mode) -> [String] {
-        guard case .edit(_, _, _, let attachments) = mode else { return [] }
+        guard case .edit(_, _, _, let attachments, _) = mode else { return [] }
         return attachments.map(\.uid)
     }
 }

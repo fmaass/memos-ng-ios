@@ -185,7 +185,8 @@ public enum MemoDetailPresentation {
             uid: memo.uid,
             content: memo.content,
             createdAt: memo.createdAt,
-            attachments: memo.attachments
+            attachments: memo.attachments,
+            visibility: memo.visibility
         )
     }
 

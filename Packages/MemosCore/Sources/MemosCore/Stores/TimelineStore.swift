@@ -1045,12 +1045,13 @@ public final class TimelineStore {
         createdAt: Date? = nil,
         attaching files: [StagedSource] = [],
         listing pictures: [MemoPictureEntry]? = nil,
+        visibility change: VisibilityChange? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
         let attempt = MemoEditAttempt(
             uid: uid, content: content, createdAt: createdAt,
-            files: files.map(\.editIdentity), pictures: pictures
+            files: files.map(\.editIdentity), pictures: pictures, visibility: change
         )
         // The place in line is taken here, before the key is minted and before a single byte goes
         // up: a save that joins the one ahead of it must present neither a second key nor a second
@@ -1082,7 +1083,9 @@ public final class TimelineStore {
         // have been taken away while they queued. The answer stands in for the 404 the server
         // would give them, and it is reported rather than swallowed — a save nobody can keep is
         // not a save that went through.
-        guard !serverConfirmedDeletion(of: attempt.uid) else {
+        guard !serverConfirmedDeletion(of: attempt.uid),
+            visibilityMaySend(attempt.visibility, on: attempt.uid)
+        else {
             mutationChangedNothing(claim, on: attempt.uid)
             return .failed(.rejection)
         }
@@ -1143,7 +1146,7 @@ public final class TimelineStore {
             uid: attempt.uid,
             .init(
                 attachmentUids: listed, content: attempt.content, createdAt: attempt.createdAt,
-                editKey: key, uploadUids: uploadUIDs
+                editKey: key, uploadUids: uploadUIDs, visibility: attempt.visibility?.generated
             ),
             claim: claim,
             using: handle,
@@ -1179,6 +1182,11 @@ public final class TimelineStore {
         /// pictures the memo keeps are two different edits: sharing a key would have the server
         /// replay the first and answer 200 while the removal went nowhere.
         var pictures: [MemoPictureEntry]?
+        /// The audience this save moves the memo to, or nil when it leaves the audience alone —
+        /// in which case the key is left out of the PATCH entirely rather than restating the
+        /// visibility the sheet happened to open on, which a change made since would then undo.
+        /// Part of the key for the reason `pictures` is.
+        var visibility: VisibilityChange?
     }
 
     /// The edit a key was minted for, that key, and how many invocations are USING it right now.
@@ -1534,17 +1542,33 @@ public final class TimelineStore {
     }
 
     /// Changes who can see a memo.
+    ///
+    /// It takes a `VisibilityChange` rather than a bare visibility so that a widening reaches the
+    /// wire only as the yes to its question: the rule lives in that type, not in the screens that
+    /// call this. Two identical changes overlapping are JOINED into one request (`claimMutation`).
     @discardableResult
     public func setVisibility(
-        _ visibility: MemoVisibility,
+        _ change: VisibilityChange,
         uid: String,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
-        await patch(
-            uid: uid, .init(visibility: visibility.generated), as: .visibility(visibility),
-            using: handle, baseURL: baseURL
-        )
+        await claimMutation(.visibility(change.to), on: uid) { [self] claim in
+            guard visibilityMaySend(change, on: uid) else {
+                mutationChangedNothing(claim, on: uid)
+                return .failed(.rejection)
+            }
+            return await patchOutcome(
+                uid: uid, .init(visibility: change.generated), claim: claim, using: handle,
+                baseURL: baseURL)
+        }.value.isSaved
+    }
+
+    /// The widening rule asked again against the row as it stands once the line reached the
+    /// change. REFUSED rather than re-asked: nothing is sent and the caller hears a rejection.
+    private func visibilityMaySend(_ change: VisibilityChange?, on uid: String) -> Bool {
+        guard let change else { return true }
+        return change.maySend(over: memos.first { $0.uid == uid }?.visibility)
     }
 
     /// Archives a memo, or takes it back out of the archive.
@@ -2755,6 +2779,12 @@ public final class TimelineStore {
         if let claim { mutationApplied(claim, on: memo.uid) }
         let memo = admitted(memo)
         guard let position = memos.firstIndex(where: { $0.uid == memo.uid }) else { return }
+        // The server stamps `updated_at` on every write, so an answer older than the row already
+        // held describes the memo before a change this store has since applied — an earlier edit's
+        // answer arriving after a later visibility change. Judged by that stamp rather than by the
+        // order the answers came in, which says nothing about the order they were written in.
+        // Strictly older only: an equal stamp is the same write, or a write that changed nothing.
+        guard memo.updatedAt >= memos[position].updatedAt else { return }
         guard query.admitsArchiveState(of: memo) else {
             // Same fence a delete raises, and for the same reason: a cursor page read while this
             // memo still belonged here overlaps the rows around it and would put it back.

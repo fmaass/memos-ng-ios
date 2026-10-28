@@ -392,7 +392,7 @@ extension TimelineStoreTests {
 
         #expect(
             await store.setVisibility(
-                .public,
+                .cleared(.public),
                 uid: "a",
                 using: client.handle,
                 baseURL: Stub.baseURL

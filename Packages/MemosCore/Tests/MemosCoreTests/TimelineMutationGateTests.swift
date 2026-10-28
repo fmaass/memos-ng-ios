@@ -803,7 +803,7 @@ struct TimelineMutationGateTests {
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
         let first = Task {
             await store.setVisibility(
-                .private, uid: "a", using: client.handle, baseURL: Stub.baseURL
+                .cleared(.private), uid: "a", using: client.handle, baseURL: Stub.baseURL
             )
         }
         while patches.count == 0 {
@@ -811,7 +811,7 @@ struct TimelineMutationGateTests {
         }
         let second = Task {
             await store.setVisibility(
-                .private, uid: "a", using: client.handle, baseURL: Stub.baseURL
+                .cleared(.private), uid: "a", using: client.handle, baseURL: Stub.baseURL
             )
         }
         await timeForARequestToArrive()

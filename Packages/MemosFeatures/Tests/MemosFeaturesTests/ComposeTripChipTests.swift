@@ -622,7 +622,8 @@ struct ComposeTripVisibilityTests {
     func onlyAFreshCaptureIsPreselected() {
         let fresh = ComposeView.Mode.create(restoring: nil)
         let edit = ComposeView.Mode.edit(
-            uid: "m1", content: "x", createdAt: Date(timeIntervalSince1970: 0), attachments: [])
+            uid: "m1", content: "x", createdAt: Date(timeIntervalSince1970: 0), attachments: [],
+            visibility: .public)
         func restored(_ visibility: MemoVisibility?) -> ComposeView.Mode {
             .create(
                 restoring: ComposeRestore(
@@ -634,7 +635,10 @@ struct ComposeTripVisibilityTests {
         #expect(pinned.selection == .protected)
         #expect(pinned.isSuggested)
         #expect(ComposeVisibilityPick(mode: fresh, offered: nil).selection == nil)
-        #expect(ComposeVisibilityPick(mode: edit, offered: trip).selection == nil)
+        // An edit opens on the memo's own audience, never on the trip's suggestion.
+        let editing = ComposeVisibilityPick(mode: edit, offered: trip)
+        #expect(editing.selection == .public)
+        #expect(!editing.isSuggested)
         #expect(ComposeVisibilityPick(mode: restored(nil), offered: trip).selection == nil)
         let stopped = ComposeVisibilityPick(mode: restored(.private), offered: trip)
         #expect(stopped.selection == .private)
@@ -682,7 +686,7 @@ struct ComposeTripVisibilityTests {
         let edit = ComposeView(
             mode: .edit(
                 uid: "m1", content: "Lisbon at dusk", createdAt: Date(timeIntervalSince1970: 0),
-                attachments: []),
+                attachments: [], visibility: .public),
             pinnedTrip: trip
         ) { submission in
             _ = await log.take(submission)

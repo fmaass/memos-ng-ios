@@ -129,7 +129,8 @@ struct MemoEditWiringTests {
         #expect(
             flow.editing
                 == ComposeView.Mode.edit(
-                    uid: "m3", content: "ring the plumber", createdAt: created, attachments: []
+                    uid: "m3", content: "ring the plumber", createdAt: created, attachments: [],
+                    visibility: .protected
                 )
         )
     }

@@ -79,7 +79,7 @@ struct MemoActionStoreTests {
         let store = MemoActionStore(trips: nil)
         let memos = MemoActionPicture.memos(of: Self.chosen) + ["m1"]
         let result = await store.setVisibility(
-            .public, forMemos: memos, using: server.client.handle, baseURL: Stub.baseURL)
+            .cleared(.public), forMemos: memos, using: server.client.handle, baseURL: Stub.baseURL)
 
         #expect(paths(server, Self.patchMemo) == ["/api/memos/m1", "/api/memos/m2"])
         for body in bodies(server, Self.patchMemo) {
@@ -100,7 +100,7 @@ struct MemoActionStoreTests {
         let memos = MemoActionPicture.memos(of: [Self.chosen[0]])
         #expect(memos == ["m1"])
         _ = await store.setVisibility(
-            .public, forMemos: memos, using: server.client.handle, baseURL: Stub.baseURL)
+            .cleared(.public), forMemos: memos, using: server.client.handle, baseURL: Stub.baseURL)
         #expect(paths(server, Self.patchMemo) == ["/api/memos/m1"])
     }
 
@@ -112,7 +112,7 @@ struct MemoActionStoreTests {
             return Stub.json(Stub.memo(uid: "m2"))
         })
         let result = await MemoActionStore(trips: nil).setVisibility(
-            .protected, forMemos: ["m1", "m2"], using: server.client.handle,
+            .cleared(.protected), forMemos: ["m1", "m2"], using: server.client.handle,
             baseURL: Stub.baseURL)
         guard case .finished(let outcome) = result else {
             Issue.record("not finished: \(result)")
@@ -136,12 +136,12 @@ struct MemoActionStoreTests {
         let handle = server.client.handle
         let first = Task {
             await store.setVisibility(
-                .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+                .cleared(.public), forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
         }
         await arrival(of: Self.patchMemo, in: server)
         let second = Task {
             await store.setVisibility(
-                .public, forMemos: ["m2", "m1"], using: handle, baseURL: Stub.baseURL)
+                .cleared(.public), forMemos: ["m2", "m1"], using: handle, baseURL: Stub.baseURL)
         }
         for _ in 0..<10_000 where joined == 0 { try? await Task.sleep(for: .milliseconds(1)) }
         await gate.open()
@@ -162,7 +162,7 @@ struct MemoActionStoreTests {
         let handle = server.client.handle
         let first = Task {
             await store.setVisibility(
-                .public, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+                .cleared(.public), forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
         }
         await arrival(of: Self.patchMemo, in: server)
         // Each differing call runs on its own task and is waited for with a bound, so a store
@@ -170,13 +170,13 @@ struct MemoActionStoreTests {
         let answered = LockedValue<Int>(0)
         let otherValue = Task {
             let result = await store.setVisibility(
-                .protected, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+                .cleared(.protected), forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
             answered.set(answered.get() + 1)
             return result
         }
         let otherMemos = Task {
             let result = await store.setVisibility(
-                .public, forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
+                .cleared(.public), forMemos: ["m1", "m2"], using: handle, baseURL: Stub.baseURL)
             answered.set(answered.get() + 1)
             return result
         }
@@ -191,7 +191,7 @@ struct MemoActionStoreTests {
         #expect(MemoActionStore.busySentence == "Another change is still running")
         #expect(paths(server, Self.patchMemo) == ["/api/memos/m1"])
         let after = await store.setVisibility(
-            .protected, forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
+            .cleared(.protected), forMemos: ["m1"], using: handle, baseURL: Stub.baseURL)
         #expect(after != .refused, "the slot was not given back")
     }
 
@@ -209,7 +209,7 @@ struct MemoActionStoreTests {
         let revision = trips.revision
         let run = Task {
             await store.setVisibility(
-                .public, forMemos: ["m1", "m2"], using: issued, baseURL: Stub.baseURL)
+                .cleared(.public), forMemos: ["m1", "m2"], using: issued, baseURL: Stub.baseURL)
         }
         await arrival(of: Self.patchMemo, in: server)
         session.activeHandle = nil
@@ -235,7 +235,7 @@ struct MemoActionStoreTests {
         #expect(members.state(for: trip) != .notLoaded, "control: the drain landed")
 
         _ = await MemoActionStore(trips: trips).setVisibility(
-            .public, forMemos: ["m-p0000"], using: handle, baseURL: Stub.baseURL)
+            .cleared(.public), forMemos: ["m-p0000"], using: handle, baseURL: Stub.baseURL)
 
         #expect(members.state(for: trip) == .notLoaded)
         #expect(members.filteredState(for: trip, query: query) == .notLoaded)
@@ -388,7 +388,8 @@ struct MemoActionStoreTests {
                 return .endedSession
             })
         let result = await store.setVisibility(
-            .public, forMemos: ["m1", "m2"], using: server.client.handle, baseURL: Stub.baseURL)
+            .cleared(.public), forMemos: ["m1", "m2"], using: server.client.handle,
+            baseURL: Stub.baseURL)
 
         #expect(handled.get() == 1, "the refusal did not reach the session exactly once")
         #expect(server.calls.of(Self.patchMemo).count == 1, "a PATCH went out after the refusal")

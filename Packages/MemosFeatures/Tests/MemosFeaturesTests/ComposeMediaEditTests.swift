@@ -100,24 +100,25 @@ struct ComposeMediaEditTests {
         #expect(labels.contains("Memo date"), "the date row left the edit sheet: \(labels)")
     }
 
-    @Test("an edit sheet still says nothing about who can see the memo")
-    func theEditSheetOffersNoVisibility() {
+    @Test("an edit sheet offers the memo's own visibility (MEMNG-969)")
+    func theEditSheetOffersItsVisibility() {
         let editing = ScreenProbe.labels(of: ComposeView(mode: mode()) { _ in .saved })
-        let creating = ScreenProbe.labels(
-            of: ComposeView(mode: .create(restoring: nil)) { _ in .saved })
+        let widest = ScreenProbe.labels(
+            of: ComposeView(
+                mode: .edit(
+                    uid: "m1", content: "the boiler man", createdAt: created, attachments: [],
+                    visibility: .public)
+            ) { _ in .saved })
 
-        // Who can see a memo is its own deliberate action on the memo, not something that changes
-        // as a side effect of fixing a typo.
+        // Who can see a memo is changed where the memo is edited; narrowing goes as it is and
+        // widening asks once (VisibilityChange).
         #expect(
-            !editing.contains { $0.hasPrefix("Visibility:") },
-            "an edit sheet offered to change the visibility: \(editing)"
+            editing.contains("Visibility: Private"),
+            "an edit sheet did not offer the memo's visibility: \(editing)"
         )
-        // The control: a NEW memo does choose one, so the absence above is a decision rather than
-        // a control the probe cannot see.
-        #expect(
-            creating.contains { $0.hasPrefix("Visibility:") },
-            "the probe cannot see the visibility control at all: \(creating)"
-        )
+        // The control: the menu shows the memo's OWN audience, not a fixed default.
+        #expect(widest.contains("Visibility: Public"), "\(widest)")
+        #expect(!widest.contains("Visibility: Private"), "\(widest)")
     }
 
     @Test("the files picked in the sheet reach the save whole")

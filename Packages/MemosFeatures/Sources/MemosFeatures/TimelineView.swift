@@ -51,6 +51,8 @@ public struct TimelineView: View {
     /// replaces the whole list, and the scroll it was read at belongs to a list that is gone.
     @State private var jumps = 0
     @State private var composing: ComposeView.Mode?
+    /// The one question a long-press widening asks before anything is sent (`VisibilityChange`).
+    @State private var widening: PendingWidening?
     /// The delete conversation the edit sheet can start, and the one thing that decides what its
     /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
     /// would be a second set of rules about when a memo may be removed.
@@ -513,6 +515,24 @@ public struct TimelineView: View {
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .refreshable { await load() }
+        .alert(
+            widening.map { "Make this memo \($0.question.to.label)?" } ?? "",
+            isPresented: Binding(
+                get: { widening != nil },
+                set: { if !$0 { widening = nil } }
+            ),
+            presenting: widening
+        ) { pending in
+            Button("Make \(pending.question.to.label)") {
+                // Claimed synchronously: two taps on the yes are one change.
+                guard widening == pending else { return }
+                widening = nil
+                send(pending.question.confirmed(), uid: pending.uid, in: timeline)
+            }
+            Button("Cancel", role: .cancel) { widening = nil }
+        } message: { pending in
+            Text(pending.question.sentence)
+        }
         .overlay {
             // A queued capture is not "no memos yet" — the empty state must not paint over the
             // one thing a person is waiting on.
@@ -532,7 +552,8 @@ public struct TimelineView: View {
             uid: memo.uid,
             content: memo.content,
             createdAt: memo.createdAt,
-            attachments: memo.attachments
+            attachments: memo.attachments,
+            visibility: memo.visibility
         )
     }
 
@@ -584,13 +605,13 @@ public struct TimelineView: View {
         Menu {
             ForEach(MemoVisibility.allCases, id: \.self) { option in
                 Button {
-                    Task {
-                        guard let handle = session.activeHandle,
-                            let baseURL = session.serverBaseURL
-                        else { return }
-                        await timeline.setVisibility(
-                            option, uid: memo.uid, using: handle, baseURL: baseURL
-                        )
+                    // Narrowing goes at once; widening asks first; the memo's own audience is
+                    // nothing to send. The rule is `VisibilityChange`'s, the edit sheet's too.
+                    switch VisibilityChange.propose(option, from: memo.visibility) {
+                    case .unchanged: break
+                    case .ready(let change): send(change, uid: memo.uid, in: timeline)
+                    case .ask(let question):
+                        widening = PendingWidening(uid: memo.uid, question: question)
                     }
                 } label: {
                     if memo.visibility == option {
@@ -602,6 +623,21 @@ public struct TimelineView: View {
             }
         } label: {
             Label("Visibility", systemImage: "eye")
+        }
+    }
+
+    /// A long-press widening waiting for its answer, and the memo it is about.
+    struct PendingWidening: Equatable {
+        let uid: String
+        let question: VisibilityChange.Question
+    }
+
+    private func send(_ change: VisibilityChange, uid: String, in timeline: TimelineStore) {
+        Task {
+            guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
+                return
+            }
+            await timeline.setVisibility(change, uid: uid, using: handle, baseURL: baseURL)
         }
     }
 
@@ -756,7 +792,7 @@ public struct TimelineView: View {
                 outcome = .failed(
                     outbox.lastEnqueueFailure == .notSignedIn ? .authorization : .storage)
             }
-        case .edit(let uid, _, let createdAt, _):
+        case .edit(let uid, _, let createdAt, _, _):
             guard let handle = session.activeHandle, let baseURL = session.serverBaseURL else {
                 return .failed(.authorization)
             }
@@ -771,6 +807,7 @@ public struct TimelineView: View {
                 // still open rather than queued (outbox-backed edits are MEMNG-124's line).
                 attaching: submission.attachments.map(\.stagedSource),
                 listing: submission.pictures,
+                visibility: submission.visibilityChange,
                 using: handle,
                 baseURL: baseURL
             )
@@ -1002,7 +1039,7 @@ extension ComposeView.Mode: Identifiable {
     public var id: String {
         switch self {
         case .create: "create"
-        case .edit(let uid, _, _, _): "edit-\(uid)"
+        case .edit(let uid, _, _, _, _): "edit-\(uid)"
         }
     }
 }

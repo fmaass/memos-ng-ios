@@ -24,19 +24,25 @@ public struct ComposeSubmission: Sendable, Equatable {
     /// an edit states one — a new capture goes to the outbox, which has no memo to state a list
     /// against and nothing to remove.
     public var pictures: [MemoPictureEntry]?
+    /// What an edit's Save does to the memo's audience, or nil when it leaves it alone — the PATCH
+    /// then says nothing about visibility at all. A widening is only ever here as a confirmed one
+    /// (`VisibilityChange`). A create carries its audience in `visibility` instead.
+    public var visibilityChange: VisibilityChange?
 
     public init(
         content: String,
         visibility: MemoVisibility?,
         attachments: [PickedMedia] = [],
         createdAt: Date? = nil,
-        pictures: [MemoPictureEntry]? = nil
+        pictures: [MemoPictureEntry]? = nil,
+        visibilityChange: VisibilityChange? = nil
     ) {
         self.content = content
         self.visibility = visibility
         self.attachments = attachments
         self.createdAt = createdAt
         self.pictures = pictures
+        self.visibilityChange = visibilityChange
     }
 
     /// What the outbox stamps this capture with: the date the writer chose, or the moment it was
@@ -81,8 +87,9 @@ public struct ComposeDelete {
 /// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
 /// has an answer for who sees things, and a compose screen that demands the decision every time
 /// teaches people to stop reading it — unless a trip is pinned, when a new memo starts on "Just
-/// us" instead (`ComposeVisibilityPick`). An EDIT never touches visibility here — that is its own
-/// deliberate action on the memo, not a side effect of fixing a typo.
+/// us" instead (`ComposeVisibilityPick`). An EDIT opens on the memo's own audience, with no
+/// "Default", and moves it only under `VisibilityChange`'s rule: narrowing goes with the Save,
+/// widening asks once first (MEMNG-969).
 ///
 /// Media comes from two places, both of them originals. The LIBRARY, through the system picker,
 /// which exports the file it holds rather than a rendering of it; and the app's own camera
@@ -165,7 +172,12 @@ public struct ComposeView: View {
         /// An edit opens on the memo as it stands, its display date and its pictures included —
         /// the date row is a change to something that already has one, not a blank to fill in,
         /// and the pictures are what the memo has rather than what this sheet has been given.
-        case edit(uid: String, content: String, createdAt: Date, attachments: [MemoAttachment])
+        ///
+        /// It carries the memo's audience too: the sheet offers it (MEMNG-969), and a Save can only
+        /// tell a narrowing from a widening against where the memo started.
+        case edit(
+            uid: String, content: String, createdAt: Date, attachments: [MemoAttachment],
+            visibility: MemoVisibility = .private)
     }
 
     let mode: Mode
@@ -201,6 +213,8 @@ public struct ComposeView: View {
     @State private var hasRestoredPictures = false
     /// The pinned trip's chip, and whether its ✕ was pressed in THIS sheet (`ComposeTripChip`).
     @State private var tripChip: ComposeTripChip
+    /// The one question a widening edit asks before its Save goes, or nil (`VisibilityChange`).
+    @State private var wideningQuestion: VisibilityChange.Question?
     @FocusState private var editorFocused: Bool
 
     /// - Parameter pinnedTrip: the trip a new memo is offered, decided by the presenter when the
@@ -237,13 +251,13 @@ public struct ComposeView: View {
             initialValue: ComposeVisibilityPick(mode: mode, offered: pinnedTrip))
         _content = State(
             initialValue: {
-                if case .edit(_, let content, _, _) = mode { return content }
+                if case .edit(_, let content, _, _, _) = mode { return content }
                 if case .create(let restored?) = mode { return restored.content }
                 return ""
             }())
         _date = State(
             initialValue: {
-                if case .edit(_, _, let createdAt, _) = mode { return createdAt }
+                if case .edit(_, _, let createdAt, _, _) = mode { return createdAt }
                 // The instant the capture was taken, not the instant it was cancelled: a photo
                 // rescued out of the queue an hour later is still a photo taken an hour ago.
                 if case .create(let restored?) = mode { return restored.capturedAt }
@@ -270,7 +284,7 @@ public struct ComposeView: View {
     /// states it as kept. That is the same rule the words follow, and it is what makes the list
     /// this sheet sends the list this sheet SHOWED.
     private var existing: [ComposeExisting] {
-        guard case .edit(_, _, _, let attachments) = mode else { return [] }
+        guard case .edit(_, _, _, let attachments, _) = mode else { return [] }
         return removals.keeping(attachments.map(ComposeExisting.init(attachment:)))
     }
 
@@ -431,9 +445,12 @@ public struct ComposeView: View {
     /// nothing arriving above it can move it: attaching a photo grows the block upwards into the
     /// editor's space and the three pills stay exactly where they were.
     ///
-    /// An EDIT shows the date and the photo picker, and not the visibility — who can see a memo is
-    /// its own deliberate action (see the type comment), while a wrong date is a typo like any
-    /// other and a photograph left out of a memo is exactly the thing somebody reopens it to fix.
+    /// An EDIT shows the photo picker, the date and the visibility (MEMNG-969, owner 2026-10-27).
+    /// Moving a memo to FEWER people — Public to Just us to Private — goes with the Save and asks
+    /// nothing: nobody needs warning about showing something to fewer people. Moving it to MORE
+    /// asks once, in one line naming what that means, and only the yes saves; a dismissal sends
+    /// nothing and leaves the sheet as it was. An untouched pill says nothing to the server at all.
+    /// The rule is `VisibilityChange`'s, shared with the timeline's long press, not this sheet's.
     ///
     /// The files an edit picks go up in the FOREGROUND and the memo is patched with them directly
     /// (`TimelineStore.edit(attaching:)`), rather than through the outbox that owns new captures:
@@ -447,6 +464,19 @@ public struct ComposeView: View {
                 metaRow
             } else {
                 editRow
+                    .alert(
+                        wideningQuestion.map { "Make this memo \($0.to.label)?" } ?? "",
+                        isPresented: Binding(
+                            get: { wideningQuestion != nil },
+                            set: { if !$0 { wideningQuestion = nil } }
+                        ),
+                        presenting: wideningQuestion
+                    ) { question in
+                        Button("Make \(question.to.label)") { confirmWidening() }
+                        Button("Cancel", role: .cancel) { wideningQuestion = nil }
+                    } message: { question in
+                        Text(question.sentence)
+                    }
                 if let delete {
                     deleteRow(delete)
                 }
@@ -604,6 +634,10 @@ public struct ComposeView: View {
             // files already on it carry no capture instant this client has ever read. Edit Auto is
             // its own ticket.
             MemoDateRow(date: $date, clearable: false, spelling: spelling)
+            VisibilityMenu(
+                selection: $visibilityPick.chosen, accountDefault: nil, spelling: spelling,
+                offersDefault: false
+            )
         }
     }
 
@@ -700,6 +734,27 @@ public struct ComposeView: View {
     /// control is then refused on (`mayChangeAttachments`).
     private func post() {
         guard !imports.isSubmitting else { return }
+        guard case .edit(_, _, _, _, let original) = mode else {
+            send(visibility: nil)
+            return
+        }
+        switch VisibilityChange.propose(visibilityPick.selection ?? original, from: original) {
+        case .unchanged: send(visibility: nil)
+        case .ready(let change): send(visibility: change)
+        case .ask(let question): wideningQuestion = question
+        }
+    }
+
+    /// The yes to a widening. The question is claimed synchronously, before anything else, so two
+    /// taps on the answer are one Save; the store would join them anyway (`claimMutation`).
+    private func confirmWidening() {
+        guard let question = wideningQuestion else { return }
+        wideningQuestion = nil
+        send(visibility: question.confirmed())
+    }
+
+    private func send(visibility change: VisibilityChange?) {
+        guard !imports.isSubmitting else { return }
         // The marks the LAST attempt left are cleared before this attempt is judged — otherwise a
         // save that failed on transport can never be tried again (`ComposeImports.beginPostAttempt`).
         if let refusal = imports.beginPostAttempt() {
@@ -717,13 +772,16 @@ public struct ComposeView: View {
                 // The pinned trip's tag is added here, to what is SENT, and never to the
                 // editor: a failed post tried again builds this from the same unmodified words.
                 content: tripChip.submittedContent(content, at: pressedAt),
-                visibility: visibilityPick.selection,
+                // A create's audience. An edit states its audience only as `visibilityChange`,
+                // so an unchanged memo's visibility never rides along.
+                visibility: isEdit ? nil : visibilityPick.selection,
                 attachments: imports.attachments,
                 createdAt: resolvedDate,
                 // The row IS the memo's picture list on an edit, so what it shows is what the
                 // patch states — both halves, in one order. A create states nothing: it goes to
                 // the outbox, where there is no memo yet to have a list.
-                pictures: isEdit ? ComposePictureList.entries(items: rowItems) : nil
+                pictures: isEdit ? ComposePictureList.entries(items: rowItems) : nil,
+                visibilityChange: change
             )
             let outcome = await submit(submission)
             switch outcome {
@@ -791,19 +849,23 @@ struct VisibilityMenu: View {
     var accountDefault: MemoVisibility?
     /// How much the PILL says. The menu itself always spells everything out.
     var spelling: ComposeMetaRow.Spelling = .spelledOut
+    /// Whether "Default" is a choice. Not on an edit: a memo that exists already has an audience.
+    var offersDefault = true
 
     var body: some View {
         Menu {
             Picker("Visibility", selection: $selection) {
                 // The MENU always spells it out: a row you are choosing between has to say what
                 // it is, however little the pill needs to.
-                Label(
-                    accountDefault.map { "Default (\($0.label))" } ?? "Default",
-                    systemImage: VisibilityChoice.symbol(
-                        selection: nil, accountDefault: accountDefault
+                if offersDefault {
+                    Label(
+                        accountDefault.map { "Default (\($0.label))" } ?? "Default",
+                        systemImage: VisibilityChoice.symbol(
+                            selection: nil, accountDefault: accountDefault
+                        )
                     )
-                )
-                .tag(MemoVisibility?.none)
+                    .tag(MemoVisibility?.none)
+                }
                 ForEach(MemoVisibility.allCases, id: \.self) { option in
                     Label(option.label, systemImage: option.symbolName)
                         .tag(MemoVisibility?.some(option))

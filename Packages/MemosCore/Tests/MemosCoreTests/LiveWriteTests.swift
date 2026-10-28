@@ -102,7 +102,7 @@ struct LiveWriteTests {
         )
         #expect(
             await store.setVisibility(
-                .private, uid: uid, using: client.handle, baseURL: configuration.baseURL
+                .cleared(.private), uid: uid, using: client.handle, baseURL: configuration.baseURL
             )
         )
         #expect(await store.delete(uid: uid, using: client.handle))

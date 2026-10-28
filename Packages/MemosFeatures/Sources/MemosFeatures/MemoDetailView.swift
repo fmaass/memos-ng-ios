@@ -350,7 +350,7 @@ public struct MemoDetailView: View {
     private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async
         -> ComposeOutcome
     {
-        guard case .edit(let uid, _, let createdAt, _) = mode,
+        guard case .edit(let uid, _, let createdAt, _, _) = mode,
             let handle = session?.activeHandle,
             let baseURL = session?.serverBaseURL
         else { return .failed(.authorization) }
@@ -362,6 +362,7 @@ public struct MemoDetailView: View {
             ),
             attaching: submission.attachments.map(\.stagedSource),
             listing: submission.pictures,
+            visibility: submission.visibilityChange,
             using: handle,
             baseURL: baseURL
         )

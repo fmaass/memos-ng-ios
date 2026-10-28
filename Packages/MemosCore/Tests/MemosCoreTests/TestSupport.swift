@@ -132,6 +132,18 @@ struct RenewingBeforeSend: ClientMiddleware {
     }
 }
 
+extension VisibilityChange {
+    /// Any change, cleared to send through the real rule: a narrowing as it is proposed, a
+    /// widening as the yes to its question. For tests whose subject is the request, not the asking.
+    static func cleared(_ to: MemoVisibility, from: MemoVisibility? = nil) -> VisibilityChange {
+        switch propose(to, from: from) {
+        case .ready(let change): return change
+        case .ask(let question): return question.confirmed()
+        case .unchanged: fatalError("no change from \(String(describing: from)) to \(to)")
+        }
+    }
+}
+
 enum Stub {
     static let baseURL = URL(string: "https://memos.example.invalid")!
 
@@ -344,13 +356,15 @@ enum Stub {
         /// When the server says this memo was archived. `nil` is a memo in the ordinary timeline —
         /// which is every memo in every test that does not say otherwise.
         archivedAt: String? = nil,
-        attachments: [String] = []
+        attachments: [String] = [],
+        /// The server's write stamp. One fixed instant unless a test is about the ORDER of writes.
+        updatedAt: String = "2026-08-23T09:00:00.443000Z"
     ) -> String {
         let archived = archivedAt.map { "\"\($0)\"" } ?? "null"
         return """
             {"uid":"\(uid)","owner":"fabian","mine":true,"content":"\(jsonEscaped(content))",\
             "visibility":"\(visibility)","pinned":\(pinned),"created_at":"\(createdAt)",\
-            "updated_at":"2026-08-23T09:00:00.443000Z","archived_at":\(archived),"tags":[],\
+            "updated_at":"\(updatedAt)","archived_at":\(archived),"tags":[],\
             "attachments":[\(attachments.joined(separator: ","))]}
             """
     }
