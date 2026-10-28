@@ -4,34 +4,34 @@ import Testing
 
 @testable import MemosFeatures
 
-/// The Library tab's grid outside a trip (MEMNG-919): another member's pictures are there only to
-/// fill out a trip, so the store the tab opens with is on "Captured by me", and its first page is
-/// read with `mine=true` through the real generated client over a scripted transport.
+/// The Library tab's grid outside a trip: it opens on everyone's Public pictures (MEMNG-933 keeps a
+/// Just us picture inside its trip or album), and its first page is read without `mine` through
+/// the real generated client over a scripted transport. "Captured by me" is a choice, not the start.
 ///
 /// An extension of the cards' suite: the Collections cards and the Library tab are the two places
-/// outside a trip that the rule narrows, and one scope runs both.
+/// outside a trip that the visibility rule narrows, and one scope runs both.
 extension CollectionCardsTests {
-    @Test("the Library's grid starts on Captured by me and Public: mine=true, visibility=PUBLIC")
-    func theGridStartsOnMine() async {
+    @Test("the Library's grid starts on everyone and Public: no mine, visibility=PUBLIC")
+    func theGridStartsOnEveryone() async {
         let session = CollectionsWire.signedOutSession(CollectionsTransport())
         let library = MediaLibraryView.makeLibrary(order: .newestFirst, session: session)
-        #expect(library.mine, "the grid opened on everyone's pictures")
+        #expect(!library.mine, "the grid opened on Captured by me")
         // A Just us picture is seen only inside its trip or album (MEMNG-933).
         #expect(library.visibility == .public, "the grid opened on \(library.visibility)")
         let wire = TripWire()
         await library.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
         let reads = wire.transport.listReads
         #expect(reads.count == 1, "\(reads)")
-        #expect(reads.first?["mine"] == "true", "an everyone read: \(reads)")
+        #expect(reads.first?["mine"] == nil, "a Captured by me read: \(reads)")
         #expect(reads.first?["visibility"] == "PUBLIC", "a Just us picture was read: \(reads)")
         // Any, chosen on purpose, widens it: the parameter is absent.
         library.setVisibility(.any)
         await library.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
         #expect(wire.transport.listReads.last?["visibility"] == nil, "\(wire.transport.listReads)")
-        // Unchecked on purpose, the grid is everyone's again.
-        library.setMine(false)
+        // Checked on purpose, the grid narrows to my own.
+        library.setMine(true)
         await library.refresh(using: wire.access.handle, baseURL: TripWire.baseURL)
-        #expect(wire.transport.listReads.last?["mine"] == nil, "\(wire.transport.listReads)")
+        #expect(wire.transport.listReads.last?["mine"] == "true", "\(wire.transport.listReads)")
     }
 }
 

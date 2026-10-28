@@ -409,7 +409,7 @@ extension MediaImageLoaderTests {
         return condition()
     }
 
-    @Test("the Library opens on my Public pictures; Any, unchecked, mine and Just us each read")
+    @Test("the Library opens on everyone's Public pictures; Any, mine and Just us each read")
     func capturedByMeInTheLibrary() async {
         let wire = AudienceTransport()
         await withTransport(AudiencePictures()) {
@@ -426,16 +426,16 @@ extension MediaImageLoaderTests {
                 window.isHidden = true
                 window.rootViewController = nil
             }
-            // The Library opens on Captured by me (MEMNG-919) and Public (MEMNG-933): my own
-            // pictures and their counts, the Just us one (aud-a) left to its trip.
+            // The Library opens on everyone's pictures and Public (MEMNG-933): the Just us one
+            // (aud-a) left to its trip, another member's Public one (aud-c) shown.
             let everybody = Set(["aud-a", "aud-b", "aud-c"])
             let landed = await audienceUntil(window) {
-                TripProbe.tiles(in: window) == ["aud-b"]
-                    && Self.audienceHeading(in: window) == bucketCountLabel(4)
+                Set(TripProbe.tiles(in: window)) == ["aud-b", "aud-c"]
+                    && Self.audienceHeading(in: window) == bucketCountLabel(9)
             }
             #expect(landed, "the opening grid drew \(Self.drawn(in: window))")
             let firstList = wire.reads(AudienceWire.listAttachments).first
-            #expect(firstList?["mine"] == "true", "the Library did not open on Captured by me")
+            #expect(firstList?["mine"] == nil, "the Library opened on Captured by me")
             #expect(firstList?["visibility"] == "PUBLIC", "the Library did not open on Public")
             let openingDays = wire.reads(AudienceWire.buckets)
             #expect(!openingDays.isEmpty, "no bucket read")
@@ -446,34 +446,21 @@ extension MediaImageLoaderTests {
                 LibraryMenuProbe.state(of: "Public", in: window) == .on,
                 "Public is not the checked Visibility row: \(LibraryMenuProbe.describe(window))")
 
-            // Any widens it on purpose: the Just us picture is in the grid again.
+            // Any widens it on purpose: everyone's pictures, the Just us one included.
             let publicLists = wire.reads(AudienceWire.listAttachments).count
             #expect(
                 LibraryMenuProbe.perform("Any", in: window),
                 "no Any row: \(LibraryMenuProbe.describe(window))")
             let anyDrawn = await audienceUntil(window) {
-                Set(TripProbe.tiles(in: window)) == ["aud-a", "aud-b"]
-                    && Self.audienceHeading(in: window) == bucketCountLabel(7)
+                Set(TripProbe.tiles(in: window)) == everybody
+                    && Self.audienceHeading(in: window) == bucketCountLabel(12)
             }
             #expect(anyDrawn, "Any drew \(Self.drawn(in: window))")
             let anyLists = wire.reads(AudienceWire.listAttachments).dropFirst(publicLists)
             #expect(anyLists.last?["visibility"] == nil, "Any still named a visibility")
-            #expect(anyLists.last?["mine"] == "true", "Any dropped Captured by me")
+            #expect(anyLists.last?["mine"] == nil, "Any read Captured by me")
 
-            // Unchecked on purpose: everyone's pictures, everyone's counts.
-            let opened = wire.reads(AudienceWire.listAttachments).count
-            #expect(
-                LibraryMenuProbe.perform("Captured by me", in: window),
-                "no Captured by me row: \(LibraryMenuProbe.describe(window))")
-            let widened = await audienceUntil(window) {
-                Set(TripProbe.tiles(in: window)) == everybody
-                    && Self.audienceHeading(in: window) == bucketCountLabel(12)
-            }
-            #expect(widened, "unchecking drew \(Self.drawn(in: window))")
-            let everyLists = wire.reads(AudienceWire.listAttachments).dropFirst(opened)
-            #expect(everyLists.last?["mine"] == nil, "unchecking still read mine")
-
-            // Captured by me, pressed as the menu would press it.
+            // Captured by me, checked on purpose as the menu would press it.
             let lists = wire.reads(AudienceWire.listAttachments).count
             let days = wire.reads(AudienceWire.buckets).count
             #expect(

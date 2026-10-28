@@ -615,13 +615,13 @@ struct MediaLibraryView: View {
         )
     }
 
-    /// The grid's store as the tab opens it: in the device's order, on "Captured by me"
-    /// (MEMNG-919) — another member's pictures are there only to fill out a trip, so the Library
-    /// starts on my own and the menu widens it on purpose — and on Public (MEMNG-933): a Just us
-    /// picture is seen inside its trip or album only, and Any widens it on purpose.
+    /// The grid's store as the tab opens it: in the device's order, on everyone's pictures, and on
+    /// Public (MEMNG-933): a Just us picture is seen inside its trip or album only, and Any widens
+    /// it on purpose. Public already keeps a member's trip-only pictures out, so the Library no
+    /// longer also starts on "Captured by me" (MEMNG-919's first answer); the menu narrows to it.
     static func makeLibrary(order: MediaLibraryOrder, session: SessionStore) -> MediaLibraryStore {
         MediaLibraryStore(
-            order: order, mine: true, visibility: .public,
+            order: order, mine: false, visibility: .public,
             onUnauthorized: { [session] refusal in await session.handle(refusal) })
     }
 
