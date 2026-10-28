@@ -40,7 +40,7 @@ struct PendingMemoBoardTests {
         #expect(card?.tiles.map(\.id) == capture.files.map(\.id))
     }
 
-    @Test("the newest capture is on top, and one taken back to the editor is not a card")
+    @Test("the newest capture is on top, and one taken back to the editor keeps its card")
     func orderAndCancelled() {
         var board = PendingMemoBoard()
         let older = job(at: 1_000)
@@ -48,7 +48,8 @@ struct PendingMemoBoardTests {
         var taken = job(at: 3_000)
         taken.cancelledAt = Date()
         board.show([older, taken, newer], resolved: [:])
-        #expect(board.visible(present: []).map(\.job.id) == [newer.id, older.id])
+        // Its card is where Reopen lives once the editor it went back to has been closed.
+        #expect(board.visible(present: []).map(\.job.id) == [taken.id, newer.id, older.id])
     }
 
     @Test("the memo a card became is drawn under the card's own key, so the swap does not jump")
@@ -56,7 +57,7 @@ struct PendingMemoBoardTests {
         var board = PendingMemoBoard()
         let capture = job()
         board.show([capture], resolved: [:])
-        let key = board.visible(present: []).first?.id
+        let key = board.visible(present: []).first?.id ?? "none"
         // The create answered and the job left the queue; the list has not been read yet.
         board.show([], resolved: [capture.id: "m1"])
         #expect(board.visible(present: []).map(\.id) == [key])

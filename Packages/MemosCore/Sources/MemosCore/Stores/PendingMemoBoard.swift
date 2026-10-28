@@ -54,15 +54,14 @@ public struct PendingMemoBoard: Sendable, Equatable {
 
     /// The queue as last read, and the memos its finished captures became.
     ///
-    /// A capture still in the queue is a card, unless a person took it back to the editor (it is
-    /// there, not here) or removed it. A card whose capture left the queue stays only when it
+    /// A capture still in the queue is a card unless a person removed it — one taken back to the
+    /// editor included, because its card is where Reopen lives once that editor is closed. A card whose capture left the queue stays only when it
     /// became a memo — until that memo is on the list (`visible`, `settle`).
     public mutating func show(_ jobs: [UploadJob], resolved: [UUID: String]) {
         var next: [PendingMemo] = []
         var listed: Set<UUID> = []
         for job in jobs where !withdrawn.contains(job.id) {
             listed.insert(job.id)
-            guard job.cancelledAt == nil else { continue }
             let uid = job.resolvedMemoUID ?? resolved[job.id]
             next.append(PendingMemo(id: Self.key(for: job.id), job: job, resolvedUID: uid))
         }

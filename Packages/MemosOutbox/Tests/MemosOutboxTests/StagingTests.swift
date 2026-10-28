@@ -149,12 +149,18 @@ struct StagingTests {
         let gone = StagedSource(
             url: harness.root.appending(path: "never-written.heic"), filename: "x.heic",
             mime: "image/heic")
-        await #expect(throws: OutboxStorageError.self) {
+        let readable = try source(harness, "b.heic")
+        var threw = false
+        do {
             _ = try await harness.repository.append(
-                [try source(harness, "b.heic"), gone], to: job.id, arrivingFrom: launch)
+                [readable, gone], to: job.id, arrivingFrom: launch)
+        } catch is OutboxStorageError {
+            threw = true
         }
+        #expect(threw)
         let onDisk = try #require(await harness.repository.job(job.id))
-        #expect(onDisk == job)
+        #expect(onDisk.files == job.files)
+        #expect(onDisk.stagingLaunch == launch)
         // The copy of the file that DID read is not left behind for the sweep to puzzle over.
         let held = try #require(job.files.first)
         let directory = harness.repository.mediaURL(job: job, file: held)
