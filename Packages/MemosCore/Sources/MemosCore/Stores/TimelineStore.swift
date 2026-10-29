@@ -49,6 +49,8 @@ public enum MemoPictureEntry: Equatable, Sendable {
 @Observable
 public final class TimelineStore {
     public private(set) var memos: [Memo] = []
+    /// The captures still in the queue, drawn as cards above the memos (MEMNG-951).
+    public private(set) var pending = PendingMemoBoard()
     public private(set) var isLoading = false
     public private(set) var isLoadingMore = false
     /// A page towards now is in flight.
@@ -533,6 +535,9 @@ public final class TimelineStore {
             // back with is judged against it, so a change made while it was in the air outranks it.
             let issued = mutationSequence
             let favoritesIssued = favoriteStamp
+            // The pending cards whose memo this read can answer for (MEMNG-951): it leaves after
+            // they resolved, so once it has landed they have said their piece.
+            let settleable = pending.resolvedJobIDs
             let page = try await Self.page(
                 client,
                 query: lineage.query,
@@ -579,6 +584,9 @@ public final class TimelineStore {
                 ),
                 under: authority
             )
+            // Only here, after the page landed: a read that failed or was dropped leaves each card
+            // standing until a list that can hold its memo has been read.
+            pending.settle(settleable)
         } catch {
             // A failure belongs to the request that suffered it. One from a list nobody is reading
             // any more would put an error over a list that loaded perfectly well — and, for a
@@ -896,6 +904,32 @@ public final class TimelineStore {
         lastError = apiError.errorDescription
     }
 
+    // MARK: - pending memos (MEMNG-951)
+
+    /// The queue as last read, and the memos its finished captures became. Only captures bound
+    /// to `identity` are this timeline's: a capture made under another account is that
+    /// account's, and nil — nobody signed in — shows none.
+    public func showPending(
+        _ jobs: [UploadJob], resolved: [UUID: String], for identity: TimelineSnapshotIdentity?
+    ) {
+        let mine = jobs.filter { job in
+            guard let identity else { return false }
+            return job.binding.serverBaseURL == identity.server
+                && job.binding.ownerSubject == identity.subject
+        }
+        pending.show(mine, resolved: resolved)
+    }
+
+    /// A person removed this capture; nothing that arrives later puts its card back.
+    public func withdrawPending(_ jobID: UUID) { pending.withdraw(jobID) }
+
+    /// The cards to draw, newest first: a card whose memo the list already holds is that memo.
+    public var pendingCards: [PendingMemo] { pending.visible(present: Set(memos.map(\.uid))) }
+
+    /// The key a memo's row is drawn under — its card's, when it was one, so the swap is one row.
+    public func identityKey(for memo: Memo) -> String { identityKey(forUID: memo.uid) }
+    public func identityKey(forUID uid: String) -> String { pending.key(for: uid) }
+
     /// Empties the loaded list.
     ///
     /// The timeline never does this — a list that blanks because one refresh failed is a worse lie
@@ -905,6 +939,7 @@ public final class TimelineStore {
     /// back.
     public func clearRows() {
         memos = []
+        pending.reset()
         nextCursor = nil
         hasMore = true
         hasNewer = false

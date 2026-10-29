@@ -325,8 +325,10 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # outbox behind a stub path, fed `StaticCredentials`' predicate. 42: the transfer ledger's feed
 # witness in MemosOutboxTests (MEMNG-947) composes the real outbox, fed `StaticCredentials`'
 # predicate. 43: the transfers sheet's fix witness in MemosFeaturesTests runs each fix through the
-# real outbox, fed its signed-in provider's predicate.
-pin "'OutboxRepository(' constructions" 43 \
+# real outbox, fed its signed-in provider's predicate. 44: the staging witness in MemosOutboxTests
+# (MEMNG-951) composes the real outbox around a capture still taking files, fed its switchable
+# provider's predicate.
+pin "'OutboxRepository(' constructions" 44 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

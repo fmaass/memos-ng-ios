@@ -129,16 +129,25 @@ nonisolated public enum ComposeAttachments {
     /// dated and ordered by an incomplete set for ever.
     ///
     /// A refusal, never a silent drop, and never a disabled button.
-    public static func postRefusal(items: [ComposeAttachment]) -> String? {
+    ///
+    /// `loadingGoesLater` is a capture whose loading files follow it into the queue (MEMNG-951):
+    /// a file on its way is then not left out, it is sent behind the rest, so it holds nothing up.
+    public static func postRefusal(
+        items: [ComposeAttachment], loadingGoesLater: Bool = false
+    ) -> String? {
         if let failed = items.first(where: \.isFailed) {
             return "\(failed.label) could not be read. Remove it, or try it again."
         }
         // A file still on its way is not attached yet. Posting now would send the memo without it
         // — the same silent loss a failed item causes, arrived at by waiting a second less.
-        if let loading = items.first(where: \.isLoading) {
+        if !loadingGoesLater, let loading = items.first(where: \.isLoading) {
             return "\(loading.label) is still loading. Give it a moment, or remove it."
         }
-        if let pending = items.first(where: { $0.capture.isPending }) {
+        // A file still on its way has not been read either; when it follows later it is not
+        // waited for here — the memo is dated by what is attached when Post is pressed.
+        if let pending = items.first(where: {
+            $0.capture.isPending && !(loadingGoesLater && $0.isLoading)
+        }) {
             return "\(pending.label) is still being read. It decides the date, so give it a moment."
         }
         return nil

@@ -89,7 +89,11 @@ extension OutboxPlanner {
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
         let needing = job.files.filter { !$0.isComplete }
-        if needing.isEmpty { return .createMemo }
+        if needing.isEmpty {
+            // Files are still arriving from the editor: the ones here upload meanwhile, and the
+            // create waits for the last of them (`UploadJob.stagingLaunch`).
+            return job.stillArriving ? .wait(until: .distantFuture) : .createMemo
+        }
         // Eligibility before the budget is counted, so a file waiting out its own deadline never
         // takes a place a sibling could have used.
         let eligible = needing.filter { file in

@@ -50,6 +50,8 @@ nonisolated public enum ComposeFailurePresentation {
             case .captureUnreadable:
                 return "This capture could not be read on this device just now."
                     + " Nothing was sent — what you wrote is still here, so try again."
+            case .nothingToSend:
+                return "This capture has nothing in it to send. Remove it and write a new memo."
             }
         case .defaultVisibilityUnknown:
             return "Your account's default visibility isn't known yet — choose one,"

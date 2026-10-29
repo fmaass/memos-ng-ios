@@ -34,13 +34,22 @@ public struct PendingRow: Sendable, Equatable, Identifiable {
     /// and a row painted orange for that would make the colour mean nothing on the rows that are.
     public var needsAttention: Bool
 
+    /// The actions drawn but not pressable, each with the sentence that says why
+    /// (`PendingMemoPresentation.disabledReason`).
+    public var disabledReasons: [PendingAction: String]
+
+    /// The picked items that never reached this capture, said in one line — nil when none.
+    public var missingNote: String?
+
     public init(
         id: UUID,
         snippet: String,
         status: String,
         attachmentCount: Int,
         actions: [PendingAction],
-        needsAttention: Bool
+        needsAttention: Bool,
+        disabledReasons: [PendingAction: String] = [:],
+        missingNote: String? = nil
     ) {
         self.id = id
         self.snippet = snippet
@@ -48,6 +57,8 @@ public struct PendingRow: Sendable, Equatable, Identifiable {
         self.attachmentCount = attachmentCount
         self.actions = actions
         self.needsAttention = needsAttention
+        self.disabledReasons = disabledReasons
+        self.missingNote = missingNote
     }
 }
 
@@ -81,7 +92,9 @@ public enum PendingMemoPresentation {
                     ),
                     attachmentCount: job.files.count,
                     actions: action(for: job),
-                    needsAttention: job.state == .held || job.cancelledAt != nil
+                    needsAttention: job.state == .held || job.cancelledAt != nil,
+                    disabledReasons: disabledReasons(for: job),
+                    missingNote: missingNote(for: job)
                 )
             }
     }
@@ -99,6 +112,9 @@ public enum PendingMemoPresentation {
     /// written into a memo offers nothing: its bytes are at the server and nothing here can take
     /// them back, so a control there would be a promise this screen cannot keep.
     public static func action(for job: UploadJob) -> [PendingAction] {
+        // Nothing in it to send — a Post whose every picked item failed: Reopen would lead to a
+        // re-post the queue refuses (`Outbox.resubmit`), so the one way out is the one offered.
+        if job.hasNothingToSend { return [.remove] }
         if job.cancelledAt != nil { return [.reopen, .remove] }
         switch job.state {
         case .held:
@@ -132,6 +148,36 @@ public enum PendingMemoPresentation {
             return job.editUnansweredSince == nil ? [.cancel, .retry] : []
         case .creating:
             return []
+        }
+    }
+
+    /// Why an action the row draws cannot be pressed now, or nil when it can.
+    ///
+    /// Cancel while files are still arriving (MEMNG-951) is drawn disabled: the editor would open
+    /// on what has landed so far and every late file would be turned away by the capture it was
+    /// picked for. The queue refuses it too (`Outbox.cancel`); this is the sentence, not the guard.
+    public static func disabledReason(_ action: PendingAction, for job: UploadJob) -> String? {
+        switch action {
+        case .cancel where job.stillArriving: return Self.cancelWhileArriving
+        default: return nil
+        }
+    }
+
+    static func disabledReasons(for job: UploadJob) -> [PendingAction: String] {
+        var reasons: [PendingAction: String] = [:]
+        for action in action(for: job) {
+            if let reason = disabledReason(action, for: job) { reasons[action] = reason }
+        }
+        return reasons
+    }
+
+    /// The line a capture carries when picked items never reached it: they are still in Photos,
+    /// and the memo goes without them — said, never left to be discovered.
+    public static func missingNote(for job: UploadJob) -> String? {
+        switch job.missingItems {
+        case 0: nil
+        case 1: "1 photo could not be added — it is still in Photos"
+        case let count: "\(count) photos could not be added — they are still in Photos"
         }
     }
 
@@ -246,6 +292,7 @@ public enum PendingMemoPresentation {
     /// queue owes the edit to — and that is what they need before choosing between sending it
     /// again and binning it.
     static let cancelledAndKept = "Cancelled — kept on this device"
+    static let cancelWhileArriving = "Files are still being added. Cancel it once they are in."
 
     /// True on the wire and in the backoff between replays alike: what stands is the answer, not
     /// the request, and the queue sends the change again under the same key until it comes.

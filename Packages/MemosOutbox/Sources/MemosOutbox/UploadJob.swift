@@ -312,6 +312,47 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// The lane this capture's bytes travel on, once one was chosen. Optional and last, so a
     /// manifest written before the choice existed decodes unchanged — `lane` says what nil means.
     public var transport: UploadTransport?
+    /// The launch whose editor is still bringing files into this capture: Post was pressed while
+    /// some of them were loading, and they are appended here as they land (MEMNG-951). While it is
+    /// set the create is not sent — a create replayed under the same key with more files would be
+    /// a different request the server answers with the first memo — and the files already here
+    /// upload meanwhile. Cleared by that editor when its last file has landed or its time is up,
+    /// and by the next launch's adoption when the process that set it died first. Optional and
+    /// absent on every manifest written before it, which is "nothing is still arriving".
+    public var stagingLaunch: UUID?
+
+    /// Whether files are still arriving from the editor, so the create must wait for them.
+    public var stillArriving: Bool { stagingLaunch != nil }
+
+    /// How many of the items picked for this capture have not reached it. Set when Post takes a
+    /// capture with items still loading, one less for each that is appended; what is left when the
+    /// capture is let go — a load that failed, a copy that failed, an append the queue refused, the
+    /// time limit, a process that died first — never will, and the card says so rather than
+    /// sending the memo a picture short in silence (MEMNG-951). The originals are still in Photos.
+    /// Optional and absent on every manifest written before it, which is "nothing is missing".
+    public var notArrived: Int?
+
+    /// The picked items that will never reach this capture: zero while they still may.
+    public var missingItems: Int { stillArriving ? 0 : max(0, notArrived ?? 0) }
+
+    /// A capture with nothing in it to send: no words, no files, no create ever sent, and no
+    /// file still on its way — what a Post whose every picked item failed leaves behind. Its
+    /// create would be an empty memo or a refusal, so the only thing it may become is removed
+    /// (`Outbox.resubmit` refuses it; its row offers only Remove).
+    public var hasNothingToSend: Bool {
+        !stillArriving && files.isEmpty && !createMayHaveBeenSent
+            && content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Whether the server may already hold this capture's memo: a create is on the wire, has been
+    /// answered, or went out once and came back with no answer (a replay under the same key
+    /// would return that memo). Removing such a capture here would not remove the memo, so the
+    /// one decision that hangs on it — whether "Remove" may be offered — reads it from here.
+    /// Conservative on purpose: a failed attempt with every file up counts, whatever failed.
+    public var createMayHaveBeenSent: Bool {
+        state == .creating || resolvedMemoUID != nil
+            || (attemptCount > 0 && files.allSatisfy(\.isComplete))
+    }
 
     private enum CodingKeys: String, CodingKey {
         case id, idempotencyKey, content, visibility, capturedAt, files, binding, state
@@ -321,6 +362,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         // read as "no change is owed" on every capture a person is already carrying.
         case editUnansweredSince = "editSentAt"
         case transport
+        case stagingLaunch
+        case notArrived
     }
 
     public init(
@@ -343,7 +386,9 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         patchAttempt: Int? = nil,
         pendingEdit: PendingEdit? = nil,
         editUnansweredSince: Date? = nil,
-        transport: UploadTransport? = nil
+        transport: UploadTransport? = nil,
+        stagingLaunch: UUID? = nil,
+        notArrived: Int? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -365,6 +410,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.pendingEdit = pendingEdit
         self.editUnansweredSince = editUnansweredSince
         self.transport = transport
+        self.stagingLaunch = stagingLaunch
+        self.notArrived = notArrived
     }
 
     /// The lane a capture is on. Nil is every row begun before the lane was recorded, and those
