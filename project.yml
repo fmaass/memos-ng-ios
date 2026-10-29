@@ -206,7 +206,7 @@ targets:
         # build number under Xcode Cloud is a ci_scripts/ci_pre_xcodebuild.sh that stamps
         # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, so that no hand edit is needed here.
         MARKETING_VERSION: "2.4.0"
-        CURRENT_PROJECT_VERSION: "73"
+        CURRENT_PROJECT_VERSION: "74"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
         # them silently (NSURLError -1009 with a satisfied path).
@@ -286,7 +286,7 @@ targets:
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
         MARKETING_VERSION: "2.4.0"
-        CURRENT_PROJECT_VERSION: "73"
+        CURRENT_PROJECT_VERSION: "74"
 
   MemosAPITests:
     type: bundle.unit-test

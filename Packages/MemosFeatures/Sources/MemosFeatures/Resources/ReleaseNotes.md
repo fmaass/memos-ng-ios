@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (74)
+
+- The Library, Years, Months and Tags now start on everyone's Public pictures, not only mine; a month's, a year's and a tag's Journal shows Public memos only.
+- Post works while picked photos are still loading: the memo shows on the timeline right away with a ring until its files are in.
+- A Transfers strip above the timeline shows uploads in flight; tapping it opens a sheet with each file's state and, for a held file, the reason.
+- Failed uploads retry by cause: a short glitch retries soon, no connection waits for the network, and a file that needs me says why it is held.
+- The Info sheet in the viewer shows the memo's visibility as a chip I can tap to change it.
+- When a queued visibility change has turned into making a memo more public, the app asks again instead of refusing.
+
 ## 2.4.0 (73)
 
 - The edit sheet now has the visibility menu. Making a memo more private saves straight away; making it more public asks once first, and Cancel changes nothing. Long-pressing a memo follows the same rule.
