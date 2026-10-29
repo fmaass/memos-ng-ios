@@ -20,19 +20,24 @@ nonisolated public struct PickedMedia: Transferable, Identifiable, Equatable {
     public var filename: String
     public var mime: String
     public var lastModified: Date?
+    /// The copy's size on disk, read where the copy is made; nil where nobody read it, which
+    /// makes no claim about the file against the server's upload limit.
+    public var byteSize: Int64?
 
     public init(
         id: UUID = UUID(),
         url: URL,
         filename: String,
         mime: String,
-        lastModified: Date? = nil
+        lastModified: Date? = nil,
+        byteSize: Int64? = nil
     ) {
         self.id = id
         self.url = url
         self.filename = filename
         self.mime = mime
         self.lastModified = lastModified
+        self.byteSize = byteSize
     }
 
     public static var transferRepresentation: some TransferRepresentation {
@@ -61,13 +66,15 @@ nonisolated public struct PickedMedia: Transferable, Identifiable, Equatable {
         let destination = directory.appending(path: storedName)
         try? fileManager.removeItem(at: destination)
         try fileManager.copyItem(at: source, to: destination)
-        let modified = try? destination.resourceValues(forKeys: [.contentModificationDateKey])
+        let values = try? destination.resourceValues(
+            forKeys: [.contentModificationDateKey, .fileSizeKey])
         return PickedMedia(
             id: id,
             url: destination,
             filename: filename,
             mime: mimeType(forExtension: suffix),
-            lastModified: modified?.contentModificationDate
+            lastModified: values?.contentModificationDate,
+            byteSize: values?.fileSize.map(Int64.init)
         )
     }
 

@@ -603,7 +603,9 @@ public struct ComposeView: View {
                 removeExisting: { uid in
                     guard mayChangeAttachments else { return }
                     removals.remove(uid)
-                })
+                },
+                // Captions a file the server would refuse while it is still only staged here.
+                maxUploadBytes: session?.uploadLimits?.maxBytes)
         }
         if imports.failed > 0,
             let summary = ComposeAttachments.summary(

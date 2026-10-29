@@ -547,7 +547,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 for: current, credentials: credentials, now: clock()
             ) {
             case .hold(let reason):
-                await hold(current, reason: reason)
+                await hold(
+                    current, reason: reason,
+                    error: OutboxPlanner.holdMessage(
+                        for: reason, of: current, credentials: credentials))
                 return
             case .wait:
                 return
@@ -1355,7 +1358,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // A refused write ends this pass having done nothing, on a row another writer
                 // moved — perhaps one that skipped a file this pass owned. Ask again, here and at
                 // every refused write below.
-                if await !hold(current, reason: reason) { requestDrain() }
+                let error = OutboxPlanner.holdMessage(
+                    for: reason, of: current, credentials: credentials)
+                if await !hold(current, reason: reason, error: error) { requestDrain() }
                 return .done
             case .wait:
                 return .done
@@ -1927,6 +1932,15 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             requestDrain()
             return nil
         }
+        // A new session is a new acceptance of the file's size. A lost session's replacement and a
+        // policy successor ask for one without passing the planners again, and the planners pass
+        // a file that names a session, so the size is asked here too. Resuming a session the
+        // server already opened never comes this way.
+        if let limit = credentials.uploadLimit, OutboxPlanner.isOverLimit(file, limit: limit) {
+            let message = OutboxPlanner.tooLargeMessage(file, over: limit)
+            if await !hold(job, reason: .tooLarge, error: message) { requestDrain() }
+            return nil
+        }
         let request: URLRequest
         do {
             request = try OutboxRequests.startUpload(
@@ -2413,15 +2427,18 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// - Returns: false when the fence refused the write: the row moved and says something else.
     @discardableResult
-    private func hold(_ job: UploadJob, reason: HoldReason) async -> Bool {
+    private func hold(_ job: UploadJob, reason: HoldReason, error: String? = nil) async -> Bool {
         guard job.state != .held || job.holdReason != reason else { return true }
         // Its tails go with the write: `OutboxRepository` removes them wherever `.held` lands.
-        return await save(Self.holding(job, for: reason), matching: job) != nil
+        return await save(Self.holding(job, for: reason, error: error), matching: job) != nil
     }
 
     /// The row `hold` writes, built in one place so `bank` can recognise it as a whole value.
-    private static func holding(_ job: UploadJob, for reason: HoldReason) -> UploadJob {
-        job.held(reason, error: message(for: reason))
+    /// `error` replaces the reason's usual sentence where the planner has a more exact one.
+    private static func holding(
+        _ job: UploadJob, for reason: HoldReason, error: String? = nil
+    ) -> UploadJob {
+        job.held(reason, error: error ?? message(for: reason))
     }
 
     /// An accepted count whose write was refused because a pass parked the capture for the

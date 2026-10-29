@@ -244,6 +244,9 @@ public struct TimelineView: View {
             await session.loadSettings()
             // Adopt whatever the last run left in flight before anything new is scheduled.
             await outbox?.start()
+            // After the start, so a slow answer never holds the queue up: until it lands nothing
+            // is refused for its size, and the server's 413 is the backstop.
+            await session.loadUploadLimits()
         }
         // A snapshot on screen belongs to the identity that wrote it. If the session becomes
         // somebody else's — or nobody's — while it is up, it goes; a list the server has since

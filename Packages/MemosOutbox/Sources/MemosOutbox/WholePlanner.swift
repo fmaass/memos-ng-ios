@@ -86,6 +86,8 @@ extension OutboxPlanner {
         guard job.binding.matches(credentials) else { return .hold(.accountMismatch) }
         if job.cancelledAt != nil { return .wait(until: job.nextAttemptAt) }
         if job.state == .held { return .hold(job.holdReason ?? .serverRefused) }
+        // As on the chunk lane: refused while only staged, before any session is asked for.
+        if oversizedFile(in: job, limit: credentials.uploadLimit) != nil { return .hold(.tooLarge) }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
         let needing = job.files.filter { !$0.isComplete }

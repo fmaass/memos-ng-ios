@@ -165,6 +165,11 @@ public final class SessionStore {
     /// and most screens never ask. It arrives on the same `/api/settings` read as the default
     /// above and has the same lifetime — it belongs to the account, not to the app.
     public private(set) var avatar: String?
+    /// What `/api/uploads/limits` said for this session; nil until `loadUploadLimits` has an
+    /// answer, and whatever is unknown refuses nothing.
+    public private(set) var uploadLimits: UploadLimits?
+    /// The generation `loadUploadLimits` has asked under, so a session asks once.
+    @ObservationIgnored private var uploadLimitsAsked: Int?
     /// What the server says about the credential THIS device is holding, or `nil` while it has not
     /// been read. Scoped to the session exactly as the two above are.
     public private(set) var deviceToken: DeviceToken?
@@ -498,7 +503,8 @@ public final class SessionStore {
             subject: user.subject,
             serverBaseURL: configuration.baseURL,
             token: presented.token,
-            epoch: epoch.current
+            epoch: epoch.current,
+            uploadLimit: uploadLimits?.maxBytes
         )
     }
 
@@ -1515,6 +1521,7 @@ public final class SessionStore {
         // where that is revoked, and never anywhere else.
         defaultVisibility = nil
         avatar = nil
+        uploadLimits = nil
         // AFTER the bump, so it names the incarnation the client above is handed out under:
         // this is one of the two places a non-nil client is installed, and therefore one of the
         // two that may move it.
@@ -2109,6 +2116,7 @@ public final class SessionStore {
         // licence this method revokes, because they scope to the identity together.
         defaultVisibility = nil
         avatar = nil
+        uploadLimits = nil
         // Same lifetime, one thing over: the row describes the credential this method just threw
         // away, so keeping it would leave Settings naming a token that is gone.
         deviceToken = nil
@@ -2233,6 +2241,37 @@ public final class SessionStore {
                 return
             }
             MemosLog.session.info("GET /api/settings did not answer; the default stays unnamed")
+        }
+    }
+
+    /// Reads the server's upload limits, once per session.
+    ///
+    /// Best-effort like `loadSettings`, and fenced the same way: the generation is taken before
+    /// the call and checked before the write, so an answer about a session that has ended is
+    /// dropped. A second call in the same session sends nothing — the first one's ask stands,
+    /// in flight or answered. A failure leaves the limits unknown and lets a later call ask
+    /// again; unknown limits refuse nothing, so the queue sends exactly as it did before the
+    /// server published them. A 401 ends the session here as it does everywhere else.
+    public func loadUploadLimits() async {
+        guard let client else { return }
+        let generation = sessionGeneration
+        guard uploadLimitsAsked != generation else { return }
+        uploadLimitsAsked = generation
+        do {
+            let limits = try await Self.uploadLimits(client)
+            guard generation == sessionGeneration else {
+                MemosLog.session.info("GET /api/uploads/limits answered for an ended session")
+                return
+            }
+            uploadLimits = limits
+        } catch {
+            guard generation == sessionGeneration else { return }
+            uploadLimitsAsked = nil
+            if let refusal = StoreFailure.refusal(error) {
+                await handle(refusal)
+                return
+            }
+            MemosLog.session.info("GET /api/uploads/limits did not answer; nothing is refused")
         }
     }
 
@@ -2829,6 +2868,24 @@ public final class SessionStore {
                 avatar: json.avatar
             )
         // Documented since v2.1.0; thrown exactly as its `.undocumented(503)` was.
+        case .serviceUnavailable:
+            throw APIError.fromStatus(503)
+        case .undocumented(let statusCode, _):
+            throw APIError.fromStatus(statusCode)
+        }
+    }
+
+    static func uploadLimits(_ client: any APIProtocol) async throws -> UploadLimits {
+        let response = try await client.uploadLimitsApiUploadsLimitsGet(.init())
+        switch response {
+        case .ok(let ok):
+            MemosLog.session.info("GET /api/uploads/limits -> 200")
+            let json = try ok.body.json
+            return UploadLimits(
+                maxBytes: Int64(json.maxBytes),
+                wifiRecommendedAboveBytes: Int64(json.wifiRecommendedAboveBytes),
+                bodiesPerUser: json.bodiesPerUser
+            )
         case .serviceUnavailable:
             throw APIError.fromStatus(503)
         case .undocumented(let statusCode, _):

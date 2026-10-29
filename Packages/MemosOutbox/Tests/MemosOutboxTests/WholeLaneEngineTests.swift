@@ -4337,3 +4337,43 @@ struct WholeJobDeadlineTimerTests {
         #expect(sleeper.history == [start.addingTimeInterval(60)])
     }
 }
+
+/// The same refusal where the planners are not asked: a fresh session the engine opens for a file
+/// whose old one the server lost (MEMNG-956). The file names a session, so the staged-file check
+/// passes it; only the session request itself can stop it.
+@Suite("Engine: a lost session is not replaced for a file over the server's upload limit")
+struct UploadLimitFreshSessionTests {
+    /// The rig's picture is 1000 bytes and names a session the HEAD answers 404 for.
+    private static func lostSession(limit: Int64) async throws -> WholeRig {
+        let rig = try await WholeRig.make(prepare: WholeResumeTests.resumable(), headStatus: 404)
+        var credentials = Fixture.credentials()
+        credentials.uploadLimit = limit
+        rig.credentials.set(credentials)
+        return rig
+    }
+
+    @Test("one byte over: the HEAD 404 opens no new session, and the capture is held too large")
+    func overTheLimitIsHeld() async throws {
+        let rig = try await Self.lostSession(limit: 999)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        // The HEAD was sent, so the 404 path ran: what it did not do is ask for a session.
+        #expect(rig.http.requests(method: "HEAD").count == 1)
+        #expect(rig.uploadPosts == 0)
+        let saved = try await rig.reload()
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .tooLarge)
+        #expect(saved.lastError == OutboxPlanner.tooLargeMessage(rig.picture, over: 999))
+    }
+
+    @Test("at the limit: the HEAD 404 still opens a fresh session and sends the file")
+    func atTheLimitOpensASession() async throws {
+        let rig = try await Self.lostSession(limit: 1000)
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.uploadPosts == 1)
+        let saved = try await rig.reload()
+        #expect(saved.state != .held)
+        #expect(saved.files[0].uploadUID == "u1")
+    }
+}

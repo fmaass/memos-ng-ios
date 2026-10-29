@@ -126,7 +126,8 @@ extension PickedMedia {
                 "IMG", at: date, extension: format.pathExtension, timeZone: timeZone
             ),
             mime: format.mime,
-            lastModified: date
+            lastModified: date,
+            byteSize: Int64(data.count)
         )
     }
 
@@ -160,7 +161,9 @@ extension PickedMedia {
             url: destination,
             filename: CaptureName.stamped("VID", at: date, extension: suffix, timeZone: timeZone),
             mime: mimeType(forExtension: suffix),
-            lastModified: date
+            lastModified: date,
+            byteSize: (try? destination.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+                .map(Int64.init)
         )
     }
 }

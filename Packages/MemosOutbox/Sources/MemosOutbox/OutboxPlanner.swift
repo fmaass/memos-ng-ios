@@ -49,6 +49,9 @@ public enum OutboxPlanner {
         // reported as, and no screen displays it.
         if job.cancelledAt != nil { return .wait(until: job.nextAttemptAt) }
         if job.state == .held { return .hold(job.holdReason ?? .serverRefused) }
+        // Before the backoff: a file the server has said it will not take is refused while it is
+        // still only staged, so it never costs a `POST /api/uploads` that can only end in a 413.
+        if oversizedFile(in: job, limit: credentials.uploadLimit) != nil { return .hold(.tooLarge) }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
         if let pending = job.files.first(where: { $0.uploadUID == nil }) {
@@ -68,6 +71,46 @@ public enum OutboxPlanner {
         // release that clears the mark drains again (`UploadJob.stagingLaunch`).
         if job.stillArriving { return .wait(until: .distantFuture) }
         return .createMemo
+    }
+
+    /// The first file of `job` that has no upload session yet and is larger than `limit`.
+    ///
+    /// Only a file with no session: one that has a session was already accepted at its size. A
+    /// file exactly at the limit is accepted, as the server accepts it. No limit, or one that is
+    /// not a size at all, refuses nothing — the queue then fails open to the server's 413.
+    public static func oversizedFile(in job: UploadJob, limit: Int64?) -> OutboxFile? {
+        job.files.first { $0.uploadUID == nil && isOverLimit($0, limit: limit) }
+    }
+
+    /// Whether `file` is larger than `limit`, whatever session it holds: the one size rule, which
+    /// the planners apply to a staged file and the engine to every new session it asks for.
+    static func isOverLimit(_ file: OutboxFile, limit: Int64?) -> Bool {
+        guard let limit, limit > 0 else { return false }
+        return file.byteSize > limit
+    }
+
+    /// Both sizes, the file's first: "1.6 GB > 1 GB". The one wording the held row and the compose
+    /// tile share, in the platform's file-size format.
+    public static func sizeComparison(_ size: Int64, over limit: Int64) -> String {
+        let format = { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+        return "\(format(size)) > \(format(limit))"
+    }
+
+    /// What a capture held for a file over the limit says, with both sizes in it; nil when the
+    /// hold is anything else, which keeps its usual sentence.
+    public static func holdMessage(
+        for reason: HoldReason, of job: UploadJob, credentials: OutboxCredentials
+    ) -> String? {
+        guard reason == .tooLarge, let limit = credentials.uploadLimit,
+            let file = oversizedFile(in: job, limit: limit)
+        else { return nil }
+        return tooLargeMessage(file, over: limit)
+    }
+
+    /// The held row's sentence for `file` over `limit`, wherever the refusal was decided.
+    static func tooLargeMessage(_ file: OutboxFile, over limit: Int64) -> String {
+        let sizes = sizeComparison(file.byteSize, over: limit)
+        return "\(sizes): the server will not accept a file this large."
     }
 
     /// Which files a structured refusal implicates, matched by upload uid.

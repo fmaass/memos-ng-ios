@@ -59,12 +59,18 @@ public struct CredentialGrant: Sendable, Equatable {
     public let token: String
     /// The authority epoch this was granted under (`SessionEpoch`).
     public let epoch: Int
+    /// The largest file this session's server accepts, once `SessionStore.loadUploadLimits` has
+    /// read it; nil before, and after a failed read, which refuses nothing.
+    public let uploadLimit: Int64?
 
-    public init(subject: String, serverBaseURL: URL, token: String, epoch: Int) {
+    public init(
+        subject: String, serverBaseURL: URL, token: String, epoch: Int, uploadLimit: Int64? = nil
+    ) {
         self.subject = subject
         self.serverBaseURL = serverBaseURL
         self.token = token
         self.epoch = epoch
+        self.uploadLimit = uploadLimit
     }
 }
 
@@ -165,4 +171,20 @@ public protocol SessionReporting: AnyObject {
     /// asks for that check and decides nothing itself — which is also why every store may call it
     /// on every page it applies without any of them being able to confirm a session between them.
     func noteTransportSuccess(issuedUnder generation: Int)
+}
+
+/// What `GET /api/uploads/limits` says, in the app's own vocabulary.
+public struct UploadLimits: Sendable, Equatable {
+    /// The largest file `POST /api/uploads` accepts; anything larger is answered 413.
+    public let maxBytes: Int64
+    /// Advisory: above this size the server suggests waiting for Wi-Fi. Nothing enforces it.
+    public let wifiRecommendedAboveBytes: Int64
+    /// Upload bodies one user may stream at once.
+    public let bodiesPerUser: Int
+
+    public init(maxBytes: Int64, wifiRecommendedAboveBytes: Int64, bodiesPerUser: Int) {
+        self.maxBytes = maxBytes
+        self.wifiRecommendedAboveBytes = wifiRecommendedAboveBytes
+        self.bodiesPerUser = bodiesPerUser
+    }
 }

@@ -88,6 +88,9 @@ struct PickedThumbnailRow: View {
     /// the switch: a row drawn anywhere but an edit sheet has no save to state a shorter list on,
     /// so an x there would be an affordance that did nothing.
     var removeExisting: ((String) -> Void)? = nil
+    /// The server's `max_bytes` for this session, or nil when it is not known — which captions
+    /// nothing.
+    var maxUploadBytes: Int64? = nil
 
     @ScaledMetric(relativeTo: .body) private var tile = DesignTokens.Metric.pickedThumbnail
 
@@ -103,6 +106,7 @@ struct PickedThumbnailRow: View {
                     case .picked(let attachment):
                         PickedThumbnail(
                             attachment: attachment, size: tile,
+                            maxUploadBytes: maxUploadBytes,
                             retry: { retry(attachment.id) },
                             remove: { remove(attachment.id) })
                     }
@@ -161,6 +165,7 @@ struct ExistingThumbnail: View {
 struct PickedThumbnail: View {
     let attachment: ComposeAttachment
     let size: CGFloat
+    var maxUploadBytes: Int64? = nil
     var retry: () -> Void = {}
     var remove: () -> Void = {}
 
@@ -192,7 +197,7 @@ struct PickedThumbnail: View {
         .frame(width: size, height: size)
         .clipShape(.rect(cornerRadius: DesignTokens.Radius.tile))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(Self.accessibilityLabel(for: attachment))
+        .accessibilityLabel(Self.accessibilityLabel(for: attachment, limit: maxUploadBytes))
         // Over the merged element rather than inside it. A control the tile has already folded
         // into its one element is no longer a control: it is an action on the picture, which is
         // not what a thing you press in the corner of it is.
@@ -253,6 +258,20 @@ struct PickedThumbnail: View {
             .frame(width: size, height: size, alignment: .bottom)
             .background(.black.opacity(0.35))
             .foregroundStyle(.white)
+        } else if let oversize = Self.oversizeCaption(for: attachment, limit: maxUploadBytes) {
+            // Not a failure: the copy is fine, the server will not take it. No "Try again" —
+            // the fix is the x in the corner, and the queue holds it as too large if it is sent.
+            VStack(spacing: 2) {
+                Spacer()
+                Text(oversize)
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(2)
+            .frame(width: size, height: size, alignment: .bottom)
+            .background(.black.opacity(0.35))
+            .foregroundStyle(.white)
         } else if attachment.isLoading {
             ProgressView()
                 .controlSize(.small)
@@ -269,10 +288,24 @@ struct PickedThumbnail: View {
     /// starts nothing at all.
     static func thumbnailKey(for attachment: ComposeAttachment) -> URL? { attachment.media?.url }
 
+    /// Both sizes, "1.6 GB > 1 GB", when this file is larger than the server's limit; nil when
+    /// either size is unknown or the file fits.
+    static func oversizeCaption(for attachment: ComposeAttachment, limit: Int64?) -> String? {
+        guard let limit, limit > 0, let size = attachment.media?.byteSize, size > limit else {
+            return nil
+        }
+        return OutboxPlanner.sizeComparison(size, over: limit)
+    }
+
     /// What a screen reader hears, which never leaves a state to a picture.
-    static func accessibilityLabel(for attachment: ComposeAttachment) -> String {
+    static func accessibilityLabel(for attachment: ComposeAttachment, limit: Int64? = nil)
+        -> String
+    {
         if let failure = attachment.failure {
             return "\(attachment.label): \(failure.accessibilityLabel). Try again"
+        }
+        if let oversize = oversizeCaption(for: attachment, limit: limit) {
+            return "\(attachment.label): too large to send, \(oversize)"
         }
         if attachment.isLoading { return "\(attachment.label): loading" }
         return attachment.label

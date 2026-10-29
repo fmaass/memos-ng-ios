@@ -16,12 +16,21 @@ public struct OutboxCredentials: Sendable, Equatable {
     /// to be told whether it still stands. Zero for a provider that has no session behind it — the
     /// share extension, which is fenced by the account licence instead.
     public var epoch: Int
+    /// The largest file the server said this session may start an upload of (`max_bytes` from
+    /// `GET /api/uploads/limits`). Nil while it is not known — never asked, or the ask failed — and
+    /// then nothing is refused for its size: the queue sends as it always has and the server's 413
+    /// stays the backstop. Not part of what makes credentials current; `epoch` alone is that.
+    public var uploadLimit: Int64?
 
-    public init(serverBaseURL: URL, ownerSubject: String, token: String, epoch: Int = 0) {
+    public init(
+        serverBaseURL: URL, ownerSubject: String, token: String, epoch: Int = 0,
+        uploadLimit: Int64? = nil
+    ) {
         self.serverBaseURL = serverBaseURL
         self.ownerSubject = ownerSubject
         self.token = token
         self.epoch = epoch
+        self.uploadLimit = uploadLimit
     }
 
     public var binding: AccountBinding {

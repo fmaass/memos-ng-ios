@@ -55,13 +55,18 @@ filter:
     - get_export_settings_api_admin_export_settings_get
     - get_memo_api_memos__uid__get
     - get_memo_compat_api_v1_memos__memo_id__get
+    - get_pass_api_passes__uid__get
     - get_settings_api_settings_get
     - health_health_get
+    - hide_contributions_api_passes__uid__contributions_hide_post
     - include_attachment_api_collections__uid__exclusions__attachment_uid__delete
     - include_attachments_api_collections__uid__attachments_post
+    - issue_pass_api_collections__uid__passes_post
     - list_attachments_api_attachments_get
     - list_collection_covers_api_collection_covers_get
     - list_collections_api_collections_get
+    - list_contributions_api_passes__uid__contributions_get
+    - list_devices_api_passes__uid__devices_get
     - list_digest_recipients_api_admin_digest_recipients_get
     - list_digest_runs_api_admin_digest_runs_get
     - list_markers_api_map_markers_get
@@ -69,6 +74,7 @@ filter:
     - list_members_api_members_get
     - list_memos_api_memos_get
     - list_memos_compat_api_v1_memos_get
+    - list_passes_api_collections__uid__passes_get
     - list_pats_api_pats_get
     - list_renditions_api_attachments__uid__renditions_get
     - list_tags_api_tags_get
@@ -85,10 +91,13 @@ filter:
     - put_digest_settings_api_admin_digest_settings_put
     - put_export_settings_api_admin_export_settings_put
     - react_api_memos__uid__reactions_post
+    - remove_contributions_api_passes__uid__contributions_remove_post
     - remove_digest_recipient_api_admin_digest_recipients__recipient_id__delete
     - remove_member_api_collections__uid__members__attachment_uid__delete
     - remove_picture_tag_api_attachments__uid__tags__name__delete
     - rename_native_token_api_auth_native_token_patch
+    - revoke_device_api_passes__uid__devices__device_uid__delete
+    - revoke_pass_api_passes__uid__delete
     - revoke_pat_api_pats__pat_id__delete
     - run_digest_now_api_admin_digest_run_post
     - serve_asset_api_attachments__uid___tier__get
@@ -99,13 +108,16 @@ filter:
     - stats_heatmap_api_stats_heatmap_get
     - subscribe_api_push_subscribe_post
     - test_send_digest_api_admin_digest_test_send_post
+    - unhide_contributions_api_passes__uid__contributions_unhide_post
     - unpin_memo_api_memos__uid__unpin_post
     - unreact_api_memos__uid__reactions__emoji__delete
     - unsubscribe_api_push_subscribe_delete
     - update_collection_api_collections__uid__patch
     - update_digest_recipient_api_admin_digest_recipients__recipient_id__patch
+    - update_pass_api_passes__uid__patch
     - update_settings_api_settings_patch
     - upload_capture_api_uploads__upload_uid__capture_get
+    - upload_limits_api_uploads_limits_get
     - upload_offset_api_uploads__upload_uid__head
     - upload_print_api_attachments__uid__print_post
     - vapid_public_key_api_push_vapid_public_key_get
