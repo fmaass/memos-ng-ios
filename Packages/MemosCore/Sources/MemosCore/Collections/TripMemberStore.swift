@@ -477,12 +477,12 @@ public final class TripMemberStore {
         }
     }
 
-    /// What a scope's drain reads, and so what its grid shows with nothing chosen (MEMNG-919): a
-    /// month's and a year's own pictures — another member's are there only to fill out a trip —
-    /// every other scope's everyone's. A month, a year, a tag and Favorites read Public pictures
-    /// only (MEMNG-933): a Just us picture is seen inside its trip or album and nowhere else, so a
-    /// trip and an album keep `unfiltered`. The filter menu starts on it, and a query equal to it
-    /// sends no read of its own.
+    /// What a scope's drain reads, and so what its grid shows with nothing chosen: everyone's
+    /// pictures in every scope (the owner, 2026-10-28) — "Captured by me" narrows to my own only
+    /// when chosen. A month, a year, a tag and Favorites read Public pictures only (MEMNG-933): a
+    /// Just us picture is seen inside its trip or album and nowhere else, so a trip and an album
+    /// keep `unfiltered`. The filter menu starts on it, and a query equal to it sends no read of
+    /// its own.
     public static func drainQuery(for scope: CollectionScope) -> TripMemberQuery {
         request(for: scope).map(drainQuery) ?? .unfiltered
     }
@@ -490,13 +490,12 @@ public final class TripMemberStore {
     private static func drainQuery(_ request: MemberRequest) -> TripMemberQuery {
         switch request {
         case .trip: return .unfiltered
-        case .period: return .myOwnPublic
-        case .tag, .pictureTag: return .everyonePublic
+        case .period, .tag, .pictureTag: return .everyonePublic
         }
     }
 
     /// An automatic collection's drain: `walkAutomatic` under its `drainQuery` — every kind,
-    /// oldest taken first, a month's and a year's own pictures only — into the members the hero
+    /// oldest taken first, everyone's Public pictures — into the members the hero
     /// and the Map read. The Journal reads memos of its own (`loadJournal`).
     private func runAutomaticDrain(
         _ lineage: Lineage, token: Int, _ handle: SessionHandle, _ baseURL: URL
@@ -1460,12 +1459,8 @@ public struct TripMemberQuery: Sendable, Hashable {
 
     public var isUnfiltered: Bool { self == .unfiltered }
 
-    /// Every kind, oldest taken first, my own pictures of Public memos: what a month's and a
-    /// year's drain reads (MEMNG-919, MEMNG-933).
-    public static let myOwnPublic = TripMemberQuery(mine: true, visibility: .public)
-
-    /// Every kind, oldest taken first, everyone's pictures of Public memos: what a tag's and
-    /// Favorites' drain reads (MEMNG-933).
+    /// Every kind, oldest taken first, everyone's pictures of Public memos: what a month's, a
+    /// year's, a tag's and Favorites' drain reads (MEMNG-933).
     public static let everyonePublic = TripMemberQuery(visibility: .public)
 
     /// Every kind, everyone's, any visibility, newest first: the drain's members in the other

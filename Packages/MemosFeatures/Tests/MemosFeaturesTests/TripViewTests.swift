@@ -2594,7 +2594,10 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             let attached = uids.map { reference($0, sig: sig) }
             let other = theirs.contains(memo.uid)
             let owner = other ? "anna" : "fabian"
-            let visibility = other ? "PROTECTED" : "PRIVATE"
+            // A `visibility=PUBLIC` read is answered with Public memos, as the server keeps only
+            // those; Just us never reaches a month's, a year's or a tag's Journal (MEMNG-933).
+            let open = query["visibility"] == "PUBLIC"
+            let visibility = open ? "PUBLIC" : other ? "PROTECTED" : "PRIVATE"
             return """
                 {"uid":"\(memo.uid)","owner":"\(owner)","mine":\(!other),"content":"\(memo.text)",\
                 "visibility":"\(visibility)","pinned":false,"created_at":"\(stamp)",\

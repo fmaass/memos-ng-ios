@@ -502,8 +502,9 @@ struct MediaLibraryJumpTests {
         try #require(store.items.map(\.id) == ["d1", "d2"], "control: the jump landed")
     }
 
-    /// MEMNG-919 builds the Library with `mine` on: a jump on that list, the rows above it and the
-    /// pages below it all keep asking for the account's own pictures only, from the same bucket.
+    /// "Captured by me" checked on the Library (MEMNG-787): a jump on that list, the rows above it
+    /// and the pages below it all keep asking for the account's own pictures only, from the same
+    /// bucket.
     @Test("a jump on a mine-only list keeps mine on its bucket start, the rows above and below")
     func aMineOnlyJumpKeepsMine() async throws {
         let paths = LockedValue<[String]>([])

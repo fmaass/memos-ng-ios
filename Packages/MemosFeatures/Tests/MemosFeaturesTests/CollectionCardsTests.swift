@@ -239,15 +239,16 @@ struct CollectionCardsTests {
         #expect(wire.transport.coverReads() == 0, "\(wire.transport.sent)")
     }
 
-    // MARK: - My own pictures outside a trip (MEMNG-919)
+    // MARK: - Everyone's Public pictures outside a trip (MEMNG-933)
 
-    @Test("a month card and a year card count and cover my own Public pictures: mine, PUBLIC")
-    func periodCardsAreMyOwn() async {
+    @Test("a month card and a year card count and cover everyone's Public pictures: no mine")
+    func periodCardsAreEveryones() async {
         let wire = CollectionsWire()
         wire.transport.answerTags("[]")
+        // What a Captured by me read would count: my own pictures alone.
         wire.transport.answerMonths("[\(Self.bucket("2026-03", 3, cover: "p0"))]")
         wire.transport.answerYears("[\(Self.bucket("2026", 3, cover: "p0"))]")
-        // Another member's picture of March counted in, and the cover, for everyone's reads.
+        // Everyone's: another member's picture of March counted in, and the cover.
         wire.transport.answerEveryone(
             months: "[\(Self.bucket("2026-03", 4, cover: "fam"))]",
             years: "[\(Self.bucket("2026", 4, cover: "fam"))]")
@@ -259,16 +260,16 @@ struct CollectionCardsTests {
                     && screen.element(labelled: "2026") != nil
             }
             #expect(shown, "the cards never appeared: \(wire.transport.sent)")
-            #expect(screen.element(labelled: "Mar 2026")?.accessibilityValue == "3 items")
-            #expect(screen.element(labelled: "2026")?.accessibilityValue == "3 items")
+            #expect(screen.element(labelled: "Mar 2026")?.accessibilityValue == "4 items")
+            #expect(screen.element(labelled: "2026")?.accessibilityValue == "4 items")
             let own = CollectionCard.coverIdentifier("p0")
             let theirs = CollectionCard.coverIdentifier("fam")
-            #expect(CollectionsHost.identified(own, in: screen.window), "no own cover")
-            #expect(!CollectionsHost.identified(theirs, in: screen.window), "a family cover")
+            #expect(CollectionsHost.identified(theirs, in: screen.window), "no everyone cover")
+            #expect(!CollectionsHost.identified(own, in: screen.window), "a Captured by me cover")
         }
         let reads = wire.transport.sent.filter { $0.hasPrefix("attachment_buckets") }
         #expect(reads.count == 2, "one month and one year read: \(reads)")
-        #expect(reads.allSatisfy { $0.contains("mine=true") }, "an everyone read: \(reads)")
+        #expect(reads.allSatisfy { !$0.contains("mine=") }, "a Captured by me read: \(reads)")
         // Public only (MEMNG-933): a Just us picture is counted and covered only in its trip.
         #expect(reads.allSatisfy { $0.contains("visibility=PUBLIC") }, "a Just us read: \(reads)")
     }

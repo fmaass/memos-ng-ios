@@ -5,14 +5,16 @@ import MemosAPI
 import OpenAPIRuntime
 import Testing
 
-/// Outside a trip the library is my own pictures (MEMNG-919) of Public memos (MEMNG-933): the REAL
-/// `TripMemberStore` reading a month's and a year's members with `mine=true` and
+/// Outside a trip a month and a year start on everyone's pictures of Public memos (the owner,
+/// 2026-10-28; MEMNG-933 keeps a Just us picture inside its trip or album): the REAL
+/// `TripMemberStore` reading a month's and a year's members with no `mine` and
 /// `visibility=PUBLIC` on the wire, over a scripted listing that answers as `GET /api/attachments`
 /// does — another household member's picture inside the period is listed for everyone's read and
 /// left out of a `mine=true` one, and my own Just us picture is left out of a `PUBLIC` one.
+/// "Captured by me" stays a choice that narrows to my own.
 @MainActor
-@Suite("Collection scope — a month and a year are my own pictures")
-struct MineOnlyPeriodTests {
+@Suite("Collection scope — a month and a year start on everyone's Public pictures")
+struct EveryonePeriodTests {
     private let seeder = TripSeeder()
 
     /// Another member's picture, taken inside September 2026.
@@ -55,9 +57,9 @@ struct MineOnlyPeriodTests {
     }
 
     @Test(
-        "a month's and a year's drain reads mine=true, PUBLIC and holds neither theirs nor Just us",
+        "a month's and a year's drain reads no mine, PUBLIC: theirs too, never Just us",
         arguments: periods)
-    func aPeriodDrainsMyOwn(_ kind: String) async throws {
+    func aPeriodDrainsEveryonesPublic(_ kind: String) async throws {
         let scope = Self.period(kind)
         let paths = LockedValue<[String]>([])
         let client = Self.server(paths)
@@ -66,12 +68,12 @@ struct MineOnlyPeriodTests {
 
         #expect(!paths.get().isEmpty, "the drain sent nothing")
         for path in paths.get() {
-            #expect(TripWire.query(path, "mine") == "true", "an everyone read: \(path)")
+            #expect(TripWire.query(path, "mine") == nil, "a Captured by me read: \(path)")
             #expect(TripWire.query(path, "visibility") == "PUBLIC", "a Just us read: \(path)")
             #expect(TripWire.hasQuery(path, "bucket"), "\(path)")
         }
-        #expect(members.members(for: scope).map(\.id) == ["pic-1", "pic-2"])
-        let start = TripMemberQuery(mine: true, visibility: .public)
+        #expect(members.members(for: scope).map(\.id) == ["pic-1", Self.family, "pic-2"])
+        let start = TripMemberQuery(visibility: .public)
         #expect(TripMemberStore.drainQuery(for: scope) == start)
         // The grid's first choice is the drain itself: no read of its own, the drain's rows.
         let sent = paths.get().count
@@ -79,14 +81,14 @@ struct MineOnlyPeriodTests {
             scope, query: start, using: client.handle, baseURL: Stub.baseURL)
         #expect(paths.get().count == sent, "the drain's own query read again: \(paths.get())")
         let shown = try #require(members.filteredMembers(for: scope, query: start))
-        #expect(shown.map(\.id) == ["pic-1", "pic-2"])
+        #expect(shown.map(\.id) == ["pic-1", Self.family, "pic-2"])
         #expect(members.filteredState(for: scope, query: start) == .complete)
     }
 
     @Test(
-        "unchecking Captured by me on a month or a year reads everyone's, the family picture too",
+        "checking Captured by me on a month or a year reads mine=true: my own Public pictures only",
         arguments: periods)
-    func uncheckingReadsEveryone(_ kind: String) async throws {
+    func checkingNarrowsToMyOwn(_ kind: String) async throws {
         let scope = Self.period(kind)
         let paths = LockedValue<[String]>([])
         let client = Self.server(paths)
@@ -94,21 +96,21 @@ struct MineOnlyPeriodTests {
         await members.drain(scope, using: client.handle, baseURL: Stub.baseURL)
         let drained = paths.get().count
 
-        let everyone = TripMemberQuery.unfiltered
+        let mine = TripMemberQuery(mine: true, visibility: .public)
         await members.drainFiltered(
-            scope, query: everyone, using: client.handle, baseURL: Stub.baseURL)
+            scope, query: mine, using: client.handle, baseURL: Stub.baseURL)
 
         let read = try #require(paths.get().dropFirst(drained).first, "no read of its own")
-        #expect(TripWire.query(read, "mine") == nil, "\(read)")
-        #expect(TripWire.query(read, "visibility") == nil, "\(read)")
-        let shown = try #require(members.filteredMembers(for: scope, query: everyone))
-        #expect(shown.map(\.id) == ["pic-1", Self.family, Self.justUs, "pic-2"])
-        #expect(members.filteredState(for: scope, query: everyone) == .complete)
-        // The hero and the Map read the drain, which the choice never widens.
-        #expect(members.members(for: scope).map(\.id) == ["pic-1", "pic-2"])
+        #expect(TripWire.query(read, "mine") == "true", "\(read)")
+        #expect(TripWire.query(read, "visibility") == "PUBLIC", "\(read)")
+        let shown = try #require(members.filteredMembers(for: scope, query: mine))
+        #expect(shown.map(\.id) == ["pic-1", "pic-2"])
+        #expect(members.filteredState(for: scope, query: mine) == .complete)
+        // The hero and the Map read the drain, which the choice never narrows.
+        #expect(members.members(for: scope).map(\.id) == ["pic-1", Self.family, "pic-2"])
     }
 
-    @Test("Newest First on a month is its own drain turned round, with no read of its own")
+    @Test("Newest First on a month is its everyone's drain turned round, with no read of its own")
     func newestFirstTurnsTheOwnDrain() async throws {
         let scope = Self.period("month")
         let paths = LockedValue<[String]>([])
@@ -117,16 +119,18 @@ struct MineOnlyPeriodTests {
         await members.drain(scope, using: client.handle, baseURL: Stub.baseURL)
         let drained = paths.get().count
 
-        let start = TripMemberQuery(mine: true, visibility: .public)
-        let newest = TripMemberQuery(order: .newestFirst, mine: true, visibility: .public)
+        let start = TripMemberQuery(visibility: .public)
+        let newest = TripMemberQuery(order: .newestFirst, visibility: .public)
         #expect(newest.isOrderOnly(over: start))
-        #expect(!TripMemberQuery(order: .newestFirst, mine: true).isOrderOnly(over: start))
+        #expect(
+            !TripMemberQuery(order: .newestFirst, mine: true, visibility: .public)
+                .isOrderOnly(over: start))
         await members.drainFiltered(
             scope, query: newest, using: client.handle, baseURL: Stub.baseURL)
 
         #expect(paths.get().count == drained, "a read for the order alone: \(paths.get())")
         let shown = try #require(members.filteredMembers(for: scope, query: newest))
-        #expect(shown.map(\.id) == ["pic-2", "pic-1"])
+        #expect(shown.map(\.id) == ["pic-2", Self.family, "pic-1"])
         #expect(members.filteredState(for: scope, query: newest) == .complete)
     }
 
@@ -170,36 +174,71 @@ struct MineOnlyPeriodTests {
         #expect(members.members(for: album).count == 2)
     }
 
-    // MARK: - The Journal (MEMNG-919)
+    // MARK: - The Journal (MEMNG-817)
 
     /// Whose a memo is, as the memo list says it: mine, or another member's.
     nonisolated static let ownMemo = #""owner":"fabian","mine":true"#
     nonisolated static let familyMemo = #""owner":"anna","mine":false"#
 
-    /// One of my memos and one of another member's (Just us), both dated in September 2026.
-    nonisolated static let journalPage: String = Stub.page([
-        CollectionScopeJournalTests.memo("mine-memo", "2026-09-03T10:00:00Z"),
-        CollectionScopeJournalTests.memo("family-memo", "2026-09-04T10:00:00Z")
-            .replacingOccurrences(of: Self.ownMemo, with: Self.familyMemo)
-            .replacingOccurrences(of: #""PRIVATE""#, with: #""PROTECTED""#),
-    ])
+    /// One of my Public memos, one of another member's Public ones and one of theirs that is Just
+    /// us, dated in September 2026.
+    nonisolated static let journalMemos: [(memo: String, open: Bool)] = [
+        (
+            CollectionScopeJournalTests.memo("mine-memo", "2026-09-03T10:00:00Z")
+                .replacingOccurrences(of: #""PRIVATE""#, with: #""PUBLIC""#), true
+        ),
+        (
+            CollectionScopeJournalTests.memo("family-memo", "2026-09-04T10:00:00Z")
+                .replacingOccurrences(of: Self.ownMemo, with: Self.familyMemo)
+                .replacingOccurrences(of: #""PRIVATE""#, with: #""PUBLIC""#), true
+        ),
+        (
+            CollectionScopeJournalTests.memo("family-us", "2026-09-05T10:00:00Z")
+                .replacingOccurrences(of: Self.ownMemo, with: Self.familyMemo)
+                .replacingOccurrences(of: #""PRIVATE""#, with: #""PROTECTED""#), false
+        ),
+    ]
+
+    /// The memo list as the server answers it: `visibility=PUBLIC` keeps the Public memos only.
+    nonisolated static func journalServer(_ paths: LockedValue<[String]>) -> any APIProtocol {
+        CollectionScopeDrainTests.bounded { request, _, operation in
+            let path = request.path ?? ""
+            paths.set(paths.get() + [path])
+            #expect(operation == TripJournalWire.memos, "not the memo list: \(operation)")
+            let open = TripWire.query(path, "visibility") == "PUBLIC"
+            return Stub.json(Stub.page(journalMemos.filter { !open || $0.open }.map(\.memo)))
+        }
+    }
+
+    nonisolated static let journals = periods + ["tag"]
+
+    static func journalScope(_ kind: String) -> CollectionScope {
+        kind == "tag" ? CollectionScopeDrainTests.scope(.tag("lisbon")) : period(kind)
+    }
 
     @Test(
-        "a month's and a year's Journal is my own memos while Captured by me is on",
-        arguments: periods)
-    func aPeriodJournalIsMyOwn(_ kind: String) async {
+        "a month's, a year's and a tag's Journal start on everyone's Public memos, never Just us",
+        arguments: journals)
+    func aJournalStartsOnEveryonesPublic(_ kind: String) async {
         let paths = LockedValue<[String]>([])
-        let client = CollectionScopeJournalTests.memos(paths) { _ in Stub.json(Self.journalPage) }
+        let client = Self.journalServer(paths)
         let (_, store) = await seeder.members()
-        let scope = Self.period(kind)
+        let scope = Self.journalScope(kind)
         await store.loadJournal(scope, using: client.handle, baseURL: Stub.baseURL)
 
-        #expect(store.journal(for: scope).map(\.uid) == ["mine-memo"], "the screen's start")
-        #expect(store.journal(for: scope, mine: true).map(\.uid) == ["mine-memo"])
-        // Unchecked on purpose: everyone's memos, from the same read.
+        #expect(!paths.get().isEmpty, "no memo read")
+        for path in paths.get() {
+            #expect(TripWire.query(path, "visibility") == "PUBLIC", "a Just us read: \(path)")
+        }
+        let everyone = ["mine-memo", "family-memo"]
+        #expect(store.journal(for: scope).map(\.uid) == everyone, "the screen's start")
+        #expect(store.journal(for: scope, mine: false).map(\.uid) == everyone)
+        // Checked on purpose: a period narrows to my own memos from the same read; a tag's
+        // Journal takes no such choice (`journal(for:mine:)`).
         let read = paths.get().count
-        #expect(store.journal(for: scope, mine: false).map(\.uid) == ["mine-memo", "family-memo"])
-        #expect(paths.get().count == read, "widening read again: \(paths.get())")
+        let checked = kind == "tag" ? everyone : ["mine-memo"]
+        #expect(store.journal(for: scope, mine: true).map(\.uid) == checked)
+        #expect(paths.get().count == read, "narrowing read again: \(paths.get())")
     }
 
     @Test("a trip's Journal over the same days keeps another member's memo, checked or not")
