@@ -75,6 +75,10 @@ public final class Outbox {
     /// change the answer — the network moving and the toggle — never polled.
     public private(set) var uploadVerdict: UploadVerdict = .permitted
 
+    /// The queue as the transfers strip and sheet show it, fed every read `refresh` applies under
+    /// that read's ticket, so a read that began earlier and answered later is refused there.
+    public let transfers: TransferLedger
+
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
     private let network: any NetworkPathProviding
@@ -140,6 +144,7 @@ public final class Outbox {
         self.credentials = credentials
         self.network = network
         self.uploadPreferences = preferences
+        self.transfers = TransferLedger(clock: clock)
         self.engine = OutboxEngine(
             repository: repository,
             credentials: credentials,
@@ -309,6 +314,7 @@ public final class Outbox {
             let loaded = try await repository.loadJobs()
             jobs = loaded
             noteProgress(in: loaded)
+            transfers.apply(loaded, generation: ticket)
             queueError = nil
             queueReadSucceeded = max(queueReadSucceeded, ticket)
             owedEdits = owedEdits.compactMapValues { owed -> OwedEdit? in
