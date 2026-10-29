@@ -169,11 +169,12 @@ new_case() {
   ART="$CASE_DIR/artifacts"
   LEDGER="$CASE_DIR/gate-runs.tsv"
 }
-gate_env() { # $1 = stub dir; reads HOST, and MAPV, SINGLE, PAUSE, UNREACH, DOWN_AFTER when set
+gate_env() { # $1 = stub dir; reads HOST, and MAPV, SINGLE, PAUSE, UNREACH, DOWN_AFTER, POLL when set
+  # POLL is the busy router's poll interval (MAC_GATE_HOST_POLL), 1 s unless a case needs longer.
   GATE_ENV=(env -u MAC_GATE_BRANCH -u MAC_GATE_RUN_COPY -u MAC_GATE_ESTATE_LOCK -u MAC_GATE_ESTATE_LOCKS
     -u MAC_GATE_ESTATE_LOCK_STAMPS -u MAC_GATE_RUNS_LOGS -u MAC_GATE_SELFTEST_PAUSE_DIR
     -u MAC_GATE_HOST_ROUTE -u MAC_GATE_RUN_LOCK -u MAC_GATE_RUN_LOCK_WAIT
-    "PATH=$1/bin:$PATH" TMPDIR="$1/tmp"
+    "PATH=$1/bin:$PATH" TMPDIR="$1/tmp" MAC_GATE_HOST_POLL="${POLL:-1}"
     MAC_GATE_HOST="$HOST" MAC_GATE_ARTIFACTS="$ART" MAC_GATE_RUNS_LEDGER="$LEDGER" STUB_DIR="$1"
     STUB_REMOTE_OUT="$REMOTE_TXT" STUB_UNREACHABLE="${UNREACH:-}" STUB_DOWN_AFTER="${DOWN_AFTER:-}")
   [ -z "${MAPV:-}" ] || GATE_ENV+=(MAC_GATE_ESTATE_LOCKS="$MAPV")
@@ -205,16 +206,30 @@ wait_for_file() { # $1 = path, $2 = pid that must stay alive meanwhile
     sleep 0.05
   done
 }
-blocked_in_flock() {
-  ps -e -o pid=,ppid=,comm= | awk -v root="$1" '
+descendant_named() { # $1 = pid, $2 = command name; 0 when a descendant of $1 runs it
+  ps -e -o pid=,ppid=,comm= | awk -v root="$1" -v want="$2" '
     { parent[$1] = $2; name[$1] = $3 }
     END {
       for (p in name) {
-        if (name[p] != "flock") continue
+        if (name[p] != want) continue
         q = p
         while (q in parent && q != 1 && q != 0) { q = parent[q]; if (q == root) { print p; exit } }
       }
     }' | grep -q .
+}
+blocked_in_flock() { descendant_named "$1" flock; }
+# The auto router with every host busy (MEMNG-1040): it has announced the wait and sleeps between
+# two rounds of `flock -n` on every host of its wait set — never inside a blocking flock.
+polling() { # $1 = pid, $2 = its output file
+  grep -q 'every build host is busy' "$2" 2>/dev/null && descendant_named "$1" sleep
+}
+wait_polling() { # $1 = pid, $2 = its output file
+  local n=0
+  until polling "$1" "$2"; do
+    kill -0 "$1" 2>/dev/null || return 1
+    n=$((n + 1)); [ "$n" -le 400 ] || return 1
+    sleep 0.05
+  done
 }
 wait_blocked() { # $1 = pid
   local n=0
@@ -312,36 +327,69 @@ fi
 new_case both-held
 hold merkur && hold mars || bad "both-held: the stand-ins could not take both locks"
 HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
-if wait_blocked "$PID"; then
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
   sleep 3
-  blocked_in_flock "$PID" && b3=yes || b3=no
+  kill -0 "$PID" 2>/dev/null && [ -z "$(route_of "$(cat "$CASE_DIR/out.txt")")" ] && b3=yes || b3=no
   release merkur
   wait_gone "$PID" 1200
   rc=$?
   out="$(cat "$CASE_DIR/out.txt")"
   r="$(route_of "$out")"
-  if [ "$b3" = yes ] && [ "$rc" -eq 0 ] && [[ "$r" == "host=merkur reason=busy:both -> waited on merkur (first in order) "* ]] \
+  if [ "$b3" = yes ] && [ "$rc" -eq 0 ] && [[ "$r" == "host=merkur reason=busy:both -> waited on merkur (first free) "* ]] \
      && [ "$(field "$(last_row)" 13)" = merkur ]; then
-    ok "both held: blocked 3 s, then ran on merkur once released: route [$r]"
+    ok "both held: waited 3 s, then ran on merkur once released: route [$r]"
   else
     bad "both held: still blocked at 3 s [$b3], route [$r]"; show "$out"
   fi
 else
-  bad "both held: the run never blocked on a lock"; show "$(cat "$CASE_DIR/out.txt")"
+  bad "both held: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
 fi
 release mars; release merkur
 
+# --- case 3b: both held; MARS released → the waiting run takes mars within one poll (MEMNG-1040) --
+# The run waits with merkur first in map order and no warm marker, so a router that blocks on one
+# host would sit on merkur's lock however long mars stays free. Poll 2 s; the bound is 3 polls.
+new_case both-held-mars-frees
+hold merkur && hold mars || bad "both-held-mars-frees: the stand-ins could not take both locks"
+POLL=2 HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
+  t_free="$(date +%s)"
+  release mars
+  if wait_gone "$PID" 120; then
+    took=$(( $(date +%s) - t_free ))
+    out="$(cat "$CASE_DIR/out.txt")"; r="$(route_of "$out")"
+    if [[ "$r" == "host=mars reason=busy:both -> waited on mars (first free) "* ]] && ! is_free "$L_MERKUR" \
+       && [ "$(field "$(last_row)" 13)" = mars ]; then
+      ok "both held, mars freed first: the run took mars within one poll (${took}s), merkur still held: route [$r]"
+    else
+      bad "both held, mars freed first: route [$r]"; show "$out"
+    fi
+  else
+    bad "both held, mars freed first: the run did not take mars within 6 s — it stays on merkur's queue"
+    show "$(cat "$CASE_DIR/out.txt")"
+  fi
+else
+  bad "both held, mars freed first: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
+fi
+release merkur; release mars
+wait_gone "$PID" 1200
+
 # --- cases 4-6: both held; the warm marker decides only when fresh and of this branch ------------
-warm_case() { # $1 = label, $2 = marker text, $3 = the host the run must wait on
-  local label="$1" marker="$2" want="$3" r out
+# The marker is the tie-break when several hosts are free at one poll: both locks go free while
+# the run sleeps between two polls (3 s), the host it must NOT take first, so the next poll sees
+# both free and the order of the releases cannot decide.
+warm_case() { # $1 = label, $2 = marker text, $3 = the host the run must take
+  local label="$1" marker="$2" want="$3" other r out
   new_case "warm-$4"
   mkdir -p "$ART"
   printf '%s\n' "$marker" > "$ART/lane-host"
   hold merkur && hold mars || bad "$label: the stand-ins could not take both locks"
-  HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
-  if ! wait_blocked "$PID"; then
-    bad "$label: the run never blocked"; show "$(cat "$CASE_DIR/out.txt")"; release merkur; release mars; return
+  POLL=3 HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
+  if ! wait_polling "$PID" "$CASE_DIR/out.txt"; then
+    bad "$label: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"; release merkur; release mars; return
   fi
+  if [ "$want" = merkur ]; then other=mars; else other=merkur; fi
+  release "$other"
   release "$want"
   if wait_gone "$PID" 400; then
     out="$(cat "$CASE_DIR/out.txt")"; r="$(route_of "$out")"
@@ -350,7 +398,7 @@ warm_case() { # $1 = label, $2 = marker text, $3 = the host the run must wait on
       *) bad "$label: route [$r]"; show "$out" ;;
     esac
   else
-    bad "$label: releasing $want did not let the run go — it waits on the other host"
+    bad "$label: releasing both did not let the run go"
   fi
   release merkur; release mars
   wait_gone "$PID" 1200
@@ -370,18 +418,18 @@ fi
 new_case mars-unreachable
 hold merkur || bad "mars-unreachable: the stand-in could not take merkur's lock"
 UNREACH=mars HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
-if wait_blocked "$PID"; then
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
   is_free "$L_MARS" && mars_free=yes || mars_free=no
   release merkur
   wait_gone "$PID" 1200
   out="$(cat "$CASE_DIR/out.txt")"; r="$(route_of "$out")"
-  if [ "$mars_free" = yes ] && [[ "$r" == "host=merkur reason=busy:merkur (mars unreachable) -> waited on merkur (first in order) "* ]]; then
+  if [ "$mars_free" = yes ] && [[ "$r" == "host=merkur reason=busy:merkur (mars unreachable) -> waited on merkur (first free) "* ]]; then
     ok "merkur held, mars unreachable: mars's lock let go, waited on merkur: route [$r]"
   else
     bad "merkur held, mars unreachable: mars free while waiting [$mars_free], route [$r]"; show "$out"
   fi
 else
-  bad "merkur held, mars unreachable: the run never blocked"; show "$(cat "$CASE_DIR/out.txt")"
+  bad "merkur held, mars unreachable: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
 fi
 release merkur
 
@@ -399,10 +447,10 @@ fi
 new_case lost-during-wait
 hold merkur && hold mars || bad "lost-during-wait: the stand-ins could not take both locks"
 DOWN_AFTER=merkur:1 HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
-if wait_blocked "$PID"; then
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
   release merkur
   n=0
-  until [ "$(grep -c '^probe merkur$' "$SD/calls")" -ge 2 ] && blocked_in_flock "$PID"; do
+  until [ "$(grep -c '^probe merkur$' "$SD/calls")" -ge 2 ] && polling "$PID" "$CASE_DIR/out.txt" && is_free "$L_MERKUR"; do
     n=$((n + 1)); [ "$n" -le 400 ] || break; kill -0 "$PID" 2>/dev/null || break; sleep 0.05
   done
   is_free "$L_MERKUR" && merkur_let_go=yes || merkur_let_go=no
@@ -416,7 +464,7 @@ if wait_blocked "$PID"; then
     bad "lost during wait: merkur let go [$merkur_let_go], route [$r]"; show "$out"; show "$(cat "$SD/calls")"
   fi
 else
-  bad "lost during wait: the run never blocked"; show "$(cat "$CASE_DIR/out.txt")"
+  bad "lost during wait: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
 fi
 release merkur; release mars
 
@@ -580,20 +628,23 @@ else
 fi
 
 # --- case 20b: a run killed with SIGKILL while it WAITS for an estate lock frees the run lock ------
-# The blocking `flock 9` is a child that outlives the killed run until the estate lock is free; it
-# must not hold descriptor 7, or the worktree stays locked behind a host the next run need not use.
+# The blocking `flock 9` of an explicit host, and the auto router's `sleep` between two polls, are
+# children that outlive the killed run (the flock until the estate lock is free, the sleep for the
+# rest of its poll interval — 10 s here, longer than the 5 s the case allows); neither may hold
+# descriptor 7, or the worktree stays locked behind a host the next run need not use.
 sigkill_wait_case() { # $1 = label, $2 = auto|merkur
   local label="$1" pid n=0 freed=no
   new_case "sigkill-wait-$2"
   hold merkur || bad "$label: the stand-in could not take merkur's lock"
   if [ "$2" = auto ]; then
     hold mars || bad "$label: the stand-in could not take mars's lock"
-    HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
+    POLL=10 HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
   else
     HOST=merkur SINGLE="$L_MERKUR" start_gate a "$CASE_DIR/out.txt"
   fi
   pid="$PID"
-  if wait_blocked "$pid"; then
+  if { [ "$2" = auto ] && wait_polling "$pid" "$CASE_DIR/out.txt"; } \
+     || { [ "$2" != auto ] && wait_blocked "$pid"; }; then
     kill -KILL "$pid"
     wait_gone "$pid" 200
     while [ "$n" -le 100 ]; do
@@ -620,17 +671,17 @@ sigkill_wait_case "explicit merkur, held" merkur
 new_case one-host
 hold mars || bad "one-host: the stand-in could not take mars's lock"
 HOST=auto MAPV="mars=$L_MARS" start_gate a "$CASE_DIR/out.txt"
-if wait_blocked "$PID"; then
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
   release mars
   wait_gone "$PID" 1200
   r="$(route_of "$(cat "$CASE_DIR/out.txt")")"
-  if [[ "$r" == "host=mars reason=busy:mars -> waited on mars (first in order) "* ]]; then
+  if [[ "$r" == "host=mars reason=busy:mars -> waited on mars (first free) "* ]]; then
     ok "one-host map, host held: waited on it: route [$r]"
   else
     bad "one-host map: route [$r]"; show "$(cat "$CASE_DIR/out.txt")"
   fi
 else
-  bad "one-host map: the run never blocked"; show "$(cat "$CASE_DIR/out.txt")"
+  bad "one-host map: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
 fi
 release mars
 new_case empty-entry
@@ -687,6 +738,86 @@ if wait_for_file "$CASE_DIR/pause/paused" "$pid1"; then
 else
   bad "two worktrees: run 1 never paused"; show "$(cat "$CASE_DIR/one.txt")"
 fi
+
+# --- pre-gate cases of the busy poll (MEMNG-1040) ------------------------------------------------
+# Boundary and literal-in-string: a poll interval of 0, or one that is not a run of digits, refuses
+# with exit 15 before any lock; scope: an explicit host never reads it.
+for bad_poll in 0 '2; true' 1s; do
+  new_case "poll-$(printf '%s' "$bad_poll" | tr -c 'a-z0-9' '_')"
+  POLL="$bad_poll" HOST=auto MAPV="$MAP" run_gate a
+  if [ "$RC" -eq 15 ] && printf '%s\n' "$OUT" | grep -q "MAC_GATE_HOST_POLL must be a whole number" \
+     && [ -z "$(route_of "$OUT")" ] && is_free "$L_MERKUR" && is_free "$L_MARS"; then
+    ok "MAC_GATE_HOST_POLL='$bad_poll' with auto: exit 15 before any lock"
+  else
+    bad "MAC_GATE_HOST_POLL='$bad_poll' with auto: exit $RC, route [$(route_of "$OUT")]"; show "$OUT"
+  fi
+done
+new_case poll-explicit
+POLL=0 HOST=mars MAPV="$MAP" run_gate a
+if [ "$RC" -eq 0 ] && [[ "$(route_of "$OUT")" == "host=mars reason=explicit:"* ]]; then
+  ok "MAC_GATE_HOST_POLL=0 with an explicit host and the map: ignored, exit 0"
+else
+  bad "MAC_GATE_HOST_POLL=0 with an explicit host: exit $RC, route [$(route_of "$OUT")]"; show "$OUT"
+fi
+
+# Swallowed refusal: both hosts free up but stop answering once taken — the set empties during the
+# wait and the run refuses (exit 15), never running on a host whose lock it let go.
+new_case all-lost
+hold merkur && hold mars || bad "all-lost: the stand-ins could not take both locks"
+DOWN_AFTER="merkur:1 mars:1" HOST=auto MAPV="$MAP" start_gate a "$CASE_DIR/out.txt"
+if wait_polling "$PID" "$CASE_DIR/out.txt"; then
+  release merkur; release mars
+  n=0
+  while kill -0 "$PID" 2>/dev/null && [ "$n" -le 200 ]; do n=$((n + 1)); sleep 0.05; done
+  if kill -0 "$PID" 2>/dev/null; then rc=still-running; else wait "$PID" 2>/dev/null; rc=$?; fi
+  out="$(cat "$CASE_DIR/out.txt")"
+  if [ "$rc" = 15 ] && printf '%s\n' "$out" | grep -q 'merkur=unreachable-after-wait mars=unreachable-after-wait' \
+     && [ -z "$(route_of "$out")" ] && ! grep -q '^ssh remote$' "$SD/calls" && is_free "$L_MERKUR" && is_free "$L_MARS"; then
+    ok "every host lost during the wait: exit 15 naming both, nothing sent, both locks let go"
+  else
+    bad "every host lost during the wait: exit $rc, route [$(route_of "$out")]"; show "$out"
+  fi
+else
+  bad "all-lost: the run never started polling"; show "$(cat "$CASE_DIR/out.txt")"
+fi
+release merkur; release mars
+
+# Concurrency: two waiting runs of two worktrees, one host frees — exactly one takes it and the
+# other keeps polling until the second host frees. Each pauses after its selftests holding its lock.
+new_case two-waiters
+mkdir -p "$CASE_DIR/pa" "$CASE_DIR/pb"
+hold merkur && hold mars || bad "two-waiters: the stand-ins could not take both locks"
+HOST=auto MAPV="$MAP" PAUSE="$CASE_DIR/pa" start_gate one "$CASE_DIR/one.txt"; pa="$PID"
+ART="$CASE_DIR/other-artifacts" HOST=auto MAPV="$MAP" PAUSE="$CASE_DIR/pb" start_gate two "$CASE_DIR/two.txt"; pb="$PID"
+if wait_polling "$pa" "$CASE_DIR/one.txt" && wait_polling "$pb" "$CASE_DIR/two.txt"; then
+  release mars
+  n=0
+  until [ -e "$CASE_DIR/pa/paused" ] || [ -e "$CASE_DIR/pb/paused" ]; do
+    n=$((n + 1)); [ "$n" -le 200 ] || break; sleep 0.05
+  done
+  sleep 3
+  first=""; [ -e "$CASE_DIR/pa/paused" ] && first="${first}a"; [ -e "$CASE_DIR/pb/paused" ] && first="${first}b"
+  if [ "$first" = a ]; then still="$pb"; still_out="$CASE_DIR/two.txt"; else still="$pa"; still_out="$CASE_DIR/one.txt"; fi
+  polling "$still" "$still_out" && waiting=yes || waiting=no
+  release merkur
+  n=0
+  until [ -e "$CASE_DIR/pa/paused" ] && [ -e "$CASE_DIR/pb/paused" ]; do
+    n=$((n + 1)); [ "$n" -le 200 ] || break; sleep 0.05
+  done
+  ra="$(route_of "$(cat "$CASE_DIR/one.txt")")"; rb="$(route_of "$(cat "$CASE_DIR/two.txt")")"
+  : > "$CASE_DIR/pa/resume"; : > "$CASE_DIR/pb/resume"
+  wait_gone "$pa" 1200; wait_gone "$pb" 1200
+  ha="${ra%% *}"; hb="${rb%% *}"
+  if { [ "$first" = a ] || [ "$first" = b ]; } && [ "$waiting" = yes ] && [ -n "$ha" ] && [ -n "$hb" ] && [ "$ha" != "$hb" ]; then
+    ok "two waiters, mars freed: one took it [$first], the other kept polling until merkur freed: [$ha] / [$hb]"
+  else
+    bad "two waiters: first paused [$first], other still polling [$waiting], routes [$ra] / [$rb]"
+    show "$(cat "$CASE_DIR/one.txt")"; show "$(cat "$CASE_DIR/two.txt")"
+  fi
+else
+  bad "two waiters: the runs never both started polling"; show "$(cat "$CASE_DIR/one.txt")"; show "$(cat "$CASE_DIR/two.txt")"
+fi
+release merkur; release mars
 
 # --- case 21: the descriptor rule, by text -------------------------------------------------------
 # The five subshells that close 9 with `exec` on a line of its own, each named by the line that

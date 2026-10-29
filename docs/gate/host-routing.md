@@ -17,10 +17,16 @@ map `MAC_GATE_ESTATE_LOCKS=merkur=/home/fabian/projects/worktrees/.wp13-gate.loc
 (preference order, names limited to the mount guard's profiles) tries each host's lock with
 `flock -n` in map order and takes the first that is free AND answers `ssh -o BatchMode=yes -o
 ConnectTimeout=10 <host> true` under `timeout 30`. With every host busy it probes the busy ones and
-waits, blocking, on the host named by `<artifacts>/lane-host` (written by every run that reaches
-the remote step: `<host> <branch> <UTC> <run token>`; read only for this branch and under 24 h
-old), else on the first answering host in map order; a host that stops answering during that wait
-is let go and the choice is made again. No answering host, `auto` without the map, or a name the
+polls the answering ones (MEMNG-1040): every `MAC_GATE_HOST_POLL` seconds (default 15) one round of
+`flock -n` over all of them, and the first lock that is free is taken. It never blocks on one
+host's lock — that waited as long as the holder needed while the other host sat idle, and held two
+lane gates on merkur for an hour with mars free. Within a round the host named by
+`<artifacts>/lane-host` (written by every run that reaches the remote step: `<host> <branch> <UTC>
+<run token>`; read only for this branch and under 24 h old) is tried first, then map order, so the
+warm lane only breaks a tie between hosts free at the same round; the route's reason ends `->
+waited on <h> (warm lane)` or `(first free)`, and stderr announces the wait once (`every build host
+is busy; polling …`). A host whose lock is taken but which then stops answering is let go and
+dropped from the set, and the round goes on. No answering host, `auto` without the map, or a name the
 gate does not know refuses with exit 15 before any lock. The choice is one `route       :
 host=<h> reason=<…> worktree_wait=<s>s pid=<n> token=<t>` line in the run log, `host=<name>` sits
 on `mac-gate SUMMARY:` and `MAC_GATE_QUICK:` just before `locallint=`, and the run ledger's rows

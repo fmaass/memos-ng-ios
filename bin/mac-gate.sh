@@ -102,10 +102,13 @@
 #   MAC_GATE_HOST        (required) ssh alias/host of the Mac build host, or `auto`: the run
 #                        picks the host itself from MAC_GATE_ESTATE_LOCKS — the first whose lock
 #                        is free and which answers ssh, in map order; with every host busy, a
-#                        blocking wait on the host whose lane last ran this branch (the
-#                        <artifacts>/lane-host marker, under 24 h old), else the first. The choice
-#                        and its reason are the log's `route` line; host= is on the SUMMARY and
-#                        quick lines and in the ledger's 13th field. Not for bin/testflight-cut.sh.
+#                        round of `flock -n` over every busy host each MAC_GATE_HOST_POLL
+#                        seconds, taking the first that frees (the host whose lane last ran this
+#                        branch — the <artifacts>/lane-host marker, under 24 h old — wins a tie,
+#                        then map order). The choice and its reason are the log's `route` line;
+#                        host= is on the SUMMARY and quick lines and in the ledger's 13th field.
+#                        Not for bin/testflight-cut.sh.
+#   MAC_GATE_HOST_POLL   seconds between two rounds of that busy wait (default 15, 1-9999)
 #   MAC_GATE_BRANCH      override the branch that names the gate directory (default: current)
 #   MAC_GATE_SIMULATOR   run on this EXISTING, shared device by name instead of a private one.
 #                        Only for reproducing a device-specific failure — it gives up the
@@ -329,14 +332,21 @@ gate_route_warm_host() { # $1 = artifacts directory, $2 = branch
 #       let go as unreachable; held is let go as busy (a held lock is never read as a dead host);
 #   (b) no host taken: each busy host is probed; busy and answering form the wait set;
 #   (c) an empty wait set refuses (exit 15), naming every host's state;
-#   (d) the warm lane's host when it is in the set, else the first in map order;
-#   (e) a blocking flock on it — as long as its holder needs; the other host freeing meanwhile
-#       does not move the run;
-#   (f) after the take one more probe: a host that went away during the wait is let go, dropped
-#       from the set, and the choice is made again (each host can be dropped once, so this ends).
+#   (d) every MAC_GATE_HOST_POLL seconds (default 15) one round of flock -n over the whole set —
+#       the warm lane's host first, then map order — and the first lock that is free is taken.
+#       Never one blocking flock on a single host: that waits as long as its holder needs while
+#       the other host may sit idle, which held two lane gates on merkur for an hour with mars
+#       free (MEMNG-1040). So the warm marker only breaks a tie between hosts free at one round;
+#   (e) after a take one more probe: a host that went away during the wait is let go, dropped
+#       from the set, and the round goes on (each host can be dropped once, so this ends).
 gate_route_auto() { # $1 = artifacts directory, $2 = branch
   local i h l pick why warm kept="" busy_names="" unreachable="" lost="" states="" n_busy=0
-  local -a state=() waitset=() rest=()
+  local poll="${MAC_GATE_HOST_POLL:-15}" taken=""
+  local -a state=() waitset=() rest=() order=()
+  case "$poll" in
+    ''|*[!0-9]*|0*) die_estate_lock "MAC_GATE_HOST_POLL must be a whole number of seconds from 1 (got '$poll')" ;;
+  esac
+  [ "${#poll}" -le 4 ] || die_estate_lock "MAC_GATE_HOST_POLL must be at most 4 digits (got '$poll')"
   for i in "${!GATE_ROUTE_NAMES[@]}"; do
     h="${GATE_ROUTE_NAMES[$i]}"
     l="${GATE_ROUTE_LOCKS[$i]}"
@@ -375,32 +385,51 @@ gate_route_auto() { # $1 = artifacts directory, $2 = branch
     fi
   done
   warm="$(gate_route_warm_host "$1" "$2")" || warm=""
+  if [ "${#waitset[@]}" -gt 0 ]; then
+    states=""
+    for i in "${waitset[@]}"; do states="$states${states:+, }${GATE_ROUTE_NAMES[$i]}"; done
+    printf 'mac-gate: every build host is busy; polling %s every %ss, taking the first to free%s\n' \
+      "$states" "$poll" "${warm:+ (warm lane: $warm)}" >&2
+  fi
   while :; do
     if [ "${#waitset[@]}" -eq 0 ]; then
       states=""
       for i in "${!GATE_ROUTE_NAMES[@]}"; do states="$states ${GATE_ROUTE_NAMES[$i]}=${state[$i]:-unprobed}"; done
       die_estate_lock "no build host can take this run:$states (MAC_GATE_ESTATE_LOCKS)"
     fi
-    pick="${waitset[0]}"
-    why="first in order"
+    order=()
     for i in "${waitset[@]}"; do
-      if [ -n "$warm" ] && [ "${GATE_ROUTE_NAMES[$i]}" = "$warm" ]; then pick="$i"; why="warm lane"; fi
+      [ -n "$warm" ] && [ "${GATE_ROUTE_NAMES[$i]}" = "$warm" ] && order+=("$i")
     done
-    h="${GATE_ROUTE_NAMES[$pick]}"
-    l="${GATE_ROUTE_LOCKS[$pick]}"
-    printf 'mac-gate: every build host is busy; waiting for %s (%s)\n' "$h" "$why" >&2
-    { exec 9>>"$l"; } 2>/dev/null \
-      || die_estate_lock "cannot open the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
-    flock 9 7>&- \
-      || die_estate_lock "cannot take the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
-    gate_route_probe "$h" && break
-    exec 9>&-
-    state[$pick]=unreachable-after-wait
-    lost="$lost${lost:+, }$h unreachable after the wait"
-    rest=()
-    for i in "${waitset[@]}"; do [ "$i" = "$pick" ] || rest+=("$i"); done
-    waitset=("${rest[@]+"${rest[@]}"}")
+    for i in "${waitset[@]}"; do
+      [ -n "$warm" ] && [ "${GATE_ROUTE_NAMES[$i]}" = "$warm" ] || order+=("$i")
+    done
+    for pick in "${order[@]}"; do
+      h="${GATE_ROUTE_NAMES[$pick]}"
+      l="${GATE_ROUTE_LOCKS[$pick]}"
+      { exec 9>>"$l"; } 2>/dev/null \
+        || die_estate_lock "cannot open the estate lock $l of $h (MAC_GATE_ESTATE_LOCKS)"
+      if ! flock -n 9 7>&-; then
+        exec 9>&-
+        continue
+      fi
+      if gate_route_probe "$h"; then
+        taken="$pick"
+        break
+      fi
+      exec 9>&-
+      state[$pick]=unreachable-after-wait
+      lost="$lost${lost:+, }$h unreachable after the wait"
+      rest=()
+      for i in "${waitset[@]}"; do [ "$i" = "$pick" ] || rest+=("$i"); done
+      waitset=("${rest[@]+"${rest[@]}"}")
+    done
+    [ -z "$taken" ] || break
+    [ "${#waitset[@]}" -gt 0 ] || continue
+    # 7 closed: a run killed while it waits must not leave its worktree locked behind a sleep.
+    sleep "$poll" 9>&- 7>&-
   done
+  if [ -n "$warm" ] && [ "$h" = "$warm" ]; then why="warm lane"; else why="first free"; fi
   GATE_ROUTE_HOST="$h"
   if [ "$n_busy" -eq "${#GATE_ROUTE_NAMES[@]}" ] && [ "$n_busy" -eq 2 ]; then busy_names=both; fi
   states="$unreachable"
