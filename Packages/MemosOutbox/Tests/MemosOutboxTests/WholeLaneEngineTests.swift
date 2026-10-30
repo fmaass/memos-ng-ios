@@ -4338,6 +4338,181 @@ struct WholeJobDeadlineTimerTests {
     }
 }
 
+/// MEMNG-957: every way a whole-file transfer can be interrupted, driven from the interruption
+/// itself through the production engine and scheduler over the scripted transport, owes exactly
+/// one offset HEAD and one PATCH whose body starts at the byte the server confirmed — never the
+/// whole file again while the server holds bytes of it.
+@Suite("Whole lane: every interruption resumes from the server's offset (MEMNG-957)")
+struct WholeResumeInterruptionTests {
+    /// Where the server says the interrupted picture (1000 bytes) stopped.
+    static let confirmed: Int64 = 400
+
+    private func heads(_ rig: WholeRig) -> [URLRequest] { rig.http.requests(method: "HEAD") }
+
+    /// The picture's PATCH under `attempt` is the one resume the interruption is owed: sent to the
+    /// session the HEAD asked about, at the server's offset, carrying the original's bytes from
+    /// that offset and nothing before it.
+    private func expectTail(_ rig: WholeRig, attempt: Int, uploadUID: String) async throws {
+        let task = try rig.task(for: rig.picture.id, attempt: attempt)
+        #expect(task.request.httpMethod == "PATCH")
+        #expect(task.request.url?.path() == "/api/uploads/\(uploadUID)")
+        #expect(
+            task.request.value(forHTTPHeaderField: "Upload-Offset") == String(Self.confirmed))
+        let job = try await rig.reload()
+        let original = try Data(contentsOf: rig.repository.mediaURL(job: job, file: job.files[0]))
+        #expect(original.count == 1000)
+        let body = try Data(contentsOf: task.file)
+        #expect(body == Data(original.dropFirst(Int(Self.confirmed))))
+        #expect(job.files[0].uploadUID == uploadUID)
+        #expect(job.files[0].bytesConfirmed == Self.confirmed)
+    }
+
+    @Test("a transport error at byte N → after its spacing, one HEAD and one PATCH from N")
+    func transportErrorResumesFromOffset() async throws {
+        let rig = try await WholeRig.make(
+            answerHead: { _ in WholeResumeTests.offset(Self.confirmed) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let first = try rig.task(for: rig.picture.id)
+        let uid = try #require(try await rig.reload().files[0].uploadUID)
+        #expect(rig.uploadPosts == 2)
+
+        // The network went away under the task: no status, only the system's error.
+        rig.session.forget(first.taskIdentifier)
+        var lost = try rig.answer(first, status: nil)
+        lost.errorDescription = "The network connection was lost."
+        await rig.engine.handle(lost)
+        try await settled(rig.engine)
+        // Spaced out first, and the session kept: nothing is asked or sent before its deadline.
+        #expect(heads(rig).isEmpty)
+        #expect(rig.attempts(of: rig.picture.id) == [0])
+        #expect(try await rig.reload().files[0].uploadUID == uid)
+
+        rig.clock.advance(3600)
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(heads(rig).map { $0.url?.path() } == ["/api/uploads/\(uid)"])
+        #expect(rig.attempts(of: rig.picture.id) == [0, 1])
+        #expect(rig.uploadPosts == 2)
+        try await expectTail(rig, attempt: 1, uploadUID: uid)
+    }
+
+    @Test("a task the system cancelled at byte N → one HEAD and one PATCH from N, no new session")
+    func systemCancelResumesFromOffset() async throws {
+        let rig = try await WholeRig.make(
+            attached: false, answerHead: { _ in WholeResumeTests.offset(Self.confirmed) }
+        )
+        defer { rig.cleanUp() }
+        let entry = AnnouncingEntry(rig.engine)
+        await rig.delegate.attach(entry)
+        await rig.engine.drain()
+        let first = try rig.task(for: rig.picture.id)
+        let uid = try #require(try await rig.reload().files[0].uploadUID)
+
+        // The system tore the task down: it leaves the session's list and its one terminal
+        // callback carries no status, through the delegate's own claim.
+        rig.session.forget(first.taskIdentifier)
+        #expect(
+            rig.delegate.complete(
+                taskIdentifier: first.taskIdentifier, taskDescription: first.description,
+                statusCode: nil, errorDescription: "cancelled"
+            )
+        )
+        try await arrived(1, at: entry)
+        try await settled(rig.engine)
+        #expect(heads(rig).isEmpty)
+
+        rig.clock.advance(3600)
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(heads(rig).map { $0.url?.path() } == ["/api/uploads/\(uid)"])
+        #expect(rig.attempts(of: rig.picture.id) == [0, 1])
+        #expect(rig.uploadPosts == 2)
+        try await expectTail(rig, attempt: 1, uploadUID: uid)
+    }
+
+    @Test("relaunch: a session the dead launch left at byte N → one HEAD, one PATCH from N")
+    func relaunchResumesFromOffset() async throws {
+        // What the last launch left: a session, a count the row never learned, and no task —
+        // the process died with it. This launch is a new one, and the server holds N bytes.
+        let rig = try await WholeRig.make(
+            prepare: WholeResumeTests.resumable(uid: "s1"),
+            answerHead: { _ in WholeResumeTests.offset(Self.confirmed) }
+        )
+        defer { rig.cleanUp() }
+        #expect(try await rig.reload().files[0].bytesConfirmed == 0)
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(heads(rig).map { $0.url?.path() } == ["/api/uploads/s1"])
+        #expect(rig.session.createdTasks.count == 1)
+        #expect(rig.attemptedUploadPosts == 0)
+        try await expectTail(rig, attempt: 1, uploadUID: "s1")
+
+        // The dead launch's task ends late, as a relaunch delivers it: its term is behind the
+        // resume's, so it asks nothing and sends nothing.
+        let dead = WholeTaskIdentity(
+            jobID: rig.job.id, fileID: rig.picture.id, attempt: 0, launch: UUID(), epoch: 0
+        )
+        await rig.engine.handle(
+            WholeAnswer(
+                taskIdentifier: 41, identity: dead, statusCode: nil, body: Data(),
+                errorDescription: "cancelled"
+            )
+        )
+        try await settled(rig.engine)
+        rig.clock.advance(3600)
+        await rig.engine.drain()
+        try await settled(rig.engine)
+        #expect(heads(rig).count == 1)
+        #expect(rig.session.createdTasks.count == 1)
+        #expect(rig.attemptedUploadPosts == 0)
+    }
+
+    @Test("409 on a PATCH → one HEAD re-sync, one PATCH from N; a second 409 never HEADs again")
+    func conflictResyncsOnceAndNeverLoops() async throws {
+        let rig = try await WholeRig.make(
+            answerHead: { _ in WholeResumeTests.offset(Self.confirmed) }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        let first = try rig.task(for: rig.picture.id)
+        let uid = try #require(try await rig.reload().files[0].uploadUID)
+
+        rig.session.forget(first.taskIdentifier)
+        await rig.engine.handle(try rig.answer(first, status: 409))
+        try await settled(rig.engine)
+        // Due at once: the re-sync is not spaced out, and it is ONE HEAD.
+        #expect(heads(rig).map { $0.url?.path() } == ["/api/uploads/\(uid)"])
+        #expect(rig.attempts(of: rig.picture.id) == [0, 1])
+        #expect(rig.uploadPosts == 2)
+        try await expectTail(rig, attempt: 1, uploadUID: uid)
+        #expect(try await rig.reload().files[0].conflictResync == true)
+
+        // The server disagrees again: no second HEAD, now or after any number of passes — the
+        // file starts ONE fresh session instead, from the original's first byte.
+        let tail = try rig.task(for: rig.picture.id, attempt: 1)
+        rig.session.forget(tail.taskIdentifier)
+        await rig.engine.handle(try rig.answer(tail, status: 409))
+        try await settled(rig.engine)
+        #expect(heads(rig).count == 1)
+        for _ in 0..<3 {
+            rig.clock.advance(3600)
+            await rig.engine.drain()
+            try await settled(rig.engine)
+        }
+        #expect(heads(rig).count == 1)
+        #expect(rig.uploadPosts == 3)
+        #expect(rig.attempts(of: rig.picture.id) == [0, 1, 2])
+        let saved = try await rig.reload()
+        #expect(saved.files[0].uploadUID != uid)
+        #expect(saved.files[0].freshSessions == 1)
+        #expect(saved.files[0].conflictResync == nil)
+        let fresh = try rig.task(for: rig.picture.id, attempt: 2)
+        #expect(fresh.file == rig.repository.mediaURL(job: saved, file: saved.files[0]))
+    }
+}
+
 /// The same refusal where the planners are not asked: a fresh session the engine opens for a file
 /// whose old one the server lost (MEMNG-956). The file names a session, so the staged-file check
 /// passes it; only the session request itself can stop it.
