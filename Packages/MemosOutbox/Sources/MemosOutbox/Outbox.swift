@@ -101,6 +101,9 @@ public final class Outbox {
     private let uploads: (any OutboxUploadScheduling)?
     /// What the app feeds: open while it is active, closed otherwise (`appBecameActive`).
     private let schedulingGate: SchedulingGate
+    /// The lane that copies picked items still in Photos into their captures (MEMNG-952); nil
+    /// where nothing can read the library. The app's `BGProcessingTask` drives it through here.
+    public let staging: StagingLane?
     /// The adoption in flight, or the one that finished. It replaces an `isStarted` flag, which
     /// was set BEFORE the attachment was awaited: a second caller arriving inside that await saw
     /// the flag, skipped adoption and drained beside the replay. The two are not siblings, so the
@@ -145,7 +148,9 @@ public final class Outbox {
         // Open unless something feeds it; the engine's sends of new work ask it (`SchedulingGate`).
         schedulingGate: SchedulingGate = SchedulingGate(),
         // The whole lane. Without one no capture is ever put on it (`OutboxEngine`).
-        uploads: (any OutboxUploadScheduling)? = nil
+        uploads: (any OutboxUploadScheduling)? = nil,
+        // The library picked items are copied from. Without one no item stays in Photos.
+        photos: (any PhotoLibrarySource)? = nil
     ) {
         self.attachScheduler = attachScheduler
         self.uploads = uploads
@@ -157,6 +162,9 @@ public final class Outbox {
         self.network = network
         self.uploadPreferences = preferences
         self.transfers = TransferLedger(clock: clock)
+        self.staging = photos.map {
+            StagingLane(repository: repository, library: $0, onChange: { await changes.fire() })
+        }
         self.engine = OutboxEngine(
             repository: repository,
             credentials: credentials,
@@ -212,9 +220,16 @@ public final class Outbox {
             attachChunks: { handler in await scheduler.attach(handler) },
             uploads: BackgroundUploadScheduler(appGroup: appGroup),
             network: NetworkPathMonitor(),
-            preferences: UploadPreferences.live(appGroup: appGroup)
+            preferences: UploadPreferences.live(appGroup: appGroup),
+            photos: Self.livePhotos
         )
     }
+
+    #if os(iOS)
+    private static var livePhotos: (any PhotoLibrarySource)? { PhotoKitLibrary() }
+    #else
+    private static var livePhotos: (any PhotoLibrarySource)? { nil }
+    #endif
 
     /// What `live` composes, over whichever sessions it is handed — so a test composes the same
     /// outbox over scripted ones.
@@ -231,7 +246,8 @@ public final class Outbox {
         attachChunks: @escaping @Sendable (any OutboxChunkHandling) async -> Void,
         uploads: any OutboxUploadScheduling,
         network: any NetworkPathProviding,
-        preferences: UploadPreferences
+        preferences: UploadPreferences,
+        photos: (any PhotoLibrarySource)? = nil
     ) -> Outbox {
         Outbox(
             repository: repository,
@@ -243,7 +259,8 @@ public final class Outbox {
             preferences: preferences,
             attachScheduler: attachChunks,
             schedulingGate: SchedulingGate(isOpen: false),
-            uploads: uploads
+            uploads: uploads,
+            photos: photos
         )
     }
 
@@ -255,7 +272,24 @@ public final class Outbox {
     @discardableResult
     public func appBecameActive() -> Task<Void, Never> {
         schedulingGate.open()
-        return Task { await drain() }
+        return Task {
+            await drain()
+            // Access the person may have just allowed in Settings reaches the items left in Photos.
+            await stageFromPhotos(mayPrompt: false)
+        }
+    }
+
+    /// Copies every capture's items still in Photos into it (MEMNG-952), then drains what that
+    /// brought. `mayPrompt` asks for Photos access when nobody has yet — only where a person is
+    /// looking, never from a background task.
+    @discardableResult
+    public func stageFromPhotos(mayPrompt: Bool) async -> StagingPass? {
+        guard let staging else { return nil }
+        await adopted()
+        let pass = await staging.drain(mayPrompt: mayPrompt)
+        await refresh()
+        if pass.staged > 0 { await drainAfterAdoption() }
+        return pass
     }
 
     /// The app left the foreground: nothing new starts until it is back. What is already with the
@@ -491,12 +525,21 @@ public final class Outbox {
         capturedAt: Date = Date(),
         sources: [StagedSource],
         arriving: Int = 0,
+        inPhotos: [StagingFile] = [],
         composedUnder account: AccountBinding? = nil
     ) async -> UUID? {
-        await enqueueJob(
+        // Items named only in Photos need a lane to copy them; without one they are not taken
+        // into a capture that would wait for them for ever.
+        let inPhotos = staging == nil ? [] : inPhotos
+        let job = await enqueueJob(
             content: content, visibility: visibility, capturedAt: capturedAt, sources: sources,
-            composedUnder: account, stagingLaunch: launch, arriving: arriving
-        )?.id
+            composedUnder: account, stagingLaunch: launch, arriving: arriving, inPhotos: inPhotos
+        )
+        if job != nil, !inPhotos.isEmpty {
+            // Post is where a person is looking: the one Photos access prompt may be shown here.
+            Task { await self.stageFromPhotos(mayPrompt: true) }
+        }
+        return job?.id
     }
 
     /// This process's launch: what a capture still taking files is marked with, so the next
@@ -554,7 +597,8 @@ public final class Outbox {
         sources: [StagedSource],
         composedUnder account: AccountBinding?,
         stagingLaunch: UUID?,
-        arriving: Int = 0
+        arriving: Int = 0,
+        inPhotos: [StagingFile] = []
     ) async -> UploadJob? {
         guard let credentials = await credentials.currentCredentials(),
             self.credentials.isCurrent(credentials)
@@ -584,6 +628,7 @@ public final class Outbox {
                 sources: sources,
                 stagingLaunch: stagingLaunch,
                 arriving: arriving,
+                staging: inPhotos,
                 under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil

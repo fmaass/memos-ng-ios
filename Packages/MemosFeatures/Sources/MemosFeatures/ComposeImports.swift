@@ -125,6 +125,9 @@ final class ComposeImports {
     private var cameraIDs: Set<UUID> = []
     /// Which picked item each attachment was made from, for the selection on screen.
     private var pickIdentity: [UUID: AnyHashable] = [:]
+    /// The library's persisted identifier of each picked item that has one (MEMNG-952): an item
+    /// still loading at Post goes to the queue under it and is copied from Photos there.
+    private var assetIdentifiers: [UUID: String] = [:]
     /// The picked items an x has taken off the row while the picker still holds them selected.
     ///
     /// A selection is not diffed and cannot be: it lands as the whole array, and `load` rebuilds
@@ -197,6 +200,7 @@ final class ComposeImports {
     func load<Item: Sendable & Hashable>(
         _ items: [Item],
         stamp: Int,
+        identify: (Item) -> String? = { _ in nil },
         using loader: @escaping @MainActor (Item) async -> ComposePickerAnswer
     ) async -> Bool {
         // A selection that lands once a submission has been built is not this memo's selection any
@@ -216,6 +220,7 @@ final class ComposeImports {
         var placeholders: [ComposeAttachment] = []
         var handles: [UUID: @MainActor () async -> ComposePickerAnswer] = [:]
         var identities: [UUID: AnyHashable] = [:]
+        var assets: [UUID: String] = [:]
         // Sampled HERE, as the pick lands, and stamped onto every item of it.
         let picked = zoneAtPick()
         for item in items {
@@ -233,6 +238,7 @@ final class ComposeImports {
                     sequence: sequence, captureZone: picked))
             handles[id] = { await loader(item) }
             identities[id] = identity
+            assets[id] = identify(item)
         }
         // The placeholders are on screen before a single byte is read. `keptCaptures` is read off
         // the list as it still stands — the camera's photographs survive a pick, and only they do —
@@ -242,6 +248,7 @@ final class ComposeImports {
         // by asking a picker for it, so what a failed capture offers is the camera itself.
         retries = handles
         pickIdentity = identities
+        assetIdentifiers = assets
         // Everything the replaced pick was reading is fenced out here: its items are gone from the
         // list above, and their generations go with them.
         readGeneration = readGeneration.filter { cameraIDs.contains($0.key) }
@@ -309,6 +316,7 @@ final class ComposeImports {
         readGeneration = [:]
         cameraIDs = []
         pickIdentity = [:]
+        assetIdentifiers = [:]
         // A list dropped whole is not a set of removals to hold against the next selection.
         removedPicks = []
         awaitingPick = false
@@ -438,6 +446,9 @@ final class ComposeImports {
 
     /// The items still loading, read at the instant Post takes the list.
     var stillLoading: [UUID] { items.filter(\.isLoading).map(\.id) }
+
+    /// The library's persisted identifier of an item, when the picker gave one.
+    func assetIdentifier(for id: UUID) -> String? { assetIdentifiers[id] }
 
     /// Follows `ids` as they land, handing each file that arrived to `deliver`, one at a time and
     /// in the order they land, until every one has settled or `limit` has passed.

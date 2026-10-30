@@ -117,6 +117,31 @@ struct PostWhileImportingTests {
         #expect(log.released == [job])
     }
 
+    @Test("an item still loading with a library identifier goes to the queue's Photos lane")
+    func identifiedItemGoesToPhotos() async throws {
+        let second = HeldLoad()
+        let third = HeldLoad()
+        let imports = ComposeImports()
+        let stamp = imports.selected()
+        let loading = Task {
+            await imports.load(
+                ["a", "b", "c"], stamp: stamp, identify: { $0 == "b" ? "asset-b" : nil }
+            ) { item in
+                if item == "a" { return .file(Self.media("a.heic")) }
+                return await (item == "b" ? second : third).load()
+            }
+        }
+        defer { loading.cancel() }
+        await second.waitUntilStarted()
+        // "c" is read after "b" answers; both are on the row loading.
+        let arriving = try #require(ComposeArrivals(imports))
+        #expect(arriving.inPhotos.map(\.assetIdentifier) == ["asset-b"])
+        #expect(arriving.ids.count == 1, "only the item with no identifier is followed in")
+        #expect(!arriving.ids.contains { imports.assetIdentifier(for: $0) != nil })
+        await second.answer(.file(Self.media("b.heic")))
+        await third.answer(.file(Self.media("c.heic")))
+    }
+
     @Test("nothing loading is nothing to follow: the capture is written and that is all")
     func nothingLoadingNoFollower() async {
         let imports = ComposeImports()

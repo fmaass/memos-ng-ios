@@ -29,6 +29,8 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
     case remove
     /// Take the capture back into the editor — the outbox's own cancel.
     case reopen
+    /// The Settings app, where Photos access is allowed (MEMNG-952).
+    case openSettings
 
     public var title: String {
         switch self {
@@ -38,6 +40,7 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
         case .switchAccount: "Sign out and switch account"
         case .remove: "Remove"
         case .reopen: "Reopen"
+        case .openSettings: "Open Settings"
         }
     }
 }
@@ -159,6 +162,9 @@ public enum TransfersPresentation {
             return nil
         case .waiting, .held:
             if case .retrying = file.reason { return PendingMemoPresentation.retrying }
+            if case .inPhotos(let needsAccess) = file.reason {
+                return needsAccess ? allowPhotosAccess : copyingFromPhotos
+            }
             return PendingMemoPresentation.status(
                 for: job.manifest, now: now, lastProgressAt: lastProgressAt, verdict: verdict)
         }
@@ -178,6 +184,10 @@ public enum TransfersPresentation {
         else { return nil }
         let offered = PendingMemoPresentation.action(for: job.manifest)
         let retry: TransfersAction? = offered.contains(.retry) ? .retryNow : nil
+        // An item Photos access does not reach is fixed in Settings, and by nothing in this app.
+        if case .inPhotos(let needsAccess) = file.reason {
+            return needsAccess ? .openSettings : nil
+        }
         switch file.state {
         case .done:
             return nil
@@ -206,6 +216,11 @@ public enum TransfersPresentation {
         }
     }
 
+    /// An item still in Photos that the last staging pass could not read (MEMNG-952).
+    static let allowPhotosAccess = "Allow Photos access to send the rest"
+    /// An item still in Photos, waiting for the staging lane to copy it in.
+    static let copyingFromPhotos = "Copying from Photos"
+
     static func stalled(_ job: TransferJob, now: Date, lastProgressAt: [UUID: Date]) -> Bool {
         guard let last = lastProgressAt[job.id] else { return false }
         return now.timeIntervalSince(last) >= PendingMemoPresentation.stallInterval
@@ -231,7 +246,8 @@ final class TransfersFixer {
         outbox: Outbox,
         uploads: UploadSettings?,
         signIn: () -> Void,
-        reopen: (RestoredDraft) -> Void
+        reopen: (RestoredDraft) -> Void,
+        openSettings: () -> Void = {}
     ) async -> Bool {
         guard claimed.insert(jobID).inserted else { return false }
         defer { claimed.remove(jobID) }
@@ -251,6 +267,8 @@ final class TransfersFixer {
             signIn()
         case .reopen:
             if let draft = await outbox.cancel(jobID) { reopen(draft) }
+        case .openSettings:
+            openSettings()
         }
         return true
     }

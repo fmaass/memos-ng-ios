@@ -1,6 +1,7 @@
 import MemosCore
 import MemosOutbox
 import SwiftUI
+import UIKit
 
 /// Where a memo is going when the card is tapped. A route rather than a `NavigationLink` in the
 /// row is what removes the chevron: a link inside a list row draws one, and the chevron was the
@@ -633,6 +634,10 @@ public struct TimelineView: View {
             reopen: { draft in
                 transfersFollowUp = .reopen(draft)
                 transfersOpen = false
+            },
+            openSettings: {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
             }
         )
     }
@@ -1001,7 +1006,8 @@ public struct TimelineView: View {
             stage: { stillLoading in
                 await outbox.stage(
                     content: submission.content, visibility: visibility, capturedAt: capturedAt,
-                    sources: sources, arriving: stillLoading, composedUnder: composed?.account
+                    sources: sources, arriving: stillLoading, inPhotos: arriving.inPhotos,
+                    composedUnder: composed?.account
                 )
             },
             append: { jobID, media in await outbox.append([media.stagedSource], to: jobID) },

@@ -1,5 +1,6 @@
 import MemosCore
 import MemosOutbox
+import Photos
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -419,7 +420,10 @@ public struct ComposeView: View {
             selection: $picked,
             selectionBehavior: .ordered,
             matching: .any(of: [.images, .videos]),
-            preferredItemEncoding: .current
+            preferredItemEncoding: .current,
+            // Bound to the library so each item carries its persisted identifier, which is what
+            // lets the queue copy an item still loading at Post from Photos itself (MEMNG-952).
+            photoLibrary: .shared()
         )
         // The other source, presented the same way and for the same reason: it is asked for from
         // the pill and only ever closed through this binding.
@@ -528,7 +532,7 @@ public struct ComposeView: View {
             let stamp = imports.selected()
             problem = nil
             Task {
-                await imports.load(items, stamp: stamp) { item in
+                await imports.load(items, stamp: stamp, identify: \.itemIdentifier) { item in
                     do {
                         guard let media = try await item.loadTransferable(type: PickedMedia.self)
                         else {

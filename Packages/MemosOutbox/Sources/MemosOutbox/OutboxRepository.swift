@@ -700,6 +700,7 @@ public actor OutboxRepository {
         idempotencyKey: UUID = UUID(),
         stagingLaunch: UUID? = nil,
         arriving: Int = 0,
+        staging: [StagingFile] = [],
         under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
         let lease: OutboxLease
@@ -730,7 +731,8 @@ public actor OutboxRepository {
                 stagingLaunch: stagingLaunch,
                 // Only a capture still taking files is owed any: the count is what its editor
                 // promised, and what is left of it at the release is what never came.
-                notArrived: stagingLaunch != nil && arriving > 0 ? arriving : nil
+                notArrived: stagingLaunch != nil && arriving > 0 ? arriving : nil,
+                staging: staging.isEmpty ? nil : staging
             )
             // The LAST word, on this executor, immediately before the manifest is committed.
             // Copying the files above is the slow part of a capture and the caller's check was
@@ -884,7 +886,9 @@ public actor OutboxRepository {
     public func releaseStaging(_ id: UUID, arrivingFrom launch: UUID) throws -> StagingRelease {
         guard var job = job(id), job.stagingLaunch == launch else { return .notArriving }
         job.stagingLaunch = nil
-        if job.files.isEmpty, job.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let wordless = job.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Items still in Photos are still on their way (`StagingLane`): the capture is not empty.
+        if job.files.isEmpty, job.stagingFiles.isEmpty, wordless {
             // Nothing to send — but when that is because every picked item failed to arrive, a
             // capture removed here would be a Post that vanished without a word. It is kept,
             // stopped, so its card can say what did not come (`missingItems`) and be removed by
@@ -914,6 +918,98 @@ public actor OutboxRepository {
             }
         }
         return released
+    }
+
+    // MARK: - items still in Photos (MEMNG-952)
+
+    /// Where the `StagingLane` writes an item's bytes before they are renamed into the capture.
+    /// One fixed path per item, so a copy a terminated run left half-written is found — and
+    /// replaced — by the run after it rather than left beside a second one.
+    public nonisolated func stagingTemporaryURL(jobID: UUID, item: StagingFile) -> URL {
+        mediaDirectory(jobID).appending(path: "\(item.id.uuidString).staging")
+    }
+
+    /// What committing a copied item found.
+    public enum StagingCommit: Sendable, Equatable {
+        /// The item is a file of the capture now, and no longer in `staging`.
+        case staged(UploadJob)
+        /// The item the copy was made for is not in the capture's `staging` as it was read: an
+        /// earlier commit took it, the capture was cancelled or removed, or the item changed. The
+        /// copy is deleted and nothing is written.
+        case notStaging
+    }
+
+    /// Turns a copied item into a file of the capture: the rename of the copy to its stored name
+    /// and the manifest write that moves the item from `staging` to `files` are ONE mutation, on
+    /// this actor under the cross-process lease, with nothing awaited between the question and the
+    /// write.
+    ///
+    /// Fenced on the manifest read HERE: only while the capture is not cancelled and still holds
+    /// `item` exactly as the lane read it. A second copy of an item an earlier commit already took
+    /// is refused (`notStaging`) and its bytes removed, so a file is never added twice.
+    public func commitStaged(
+        _ item: StagingFile, of jobID: UUID, copiedTo temporary: URL, filename: String,
+        mime: String, lastModified: Date?
+    ) throws -> StagingCommit {
+        let lease: OutboxLease
+        switch lock.acquire(.shared) {
+        case .leased(let held):
+            lease = held
+        case .refused(let failure):
+            throw OutboxStorageError.queueBusy(failure)
+        }
+        defer { lease.release() }
+        guard var job = job(jobID), job.cancelledAt == nil,
+            let index = job.stagingFiles.firstIndex(of: item),
+            !job.files.contains(where: { $0.id == item.id })
+        else {
+            try? FileManager.default.removeItem(at: temporary)
+            return .notStaging
+        }
+        let suffix = URL(fileURLWithPath: filename).pathExtension
+        let storedName = suffix.isEmpty ? item.id.uuidString : "\(item.id.uuidString).\(suffix)"
+        let destination = mediaDirectory(jobID).appending(path: storedName)
+        // A run that renamed and then died before its write left the file under this very name; it
+        // is the same item's bytes, replaced rather than kept beside the new ones.
+        if FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+        var staging = job.stagingFiles
+        staging.remove(at: index)
+        job.staging = staging.isEmpty ? nil : staging
+        job.files.append(
+            OutboxFile(
+                id: item.id,
+                relativePath: storedName,
+                filename: filename,
+                mime: mime,
+                byteSize: Int64(values.fileSize ?? 0),
+                lastModified: lastModified
+            ))
+        return .staged(try persist(job))
+    }
+
+    /// Records what a staging pass found about Photos access for the items it could not read, or
+    /// could again: one write, fenced the same way as `commitStaged` — an item an earlier commit
+    /// took, or a cancelled capture, is not written about. Nil when nothing changed.
+    public func markStaging(
+        _ items: [StagingFile], of jobID: UUID, needsPhotosAccess: Bool
+    ) throws -> UploadJob? {
+        guard var job = job(jobID), job.cancelledAt == nil else { return nil }
+        var staging = job.stagingFiles
+        var changed = false
+        for item in items {
+            guard let index = staging.firstIndex(of: item) else { continue }
+            let mark: Bool? = needsPhotosAccess ? true : nil
+            guard staging[index].needsPhotosAccess != mark else { continue }
+            staging[index].needsPhotosAccess = mark
+            changed = true
+        }
+        guard changed else { return nil }
+        job.staging = staging
+        return try persist(job)
     }
 
     private func copy(_ source: StagedSource, into directory: URL) throws -> OutboxFile {

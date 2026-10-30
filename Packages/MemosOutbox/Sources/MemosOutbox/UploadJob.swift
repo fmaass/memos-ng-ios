@@ -321,8 +321,18 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// absent on every manifest written before it, which is "nothing is still arriving".
     public var stagingLaunch: UUID?
 
-    /// Whether files are still arriving from the editor, so the create must wait for them.
-    public var stillArriving: Bool { stagingLaunch != nil }
+    /// The picked items still in Photos, each to be copied in by the `StagingLane` (MEMNG-952).
+    /// An item leaves this list in the same write that adds it to `files`, under its own id, so a
+    /// copy is never added twice. Optional and absent on every manifest written before it, which
+    /// is "nothing is left in Photos".
+    public var staging: [StagingFile]?
+
+    /// The items `staging` still holds; empty when it is absent.
+    public var stagingFiles: [StagingFile] { staging ?? [] }
+
+    /// Whether files are still arriving, from the editor or from Photos, so the create must wait
+    /// for them.
+    public var stillArriving: Bool { stagingLaunch != nil || !stagingFiles.isEmpty }
 
     /// Who the memo is meant to be visible to as the capture now stands (MEMNG-971): the owed
     /// edit's value when it carries one, else the create's — the same fallback the edit's request
@@ -369,6 +379,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         case transport
         case stagingLaunch
         case notArrived
+        case staging
     }
 
     public init(
@@ -393,7 +404,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         editUnansweredSince: Date? = nil,
         transport: UploadTransport? = nil,
         stagingLaunch: UUID? = nil,
-        notArrived: Int? = nil
+        notArrived: Int? = nil,
+        staging: [StagingFile]? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -417,6 +429,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.transport = transport
         self.stagingLaunch = stagingLaunch
         self.notArrived = notArrived
+        self.staging = staging
     }
 
     /// The lane a capture is on. Nil is every row begun before the lane was recorded, and those
@@ -443,6 +456,28 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// sent, and a replay that named it would be a different request under the same key.
     public var uploadUIDs: [String] {
         files.filter { $0.stagedForEdit != true }.compactMap(\.uploadUID)
+    }
+}
+
+/// A picked item still in Photos: the capture names it by the library's own persisted identifier
+/// (`PHAsset.localIdentifier`) until the `StagingLane` has copied it into the group container
+/// (MEMNG-952).
+public struct StagingFile: Codable, Sendable, Equatable, Identifiable {
+    /// The id the copied file carries in `UploadJob.files`, fixed when the item was picked, so a
+    /// copy made twice — by a run that died after its rename and the run after it — lands on ONE
+    /// file under ONE id.
+    public var id: UUID
+    /// The library's persisted identifier for the item.
+    public var assetIdentifier: String
+    /// Set when the last staging pass could not read the item because Photos access is denied,
+    /// limited to other items, or the item is gone from the library; cleared by a pass that can.
+    /// Optional and absent until a pass has found that.
+    public var needsPhotosAccess: Bool?
+
+    public init(id: UUID = UUID(), assetIdentifier: String, needsPhotosAccess: Bool? = nil) {
+        self.id = id
+        self.assetIdentifier = assetIdentifier
+        self.needsPhotosAccess = needsPhotosAccess
     }
 }
 

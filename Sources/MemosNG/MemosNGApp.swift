@@ -60,6 +60,9 @@ struct MemosNGApp: App {
 @MainActor
 final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     static let refreshIdentifier = "live.discomarder.memosng.outbox-refresh"
+    /// The `BGProcessingTask` that copies picked items still in Photos into their captures while
+    /// the app is in the background (MEMNG-952). No network needed: it only reads the library.
+    static let stagingIdentifier = "live.discomarder.memosng.outbox-staging"
 
     // The account store is composed here, not defaulted inside the session: it writes into the
     // app group, which only a real app has, and the share extension reads what it publishes. The
@@ -168,6 +171,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                     SettingsBundleSync.enteredBackground(
                         outbox: self.outbox, cache: MediaSession.shared.cache,
                         group: SettingsBundleSync.paneDefaults)
+                    self.scheduleStaging()
                 }
             },
         ]
@@ -181,6 +185,13 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             using: .main
         ) { task in
             MainActor.assumeIsolated { self.run(task) }
+        }
+        // Beside it, and on the main queue for the same reason.
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: Self.stagingIdentifier,
+            using: .main
+        ) { task in
+            MainActor.assumeIsolated { self.runStaging(task) }
         }
         scheduleRefresh()
         return true
@@ -310,9 +321,47 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         )
     }
 
+    /// The staging task's handler: the lane drains every item still in Photos and stops cleanly
+    /// on expiry (`StagingLane.run`).
+    private func runStaging(_ task: BGTask) {
+        guard let outbox, let lane = outbox.staging else {
+            task.setTaskCompleted(success: true)
+            return
+        }
+        StagingLane.run(StagingTaskHandle(task), on: lane) { _ in await outbox.refresh() }
+    }
+
+    /// Asked for when the app leaves the front with items still in Photos; the system runs it
+    /// when it chooses, and a pass in the foreground later finds less or nothing to do.
+    private func scheduleStaging() {
+        guard let lane = outbox?.staging else { return }
+        Task {
+            guard await lane.hasWork() else { return }
+            let request = BGProcessingTaskRequest(identifier: Self.stagingIdentifier)
+            request.requiresNetworkConnectivity = false
+            request.requiresExternalPower = false
+            try? BGTaskScheduler.shared.submit(request)
+        }
+    }
+
     private func scheduleRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: Self.refreshIdentifier)
         request.earliestBeginDate = Date().addingTimeInterval(15 * 60)
         try? BGTaskScheduler.shared.submit(request)
     }
+}
+
+/// A system task as `StagingLane.run` drives it: the expiry handler and the one completion.
+@MainActor
+private final class StagingTaskHandle: StagingBackgroundTask {
+    private let task: BGTask
+
+    init(_ task: BGTask) { self.task = task }
+
+    var expirationHandler: (() -> Void)? {
+        get { task.expirationHandler }
+        set { task.expirationHandler = newValue }
+    }
+
+    func setTaskCompleted(success: Bool) { task.setTaskCompleted(success: success) }
 }

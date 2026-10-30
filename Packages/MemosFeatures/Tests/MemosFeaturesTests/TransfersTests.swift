@@ -371,3 +371,47 @@ struct TransfersFixTests {
                 reopen: { _ in }))
     }
 }
+
+/// Items Post left in Photos (MEMNG-952): the sheet lists them with the reason they are not here,
+/// and the one that Photos access does not reach offers Settings.
+@MainActor
+@Suite("Transfers: items still in Photos")
+struct TransfersInPhotosTests {
+    @Test("denied access: the loaded file is listed as it goes, the rest say Allow Photos access")
+    func deniedItemsSayAllowAccess() {
+        var capture = job(.uploading, files: [file(100)])
+        capture.staging = [
+            StagingFile(assetIdentifier: "p1", needsPhotosAccess: true),
+            StagingFile(assetIdentifier: "p2"),
+        ]
+        let sections = TransfersPresentation.sections(
+            for: ledger([capture]), now: start, lastProgressAt: [:], verdict: .permitted)
+        let rows = sections.first?.rows ?? []
+        #expect(rows.count == 3)
+        #expect(rows.first?.reason == nil, "the loaded file is moving and says nothing")
+        #expect(rows.first?.action == nil)
+        #expect(rows[1].reason == "Allow Photos access to send the rest")
+        #expect(rows[1].action == .openSettings)
+        #expect(rows[1].filename == TransferLedger.inPhotosName)
+        #expect(rows[2].reason == TransfersPresentation.copyingFromPhotos)
+        #expect(rows[2].action == nil)
+        #expect(TransfersAction.openSettings.title == "Open Settings")
+    }
+
+    @Test("Open Settings opens Settings and touches the capture not at all")
+    func openSettingsOpensSettings() async throws {
+        let rig = try FixRig()
+        defer { rig.forget() }
+        var capture = job(.waiting)
+        capture.staging = [StagingFile(assetIdentifier: "p1", needsPhotosAccess: true)]
+        let id = try await rig.queued(capture)
+        let before = await rig.repository.job(id)
+        var opened = 0
+        let done = await TransfersFixer().perform(
+            .openSettings, jobID: id, outbox: rig.outbox, uploads: rig.uploads, signIn: {},
+            reopen: { _ in }, openSettings: { opened += 1 })
+        #expect(done)
+        #expect(opened == 1)
+        #expect(await rig.repository.job(id) == before)
+    }
+}

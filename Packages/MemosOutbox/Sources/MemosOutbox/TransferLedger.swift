@@ -23,6 +23,9 @@ public enum TransferReason: Sendable, Equatable {
     case waiting(WaitReason?)
     /// The capture is moving, but this file is spacing out a failed send of its own until then.
     case retrying(until: Date)
+    /// Still in Photos, to be copied in by the `StagingLane` (MEMNG-952); `needsAccess` when the
+    /// last pass could not read it because Photos access does not reach it.
+    case inPhotos(needsAccess: Bool)
 
     /// The class of the wait: what ends it — a person, the path, or the clock.
     public var retryClass: RetryClass? {
@@ -30,6 +33,7 @@ public enum TransferReason: Sendable, Equatable {
         case .held: .hold
         case .waiting(let reason): reason?.retryClass
         case .retrying: .transient
+        case .inPhotos(let needsAccess): needsAccess ? .hold : nil
         }
     }
 }
@@ -247,6 +251,10 @@ public final class TransferLedger {
 
     public func job(_ id: UUID) -> TransferJob? { jobs.first { $0.id == id } }
 
+    /// The name an item still in Photos is listed under: the library's own name is not known
+    /// until it is copied.
+    public nonisolated static let inPhotosName = "Photo from your library"
+
     /// One manifest as the ledger shows it; nil for a capture taken back to the editor, which is
     /// a draft and not a transfer.
     public nonisolated static func project(_ job: UploadJob, now: Date) -> TransferJob? {
@@ -264,7 +272,15 @@ public final class TransferLedger {
                 nextAttemptAt: Self.nextAttempt(of: file, in: job, state: state, now: now)
             )
         }
-        return TransferJob(id: job.id, manifest: job, files: files)
+        // An item still in Photos is a row too, with nothing confirmed and the reason it is not
+        // here yet: a picture that is not listed is the one nobody notices is missing.
+        let inPhotos = job.stagingFiles.map { item in
+            TransferFile(
+                id: item.id, filename: Self.inPhotosName, byteSize: 0, bytesConfirmed: 0,
+                state: .waiting, reason: .inPhotos(needsAccess: item.needsPhotosAccess == true),
+                nextAttemptAt: nil)
+        }
+        return TransferJob(id: job.id, manifest: job, files: files + inPhotos)
     }
 
     nonisolated static func state(

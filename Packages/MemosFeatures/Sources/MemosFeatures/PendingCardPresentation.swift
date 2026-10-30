@@ -25,14 +25,22 @@ final class ComposeArrivals: Equatable {
     static let limit: Duration = .seconds(600)
 
     let imports: ComposeImports
+    /// The items still loading that this editor follows in: those the picker gave no library
+    /// identifier for.
     let ids: [UUID]
+    /// The items still loading that the queue copies from Photos itself (MEMNG-952), under the
+    /// library's identifier and the id each will carry as a file.
+    let inPhotos: [StagingFile]
 
     /// Nil when nothing is loading: then there is nothing to follow.
     init?(_ imports: ComposeImports) {
-        let ids = imports.stillLoading
-        guard !ids.isEmpty else { return nil }
+        let loading = imports.stillLoading
+        guard !loading.isEmpty else { return nil }
         self.imports = imports
-        self.ids = ids
+        self.ids = loading.filter { imports.assetIdentifier(for: $0) == nil }
+        self.inPhotos = loading.compactMap { id in
+            imports.assetIdentifier(for: id).map { StagingFile(assetIdentifier: $0) }
+        }
     }
 
     nonisolated static func == (lhs: ComposeArrivals, rhs: ComposeArrivals) -> Bool {

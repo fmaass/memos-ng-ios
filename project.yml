@@ -147,6 +147,9 @@ targets:
       properties:
         BGTaskSchedulerPermittedIdentifiers:
           - live.discomarder.memosng.outbox-refresh
+          # The BGProcessingTask that copies picked items still in Photos into their captures
+          # while the app is in the background (MEMNG-952, `StagingLane`).
+          - live.discomarder.memosng.outbox-staging
         # The sign-in's return lane — the only one that can fire in this deployment, because the
         # universal link above needs an association Apple's CDN cannot fetch from internal-only
         # DNS. The callback page the server serves carries a link on exactly this scheme and host
@@ -162,6 +165,8 @@ targets:
               - memosng
         UIBackgroundModes:
           - fetch
+          # A BGProcessingTask needs this mode beside its permitted identifier (MEMNG-952).
+          - processing
         # The export-compliance answer, given once here so App Store Connect stops asking it on
         # every upload. It is a real boolean, which is why it lives in this block and not in an
         # INFOPLIST_KEY_ setting: build settings are strings, and this key is read as a Boolean.
@@ -220,11 +225,13 @@ targets:
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Memos uses the microphone to record the sound of a video you take for a memo. Photos never use it.
         # The system share sheet is handed the downloaded file with no activity excluded
         # (`MediaSaveFlow.swift`, `ShareSheet`), so it offers "Save Image" and "Save Video", and
-        # iOS asks this string of any app a photo is added to the library from. ADD-ONLY on
-        # purpose, never `NSPhotoLibraryUsageDescription`: the app reads nothing from the library
-        # — composing picks through `PhotosPicker`, which needs no key — and asking for less is
-        # the point.
-        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: Memos saves the photo or video you chose to keep into your photo library. It never reads your library.
+        # iOS asks this string of any app a photo is added to the library from.
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: Memos saves the photo or video you chose to keep into your photo library.
+        # Read access, asked once when a memo is posted while picked items are still loading: the
+        # items are then copied from the library by the outbox, after the composer has closed and
+        # across a relaunch, which only the library's own identifier can do (MEMNG-952). Denied,
+        # the items already loaded are still sent and the rest wait for access.
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: Memos copies the photos and videos you picked for a memo from your library, so they can finish sending after you close the composer.
         # Signing lives in signing.default.yml (committed, ad-hoc, simulator-only) overridden by
         # signing.local.yml (gitignored, per-machine device team) — see the include list at the
         # top of this file. Never set signing here and never click it into the generated project.
