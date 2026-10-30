@@ -135,6 +135,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // result the instant this process exists, and a result that finds no handler is discarded
         // with the server's own byte count in it. Nothing here waits on a session: recording what
         // already happened is not a send.
+        // Before the first read of the queue, and before launch finishes: a tap on a transfer
+        // notification that launched this process is delivered to the delegate set here.
+        attachTransferNotifications(to: outbox)
         if let outbox { Task { @MainActor in await outbox.adopt() } }
         // New work starts only while the app is active (decision 9): a wake finishes what the
         // system already holds and sends a finished capture's memo, nothing more. The UIApplication

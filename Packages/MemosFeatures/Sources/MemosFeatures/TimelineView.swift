@@ -295,6 +295,10 @@ public struct TimelineView: View {
         // `onChange`, because satisfying it can mean reading the memo from the server first and
         // that read must be cancellable with the screen.
         .task(id: jump?.pending) { await consumeJump() }
+        // A tapped notification about a held capture opens the sheet that holds its row.
+        .onChange(of: TransferNoticeInbox.shared.pending, initial: true) { _, _ in
+            if TransferNoticeInbox.shared.takeTransfers() != nil { transfersOpen = true }
+        }
     }
 
     /// The viewer over a memo's media, reading the memo through the timeline when it can name it.

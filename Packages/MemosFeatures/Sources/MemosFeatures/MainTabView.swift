@@ -172,6 +172,12 @@ struct MainTabView: View {
         .onChange(of: jump.pending) { _, pending in
             selection = MemoJumpRouting.tab(showing: selection, whenJumping: pending)
         }
+        // A tapped transfer notification: a memo goes through the jump above, a capture's row
+        // opens on the Timeline, which owns the transfers sheet. Initial, because a tap that
+        // launched the app arrives before this view exists.
+        .onChange(of: TransferNoticeInbox.shared.pending, initial: true) { _, _ in
+            if let tab = TransferNoticeInbox.shared.dispatch(into: jump) { selection = tab }
+        }
         // The same for a tag asked for from Collections: the Library applies it.
         .onChange(of: tagJump.pending) { _, pending in
             selection = LibraryTagJumpRouting.tab(showing: selection, whenOpening: pending)

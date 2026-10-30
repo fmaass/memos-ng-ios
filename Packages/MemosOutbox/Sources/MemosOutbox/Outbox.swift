@@ -82,6 +82,15 @@ public final class Outbox {
     /// that read's ticket, so a read that began earlier and answered later is refused there.
     public let transfers: TransferLedger
 
+    /// Run, in the order they were added, after every read of the queue `refresh` applied —
+    /// synchronously, with `jobs`, `resolvedMemos` and `transfers` already holding that read, so
+    /// an observer judges the read that was just taken and never a later one.
+    @ObservationIgnored private var refreshObservers: [@MainActor () -> Void] = []
+
+    public func onRefresh(_ observer: @escaping @MainActor () -> Void) {
+        refreshObservers.append(observer)
+    }
+
     private let repository: OutboxRepository
     private let credentials: any OutboxCredentialsProviding
     private let network: any NetworkPathProviding
@@ -340,6 +349,7 @@ public final class Outbox {
             if OutboxProgress.didComplete(previous: previous, current: loaded.map(\.id)) {
                 lastCompletedAt = Date()
             }
+            for observer in refreshObservers { observer() }
         } catch {
             // A queue that could not be read is NOT an empty queue. What is on screen stays on
             // screen, and the reason it could not be re-read is said out loud.
