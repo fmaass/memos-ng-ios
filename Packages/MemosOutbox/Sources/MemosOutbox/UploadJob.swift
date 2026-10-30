@@ -324,6 +324,11 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// Whether files are still arriving from the editor, so the create must wait for them.
     public var stillArriving: Bool { stagingLaunch != nil }
 
+    /// Who the memo is meant to be visible to as the capture now stands (MEMNG-971): the owed
+    /// edit's value when it carries one, else the create's — the same fallback the edit's request
+    /// is built with (`OutboxRequests.patchMemo`). Nil is the account's default.
+    public var intendedVisibility: String? { pendingEdit?.visibility ?? visibility }
+
     /// How many of the items picked for this capture have not reached it. Set when Post takes a
     /// capture with items still loading, one less for each that is appended; what is left when the
     /// capture is let go — a load that failed, a copy that failed, an append the queue refused, the

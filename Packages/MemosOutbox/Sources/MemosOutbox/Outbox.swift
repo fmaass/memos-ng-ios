@@ -820,6 +820,30 @@ public final class Outbox {
         )
     }
 
+    /// Changes who a pending capture will be visible to: the visibility menu on its pending card
+    /// and in the Transfers sheet (MEMNG-971).
+    ///
+    /// The rule is the repository's and it is one write (`OutboxRepository.setVisibility`); this
+    /// reads the queue again and, when the change is owed to a memo the create may already have
+    /// made, drains so that the edit goes. A write the disk or the lock refused changed nothing,
+    /// and is answered as the refusal it is — the menu then shows what the manifest still says.
+    @discardableResult
+    public func setVisibility(
+        _ visibility: String, of jobID: UUID
+    ) async -> OutboxRepository.VisibilityWrite {
+        let written: OutboxRepository.VisibilityWrite
+        do {
+            written = try await repository.setVisibility(visibility, of: jobID)
+        } catch {
+            Self.log.error(
+                "A visibility change could not be written: \(error.localizedDescription)")
+            written = .refused
+        }
+        await refresh()
+        if written == .owedAsEdit { await drainAfterAdoption() }
+        return written
+    }
+
     /// Throws a capture away on purpose — the "Remove" offered by a row whose manifest could not be
     /// read, which is the only row nothing else can ever move. A capture leaves this device because
     /// a person decided it should, never because something swept.

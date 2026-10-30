@@ -10,6 +10,8 @@ struct PendingMemoHeader: View {
     let ledger: TransferLedger?
     let edit: () -> Void
     let withdraw: () -> Void
+    /// A visibility the person chose for this capture, already past the widening question.
+    var setVisibility: (VisibilityChange) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.tight) {
@@ -18,6 +20,9 @@ struct PendingMemoHeader: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
+                if PendingVisibility.isEditable(memo.job) {
+                    PendingVisibilityMenu(job: memo.job, set: setVisibility)
+                }
                 actions
             }
             if !memo.tags.isEmpty {
@@ -49,7 +54,12 @@ struct PendingMemoHeader: View {
 
     private var actions: some View {
         Menu {
-            ForEach(PendingMemoActions.offers(for: memo.job)) { offer in
+            // Visibility, when it can be changed, is the menu beside this one rather than a row.
+            ForEach(
+                PendingMemoActions.offers(for: memo.job).filter {
+                    $0.action != .visibility || $0.disabledReason != nil
+                }
+            ) { offer in
                 Button(role: offer.action == .remove ? .destructive : nil) {
                     switch offer.action {
                     case .edit: edit()
@@ -69,6 +79,48 @@ struct PendingMemoHeader: View {
         } label: {
             Image(systemName: "ellipsis.circle")
                 .accessibilityLabel("Actions")
+        }
+    }
+}
+
+/// The edit sheet's visibility menu on a capture that has not reached the server (MEMNG-971), on
+/// its pending card and in the Transfers sheet alike. A pick is decided by `PendingVisibility.pick`
+/// — a narrowing goes, a widening puts its one question up — and the yes is claimed synchronously
+/// in `WideningAsk.answer`, so two taps on it are one change.
+struct PendingVisibilityMenu: View {
+    let job: UploadJob
+    let set: (VisibilityChange) -> Void
+    @State private var widening = WideningAsk()
+
+    var body: some View {
+        VisibilityMenu(
+            selection: Binding(
+                get: { PendingVisibility.current(of: job) },
+                set: { picked in
+                    guard let picked else { return }
+                    if let change = PendingVisibility.pick(picked, on: job, asking: &widening) {
+                        set(change)
+                    }
+                }
+            ),
+            accountDefault: nil,
+            spelling: .glyph,
+            offersDefault: false
+        )
+        .alert(
+            widening.title,
+            isPresented: Binding(
+                get: { widening.pending != nil },
+                set: { if !$0 { _ = widening.answer(widening.pending, confirmed: false) } }
+            ),
+            presenting: widening.pending
+        ) { pending in
+            Button("Make \(pending.question.to.label)") {
+                if let yes = widening.answer(pending, confirmed: true) { set(yes.change) }
+            }
+            Button("Cancel", role: .cancel) { _ = widening.answer(pending, confirmed: false) }
+        } message: { pending in
+            Text(pending.question.sentence)
         }
     }
 }

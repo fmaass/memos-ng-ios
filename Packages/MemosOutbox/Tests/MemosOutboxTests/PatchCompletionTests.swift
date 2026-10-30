@@ -10,7 +10,7 @@ import Testing
 /// a picture the memo already holds. An edit key it has already applied answers with the memo's
 /// current state and applies nothing, which is what makes a second transmission of the same edit
 /// harmless rather than a second edit.
-private final class MemoServer: @unchecked Sendable {
+final class KeyedMemoServer: @unchecked Sendable {
     struct Memo {
         var uid: String
         var attachmentUIDs: [String]
@@ -161,11 +161,11 @@ private final class PatchParking: MemoCompleting, @unchecked Sendable {
 }
 
 @MainActor
-private struct Patching {
+struct Patching {
     let root: URL
     let repository: OutboxRepository
     let http: ScriptedHTTP
-    let server: MemoServer
+    let server: KeyedMemoServer
     let outbox: Outbox
     let preferencesName: String
 
@@ -204,7 +204,7 @@ private struct Patching {
 struct PatchCompletionTests {
     private func harness(
         root existing: URL? = nil,
-        server: MemoServer = MemoServer(),
+        server: KeyedMemoServer = KeyedMemoServer(),
         clock: MutableClock? = nil,
         completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil,
         uploads: (any OutboxUploadScheduling)? = nil,
@@ -479,7 +479,7 @@ struct PatchCompletionTests {
 
     @Test("an edited restored draft becomes one memo carrying every edit")
     func theEditedDraftIsAppliedAsOneEdit() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -547,7 +547,7 @@ struct PatchCompletionTests {
     @Test("a replay answered 201 with the same uid makes no second memo", arguments: [201, 200])
     func aReplayedCreateIsOneMemo(status: Int) async throws {
         let harness = try harness(
-            server: MemoServer(losingResponses: 1, replayStatus: status))
+            server: KeyedMemoServer(losingResponses: 1, replayStatus: status))
         defer { harness.cleanUp() }
         let job = try await capture(harness, files: [(name: "a.heic", bytes: 400)])
         _ = try await uploaded(harness, job)
@@ -570,7 +570,7 @@ struct PatchCompletionTests {
 
     @Test("a resubmit sends an edit exactly when there is one", arguments: [true, false])
     func createAndEditAreExclusive(editing: Bool) async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -604,7 +604,7 @@ struct PatchCompletionTests {
 
     @Test("a relaunch before the edit was sent drives it home")
     func aRelaunchBeforeTheEditFinishesIt() async throws {
-        let server = MemoServer(losingResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1)
         let entered = Latch()
         let released = Latch()
         let first = try harness(
@@ -668,7 +668,7 @@ struct PatchCompletionTests {
 
     @Test("a relaunch after the edit was sent replays it byte for byte")
     func aRelaunchAfterTheEditReplaysIt() async throws {
-        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1, losingPatchResponses: 1)
         let first = try harness(server: server)
         defer { first.cleanUp() }
         let job = try await capture(
@@ -773,7 +773,7 @@ struct PatchCompletionTests {
     @Test("a refused edit waits out its backoff and is replayed under the key it was minted with")
     func aRefusedEditWaitsItsBackoffAndIsReplayed() async throws {
         let clock = MutableClock(Date().addingTimeInterval(60))
-        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1, losingPatchResponses: 1)
         let harness = try harness(server: server, clock: clock)
         defer { harness.cleanUp() }
         let job = try await capture(
@@ -811,7 +811,7 @@ struct PatchCompletionTests {
 
     @Test("a picture staged after the create resolved goes up before the edit that names it")
     func aStagedPictureUploadsBeforeTheEdit() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(harness, files: [(name: "a.heic", bytes: 400)])
         _ = try await uploaded(harness, job)
@@ -847,7 +847,7 @@ struct PatchCompletionTests {
 
     @Test("a second cancel hands back the edited draft, not the one the capture was made with")
     func aSecondCancelHandsBackTheEditedDraft() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 2))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 2))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -875,7 +875,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -900,7 +900,7 @@ struct PatchCompletionTests {
 
     @Test("a second edit is sent under a key of its own")
     func aSecondEditIsSentUnderItsOwnKey() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 2))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 2))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -928,7 +928,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -960,7 +960,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -1007,7 +1007,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -1048,7 +1048,7 @@ struct PatchCompletionTests {
     @Test("an edit whose answer was lost holds the capture until the server answers definitely")
     func aLostEditAnswerKeepsTheCaptureUntilItIsSettled() async throws {
         let clock = MutableClock(Date().addingTimeInterval(60))
-        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1, losingPatchResponses: 1)
         let harness = try harness(server: server, clock: clock)
         defer { harness.cleanUp() }
         let job = try await capture(
@@ -1081,7 +1081,7 @@ struct PatchCompletionTests {
 
     @Test("an original the create's answer never named is sent again and the edit names both")
     func anUnnamedRetainedOriginalIsSentAgainAndTheEditNamesBoth() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -1119,7 +1119,7 @@ struct PatchCompletionTests {
 
     @Test("an original whose bytes this device no longer holds is taken, then stops the change")
     func anOriginalWhoseBytesAreGoneHoldsTheCapture() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -1157,7 +1157,7 @@ struct PatchCompletionTests {
         let clock = MutableClock(Date().addingTimeInterval(60))
         // Lost first, refused second: the refusal has to find a capture whose edit is already
         // owed, which is the state a replay is answered in.
-        let server = MemoServer(losingResponses: 1, refusingPatchesWith: [503, 401])
+        let server = KeyedMemoServer(losingResponses: 1, refusingPatchesWith: [503, 401])
         let harness = try harness(server: server, clock: clock)
         defer { harness.cleanUp() }
         let job = try await capture(
@@ -1187,7 +1187,7 @@ struct PatchCompletionTests {
     @Test("Try again releases a hold carrying an unanswered edit, and replays the same key")
     func retryReleasesAHoldCarryingAnUnansweredEdit() async throws {
         let clock = MutableClock(Date().addingTimeInterval(60))
-        let server = MemoServer(losingResponses: 1, losingPatchResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1, losingPatchResponses: 1)
         let harness = try harness(server: server, clock: clock)
         defer { harness.cleanUp() }
         let job = try await capture(
@@ -1220,7 +1220,7 @@ struct PatchCompletionTests {
 
     @Test("a re-submit made before the create resolved still names every picture the memo keeps")
     func aResubmitBeforeTheCreateResolvesNamesEveryPicture() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -1246,7 +1246,7 @@ struct PatchCompletionTests {
 
     @Test("a relaunch on a manifest whose retained original is unnamed sends it again")
     func aRelaunchRecoversAnUnnamedRetainedOriginal() async throws {
-        let server = MemoServer(losingResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1)
         let first = try harness(server: server)
         defer { first.cleanUp() }
         let job = try await capture(
@@ -1300,7 +1300,7 @@ struct PatchCompletionTests {
     @Test("a refusal the frozen body earned settles the change and gives the capture back")
     func aRefusalDecidedOnTheFrozenBodySettlesTheEdit() async throws {
         let harness = try harness(
-            server: MemoServer(losingResponses: 1, refusingPatchesWith: [422]))
+            server: KeyedMemoServer(losingResponses: 1, refusingPatchesWith: [422]))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -1322,7 +1322,7 @@ struct PatchCompletionTests {
 
     @Test("a memo that is gone answers nothing about the change, so the capture stays frozen")
     func aMemoGoneRefusalDoesNotSettleTheEdit() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])
@@ -1353,7 +1353,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -1380,7 +1380,7 @@ struct PatchCompletionTests {
 
     @Test("an original this device can no longer read stops the change before it is claimed")
     func anUnreadableRetainedOriginalHoldsBeforeTheClaim() async throws {
-        let server = MemoServer(losingResponses: 1)
+        let server = KeyedMemoServer(losingResponses: 1)
         let first = try harness(server: server)
         defer { first.cleanUp() }
         let job = try await capture(
@@ -1422,7 +1422,7 @@ struct PatchCompletionTests {
         let entered = Latch()
         let released = Latch()
         let harness = try harness(
-            server: MemoServer(losingResponses: 1),
+            server: KeyedMemoServer(losingResponses: 1),
             completion: { PatchParking($0, entered: entered, released: released) }
         )
         defer { harness.cleanUp() }
@@ -1463,7 +1463,7 @@ struct PatchCompletionTests {
 
     @Test("a change that was never built can still be taken back after Try again")
     func aChangeHeldBeforeTheClaimStaysTakeBackable() async throws {
-        let harness = try harness(server: MemoServer(losingResponses: 1))
+        let harness = try harness(server: KeyedMemoServer(losingResponses: 1))
         defer { harness.cleanUp() }
         let job = try await capture(
             harness, files: [(name: "a.heic", bytes: 400), (name: "b.heic", bytes: 400)])

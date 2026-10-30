@@ -1,3 +1,4 @@
+import MemosCore
 import MemosOutbox
 import SwiftUI
 
@@ -55,6 +56,8 @@ struct TransfersSheet: View {
     let lastProgressAt: [UUID: Date]
     let verdict: UploadVerdict
     let perform: (TransfersAction, UUID) -> Void
+    /// A visibility chosen for a capture that has not landed, for its manifest (MEMNG-971).
+    var setVisibility: (UUID, VisibilityChange) -> Void = { _, _ in }
     @Environment(\.dismiss) private var dismiss
     /// Written when the next row's stall threshold passes, so the body is read again and that row
     /// says it has stopped — one wake at the instant a sentence changes, never a repeating timer.
@@ -73,10 +76,20 @@ struct TransfersSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(sections) { section in
-                    Section(section.title.isEmpty ? "Capture" : section.title) {
+                    Section {
                         ForEach(section.rows) { row in
                             TransfersRowView(row: row) { action in
                                 perform(action, row.jobID)
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            Text(section.title.isEmpty ? "Capture" : section.title)
+                            Spacer(minLength: 0)
+                            if let job = ledger.job(section.id)?.manifest,
+                                PendingVisibility.isEditable(job)
+                            {
+                                PendingVisibilityMenu(job: job) { setVisibility(section.id, $0) }
                             }
                         }
                     }

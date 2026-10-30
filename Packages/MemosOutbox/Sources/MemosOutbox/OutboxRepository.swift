@@ -796,6 +796,75 @@ public actor OutboxRepository {
         return try persist(next)
     }
 
+    /// What a visibility change on a pending capture became (MEMNG-971).
+    public enum VisibilityWrite: Sendable, Equatable {
+        /// No create can have reached the server: the create's own value was changed, and the
+        /// create reads it from the manifest when it is sent.
+        case intoCreate
+        /// A create may be on the wire or may already have committed, so its body is left exactly
+        /// as it was sent — a replay under the same key answers with the memo it made — and the
+        /// change is owed to that memo as an edit, applied by one PATCH once its uid is known.
+        case owedAsEdit
+        /// The capture already meant that: nothing was written.
+        case unchanged
+        /// Nothing was written: the capture is gone, taken back to the editor, or a change of it
+        /// is on the wire and its body is frozen until the server answers.
+        case refused
+    }
+
+    /// Changes who a pending capture is to be visible to — the pending card's and the Transfers
+    /// sheet's visibility menu (MEMNG-971).
+    ///
+    /// ONE mutation: the read, the question and the write are on this isolation with nothing
+    /// awaited between them, under a shared lease of the root like every other write a person makes
+    /// here, so no pass of this process's engine can claim the create between the question and the
+    /// write. The question is `createMayHaveBeenSent`, asked of the manifest this writes: the
+    /// engine writes `.creating` BEFORE its POST leaves, so a change that finds the create claimed
+    /// — or sent once with no answer — cannot be put into the create's body, because a replay under
+    /// the same key answers with the memo the first body made. It is owed to that memo instead, as
+    /// an edit under a key of its own, and the edit lane applies it with one PATCH once the memo's
+    /// uid is known. The create that was in flight cannot finish the capture under it either: its
+    /// removal is fenced on the manifest it claimed, which this changed.
+    public func setVisibility(_ visibility: String, of id: UUID) throws -> VisibilityWrite {
+        let lease: OutboxLease
+        switch lock.acquire(.shared) {
+        case .leased(let held):
+            lease = held
+        case .refused(let failure):
+            throw OutboxStorageError.queueBusy(failure)
+        }
+        defer { lease.release() }
+        // Taken back, the capture is the editor's; with a change on the wire, its body is frozen
+        // until the server answers (`editUnansweredSince`).
+        guard let job = job(id), job.cancelledAt == nil, job.editUnansweredSince == nil else {
+            return .refused
+        }
+        guard job.intendedVisibility != visibility else { return .unchanged }
+        var next = job
+        let written: VisibilityWrite
+        if var edit = job.pendingEdit {
+            // An edit is already owed: this is a different edit of it, under a key of its own.
+            edit.visibility = visibility
+            next.pendingEdit = edit
+            next.editKey = UUID().uuidString
+            written = .owedAsEdit
+        } else if job.createMayHaveBeenSent {
+            next.pendingEdit = PendingEdit(
+                content: job.content,
+                visibility: visibility,
+                capturedAt: job.capturedAt,
+                fileIDs: job.files.map(\.id)
+            )
+            next.editKey = UUID().uuidString
+            written = .owedAsEdit
+        } else {
+            next.visibility = visibility
+            written = .intoCreate
+        }
+        _ = try persist(next)
+        return written
+    }
+
     /// What letting a capture go found.
     public enum StagingRelease: Sendable, Equatable {
         /// The mark is gone; the create may be sent once its files are up.

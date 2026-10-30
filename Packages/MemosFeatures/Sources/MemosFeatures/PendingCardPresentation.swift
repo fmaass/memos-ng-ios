@@ -110,7 +110,8 @@ public struct PendingMemoOffer: Sendable, Equatable, Identifiable {
 
 public enum PendingMemoActions {
     static let notYetAMemo = "Available once the memo has reached the server."
-    static let visibilityInEdit = "Change who can see it in Edit until it has reached the server."
+    static let visibilityOnTheWire =
+        "A change is being sent. Change who can see it once it has arrived."
     static let stillArriving = "Files are still being added. Edit it once they are in."
     static let nothingToSend = "Nothing in it arrived. Remove it and write a new memo."
     static let editOnTheWire = "A change is being sent. Edit it again once it has arrived."
@@ -136,9 +137,40 @@ public enum PendingMemoActions {
         case .remove:
             return job.createMayHaveBeenSent ? mayBeOnServer : nil
         case .visibility:
-            return visibilityInEdit
+            // The manifest's visibility is edited until the memo lands (MEMNG-971); only a change
+            // already on the wire freezes it, exactly as it freezes Edit.
+            return job.editUnansweredSince != nil ? visibilityOnTheWire : nil
         case .pin, .archive, .favorite, .addToCollection, .share:
             return notYetAMemo
         }
+    }
+}
+
+/// Who a capture that has not reached the server will be visible to, as the pending card and the
+/// Transfers sheet show it and change it (MEMNG-971).
+///
+/// What is SHOWN is the manifest's own answer (`UploadJob.intendedVisibility`); what a pick DOES is
+/// the edit sheet's rule, `WideningAsk` over `VisibilityChange`: a narrowing goes, a widening asks
+/// once and only its yes goes. The write is the outbox's (`Outbox.setVisibility`).
+enum PendingVisibility {
+    /// The audience the capture is to have; nil while it is the account's default.
+    static func current(of job: UploadJob) -> MemoVisibility? {
+        job.intendedVisibility.flatMap(MemoVisibility.init(rawValue:))
+    }
+
+    /// Whether the menu is offered at all: the same rule the card's action list states.
+    static func isEditable(_ job: UploadJob) -> Bool {
+        PendingMemoActions.offers(for: job).first { $0.action == .visibility }?.disabledReason
+            == nil
+    }
+
+    /// A person picked `to` on `job`: the change to send now, or nil when nothing goes — the
+    /// capture already means that, or a widening's question is now up on `widening`.
+    static func pick(
+        _ to: MemoVisibility, on job: UploadJob, asking widening: inout WideningAsk
+    ) -> VisibilityChange? {
+        let next = widening.pick(to, from: current(of: job), on: job.id.uuidString)
+        guard case .send(let change) = next else { return nil }
+        return change
     }
 }

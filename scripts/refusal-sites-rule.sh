@@ -328,8 +328,11 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # real outbox, fed its signed-in provider's predicate. 44: the staging witness in MemosOutboxTests
 # (MEMNG-951) composes the real outbox around a capture still taking files, fed its switchable
 # provider's predicate. 45: the upload limit witness in MemosCoreTests (MEMNG-956) drains the real
-# outbox under a signed-in session's grant, fed its device provider's predicate.
-pin "'OutboxRepository(' constructions" 45 \
+# outbox under a signed-in session's grant, fed its device provider's predicate. 46-47: the
+# pending-visibility witnesses in MemosOutboxTests (MEMNG-971) — the patch harness, fed a
+# constant-true predicate (no credential under test), and a second repository on the same root
+# whose lock always refuses, to prove a refused lease writes nothing.
+pin "'OutboxRepository(' constructions" 47 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

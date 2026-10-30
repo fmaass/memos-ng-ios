@@ -394,6 +394,8 @@ struct PendingSection: View {
     var ledger: TransferLedger? = nil
     /// "Remove" on a pending card: out of the queue while nothing may have reached the server.
     var withdraw: (UUID) -> Void = { _ in }
+    /// A visibility chosen on a pending card, for its capture's manifest (MEMNG-971).
+    var setVisibility: (UUID, VisibilityChange) -> Void = { _, _ in }
 
     /// The instant the last arming was measured from. Read here so that writing it re-runs this
     /// body.
@@ -418,7 +420,8 @@ struct PendingSection: View {
                     memo: memo,
                     ledger: ledger,
                     edit: { restore(row.id) },
-                    withdraw: { withdraw(row.id) }
+                    withdraw: { withdraw(row.id) },
+                    setVisibility: { setVisibility(row.id, $0) }
                 )
                 .cardRow()
                 // The key the memo it becomes is drawn under (`TimelineStore.identityKey`).
@@ -449,11 +452,14 @@ struct PendingCard: View {
     var ledger: TransferLedger? = nil
     var edit: () -> Void = {}
     var withdraw: () -> Void = {}
+    var setVisibility: (VisibilityChange) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
             if let memo {
-                PendingMemoHeader(memo: memo, ledger: ledger, edit: edit, withdraw: withdraw)
+                PendingMemoHeader(
+                    memo: memo, ledger: ledger, edit: edit, withdraw: withdraw,
+                    setVisibility: setVisibility)
             }
             HStack(spacing: DesignTokens.Space.tight) {
                 Image(

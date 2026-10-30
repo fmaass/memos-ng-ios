@@ -312,11 +312,13 @@ struct PendingMemoActionTests {
     func everyActionIsOfferedOrExplained() {
         let offers = PendingMemoActions.offers(for: job())
         #expect(offers.map(\.action) == PendingMemoAction.allCases)
-        for offer in offers where offer.action != .edit && offer.action != .remove {
+        let applied: Set<PendingMemoAction> = [.edit, .remove, .visibility]
+        for offer in offers where !applied.contains(offer.action) {
             #expect(offer.disabledReason?.isEmpty == false, "\(offer.action) is silently inert")
         }
         #expect(reason(.edit, job()) == .some(nil))
         #expect(reason(.remove, job()) == .some(nil))
+        #expect(reason(.visibility, job()) == .some(nil))
     }
 
     @Test("Edit waits for files still arriving and for a change on the wire")

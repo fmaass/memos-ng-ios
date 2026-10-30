@@ -449,6 +449,9 @@ public struct TimelineView: View {
                         ledger: outbox.transfers,
                         withdraw: { id in
                             Task { if await outbox.withdraw(id) { timeline.withdrawPending(id) } }
+                        },
+                        setVisibility: { id, change in
+                            Task { await outbox.setVisibility(change.to.rawValue, of: id) }
                         }
                     )
                 }
@@ -562,10 +565,14 @@ public struct TimelineView: View {
                 TransfersSheet(
                     ledger: outbox.transfers,
                     lastProgressAt: outbox.lastProgressAt,
-                    verdict: outbox.uploadVerdict
-                ) { action, jobID in
-                    Task { await fix(action, jobID: jobID, outbox: outbox) }
-                }
+                    verdict: outbox.uploadVerdict,
+                    perform: { action, jobID in
+                        Task { await fix(action, jobID: jobID, outbox: outbox) }
+                    },
+                    setVisibility: { jobID, change in
+                        Task { await outbox.setVisibility(change.to.rawValue, of: jobID) }
+                    }
+                )
             }
         }
         .alert(
