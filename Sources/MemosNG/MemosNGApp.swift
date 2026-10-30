@@ -2,6 +2,7 @@ import BackgroundTasks
 import MemosCore
 import MemosFeatures
 import MemosOutbox
+import os
 import SwiftUI
 import UIKit
 
@@ -107,6 +108,10 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     /// woke the app for, kept apart from the outbox's two, and the handlers held per wake ticket.
     private var spikeSessions: [String: (session: URLSession, receiver: UploadSpikeReceiver)] = [:]
     private var spikeHandlers: [String: () -> Void] = [:]
+    /// Held by wake TICKET, never by identifier: an answer can only ever reach its own wake.
+    private var shareHandlers: [Int: () -> Void] = [:]
+    private let shareWakes = ShareWakeTickets()
+    private static let wakeLog = Logger(subsystem: "live.discomarder.memosng", category: "wake")
 
     func application(
         _ application: UIApplication,
@@ -129,6 +134,11 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         outbox = try? Outbox.live(
             credentials: DeviceOutboxCredentials(epoch: { epoch.current }) {
                 await MainActor.run { session.credentialGrant() }
+            },
+            shareEventsFinished: { [weak self, shareWakes = self.shareWakes] identifier in
+                // Claimed HERE, on the delegate's queue, before the hop to the main actor.
+                let won = shareWakes.claimFinished(identifier)
+                Task { @MainActor in self?.answerShareWakes(won) }
             }
         )
         uploadSettings = outbox.map {
@@ -206,6 +216,17 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         handleEventsForBackgroundURLSession identifier: String,
         completionHandler: @escaping () -> Void
     ) {
+        // Which identifier woke the app, for every wake: whether the system wakes a force-quit app
+        // for a session the share extension started is exactly what a device run has to record.
+        Self.wakeLog.notice(
+            "handleEventsForBackgroundURLSession \(identifier, privacy: .public)")
+        // A capture's own session, which the share extension started: attached at once — the
+        // system delivers its events to the session that carries its identifier — and the system
+        // answered when the session says its events are over, or at the fallback deadline.
+        if let shareSessions = outbox?.shareSessions, shareSessions.owns(identifier) {
+            receiveShare(identifier, sessions: shareSessions, completionHandler: completionHandler)
+            return
+        }
         // Before the outbox is asked: a spike session is not one of its two, and it would answer
         // the system at once.
         if UploadSpike.isSpikeSession(identifier) {
@@ -220,6 +241,30 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
             return
         }
         Task { @MainActor in await self.startOutbox(holding: wake) }
+    }
+
+    /// The share session's wake. The held handlers are taken out of the dictionary on the main
+    /// actor by whichever of the two answers comes first, so the system is answered exactly once.
+    private func receiveShare(
+        _ identifier: String, sessions: ShareSessions, completionHandler: @escaping () -> Void
+    ) {
+        if let root = OutboxRepository.appGroupRoot() {
+            UploadSpikeLog.append(
+                "app: handleEventsForBackgroundURLSession \(identifier)", root: root)
+        }
+        let ticket = shareWakes.arm(identifier)
+        shareHandlers[ticket] = completionHandler
+        sessions.attach(identifier)
+        Task { @MainActor in
+            await self.outbox?.reattachShareSessions()
+            try? await Task.sleep(for: OutboxBackgroundCompletion.fallbackDelay)
+            // This wake's own ticket, claimed before anything is answered.
+            if self.shareWakes.claim(ticket) { self.answerShareWakes([ticket]) }
+        }
+    }
+
+    func answerShareWakes(_ tickets: [Int]) {
+        for ticket in tickets { shareHandlers.removeValue(forKey: ticket)?() }
     }
 
     /// MEMNG-538 spike: recreate the extension's session under its identifier, so the system can
@@ -278,6 +323,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // trip, so attaching behind it leaves that whole trip as a window. Adoption sends nothing,
         // so it needs no session and waits for none.
         await outbox?.adopt()
+        // Sends nothing either: a capture a share session no longer needs is handed back here, so
+        // the drain below can finish it.
+        await outbox?.reattachShareSessions()
         if session.state.user == nil {
             await session.restore()
         }

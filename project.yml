@@ -236,9 +236,12 @@ targets:
         # signing.local.yml (gitignored, per-machine device team) — see the include list at the
         # top of this file. Never set signing here and never click it into the generated project.
 
-  # The share sheet. It persists a capture into the app group's outbox and returns: the app owns
-  # the one background upload session — two processes cannot share it — so an extension that
-  # uploaded would race its own host and lose the transfer when the sheet closes.
+  # The share sheet. It persists a capture into the app group's outbox, then — holding an upload
+  # credential — starts the uploads under a background session of the capture's own
+  # (live.discomarder.memosng.uploads.share.<jobUUID>, the app group as shared container) and
+  # registers it in the group's session registry. One session per identifier per process is the
+  # rule, so it never touches the app's session; the app attaches to every registered identifier
+  # on wake and retires each once its capture landed.
   MemosShare:
     type: app-extension
     platform: iOS

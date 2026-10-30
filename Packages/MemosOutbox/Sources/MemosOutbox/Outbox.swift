@@ -92,6 +92,7 @@ public final class Outbox {
     }
 
     private let repository: OutboxRepository
+    public let shareSessions: ShareSessions?
     private let credentials: any OutboxCredentialsProviding
     private let network: any NetworkPathProviding
     private let engine: OutboxEngine
@@ -149,9 +150,12 @@ public final class Outbox {
         schedulingGate: SchedulingGate = SchedulingGate(),
         // The whole lane. Without one no capture is ever put on it (`OutboxEngine`).
         uploads: (any OutboxUploadScheduling)? = nil,
+        // The share extension's sessions. A capture one of them carries is left to it.
+        shareSessions: ShareSessions? = nil,
         // The library picked items are copied from. Without one no item stays in Photos.
         photos: (any PhotoLibrarySource)? = nil
     ) {
+        self.shareSessions = shareSessions
         self.attachScheduler = attachScheduler
         self.uploads = uploads
         self.schedulingGate = schedulingGate
@@ -176,7 +180,10 @@ public final class Outbox {
             clock: clock,
             onChange: { await changes.fire() },
             schedulingGate: schedulingGate,
-            uploads: uploads
+            uploads: uploads,
+            carriedElsewhere: { [registry = shareSessions?.registry] jobID in
+                registry?.carries(jobID: jobID) ?? false
+            }
         )
         changes.attach { [weak self] in await self?.refresh() }
         // The two events that can make a held capture sendable, wired to the only thing that can
@@ -197,7 +204,8 @@ public final class Outbox {
     /// a missing entitlement must degrade to "queues locally", never to "loses the capture".
     public static func live(
         appGroup: String = OutboxDefaults.appGroup,
-        credentials: any OutboxCredentialsProviding
+        credentials: any OutboxCredentialsProviding,
+        shareEventsFinished: @escaping @Sendable (String) -> Void = { _ in }
     ) throws -> Outbox {
         let root =
             OutboxRepository.appGroupRoot(appGroup: appGroup)
@@ -221,6 +229,14 @@ public final class Outbox {
             uploads: BackgroundUploadScheduler(appGroup: appGroup),
             network: NetworkPathMonitor(),
             preferences: UploadPreferences.live(appGroup: appGroup),
+            shareSessions: ShareSessions(registry: SessionRegistry(root: root)) { identifier in
+                URLSessionUploadTaskSession(
+                    session: URLSession(
+                        configuration: ShareSession.backgroundConfiguration(
+                            identifier: identifier, appGroup: appGroup),
+                        delegate: ShareSessionEvents(finished: shareEventsFinished),
+                        delegateQueue: nil))
+            },
             photos: Self.livePhotos
         )
     }
@@ -247,6 +263,7 @@ public final class Outbox {
         uploads: any OutboxUploadScheduling,
         network: any NetworkPathProviding,
         preferences: UploadPreferences,
+        shareSessions: ShareSessions? = nil,
         photos: (any PhotoLibrarySource)? = nil
     ) -> Outbox {
         Outbox(
@@ -260,8 +277,19 @@ public final class Outbox {
             attachScheduler: attachChunks,
             schedulingGate: SchedulingGate(isOpen: false),
             uploads: uploads,
+            shareSessions: shareSessions,
             photos: photos
         )
+    }
+
+    /// Attaches to every share session the extension registered, reconciles them, and retires the
+    /// ones nothing needs — so a capture they carried is the drain's again. Asked on every wake
+    /// and every return to the front: the system's wake for a finished share session is not
+    /// promised, and a capture must not wait for one.
+    @discardableResult
+    public func reattachShareSessions() async -> [String: ShareSessionVerdict] {
+        guard let shareSessions else { return [:] }
+        return await shareSessions.wake(repository: repository)
     }
 
     /// The app is in front of someone: new work may start again, and what waited for this — a
@@ -273,6 +301,7 @@ public final class Outbox {
     public func appBecameActive() -> Task<Void, Never> {
         schedulingGate.open()
         return Task {
+            await reattachShareSessions()
             await drain()
             // Access the person may have just allowed in Settings reaches the items left in Photos.
             await stageFromPhotos(mayPrompt: false)

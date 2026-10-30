@@ -125,6 +125,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private var observingGate = false
     private let sleeper: any OutboxSleeping
     private let rng: @Sendable () -> Double
+    /// Whether a share session carries this capture (`SessionRegistry.carries`).
+    private let carriedElsewhere: @Sendable (UUID) -> Bool
 
     /// The last write to the queue that did not happen, in the words a person gets to read, or nil
     /// while the last one went through. It is a channel of its own because the ordinary one — the
@@ -164,8 +166,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         schedulingGate: SchedulingGate = SchedulingGate(),
         uploads: (any OutboxUploadScheduling)? = nil,
         sleeper: any OutboxSleeping = SystemSleeper(),
-        rng: @escaping @Sendable () -> Double = { Double.random(in: 0...1) }
+        rng: @escaping @Sendable () -> Double = { Double.random(in: 0...1) },
+        carriedElsewhere: @escaping @Sendable (UUID) -> Bool = { _ in false }
     ) {
+        self.carriedElsewhere = carriedElsewhere
         self.sleeper = sleeper
         self.rng = rng
         self.schedulingGate = schedulingGate
@@ -488,6 +492,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // A capture taken back to the editor is answered by nothing: not the edit below, not
             // the planner, not a step this pass already earned.
             guard current.cancelledAt == nil else { return }
+            // A capture a share session is carrying is that session's until the app retires it
+            // (`ShareSessions.wake`): sending it here too would put every file on the wire twice.
+            // Asked for every step, because a wake can register or retire between two of them.
+            guard !carriedElsewhere(current.id) else { return }
             // Asked again for every step, beside `permitsNetwork` and for the same reason: the
             // only honest moment is the moment before a request would go out, and each of the
             // three actions below produces one.

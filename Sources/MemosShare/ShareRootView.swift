@@ -137,6 +137,15 @@ struct ShareRootView: View {
             )
             switch outcome {
             case .enqueued(let job):
+                // The capture is queued. With an upload credential the extension also opens its
+                // upload sessions and hands the files to the capture's own background session;
+                // the identity in the app group names an account and never carries a token, so
+                // until the capture grant supplies one this starts nothing and the app sends it.
+                let opening = OutboxAccountStore.live()?.currentLicence()
+                _ = await ShareTransfer.live(
+                    jobID: job, credential: nil, root: root, repository: repository,
+                    stillCurrent: { _ in OutboxAccountStore.live()?.currentLicence() == opening }
+                )
                 // MEMNG-538 spike (kill date 2026-11-03): returns at once unless the debug switch
                 // is on. The capture above is already queued either way.
                 await UploadSpikeShare.live(jobID: job, root: root)

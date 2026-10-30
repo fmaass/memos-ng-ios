@@ -3,8 +3,9 @@ import MemosOutbox
 
 /// What became of a share.
 public enum ShareOutcome: Sendable, Equatable {
-    /// The capture is on disk in the app group, whole, under this job id. It uploads when the app
-    /// next drains the queue — the extension never sends anything itself.
+    /// The capture is on disk in the app group, whole, under this job id. What sends it is decided
+    /// after this returns: the extension's own per-capture session when it holds an upload
+    /// credential (`ShareTransfer`), else the app's next drain.
     case enqueued(UUID)
     /// Nobody is signed in as far as anything outside the app can tell, so nothing was written.
     case notSignedIn
@@ -17,12 +18,16 @@ public enum ShareOutcome: Sendable, Equatable {
     case nothingToPost
 }
 
-/// The share extension's whole job: persist the capture, bind it to the account, and stop.
+/// The first half of a share: persist the capture, bind it to the account, and return.
 ///
-/// It deliberately cannot upload. The single-attach rule means one process owns the background
-/// session, and that process is the app: an extension that started its own would race the app for
-/// the same chunks and lose its host mid-transfer. So this writes to the queue the app drains, and
-/// the app's next launch or background refresh moves the bytes.
+/// It sends nothing itself. The single-attach rule holds PER IDENTIFIER, not per process: one
+/// `URLSession` per background identifier in each process. So once this has committed, the
+/// extension may start the uploads under a session of the capture's own
+/// (`live.discomarder.memosng.uploads.share.<jobUUID>`, `ShareTransfer`), never the app's, and
+/// registers that identifier in the app group (`SessionRegistry`); the app attaches to every
+/// registered identifier on any wake, reconciles its tasks against the manifest and retires it
+/// once the capture landed. Without an upload credential nothing is started, and the app's next
+/// launch or background refresh moves the bytes.
 public enum ShareIngest {
     /// - Parameter licence: how to READ the licence, not a licence somebody read earlier. It is a
     ///   closure because this method awaits — the capture reads below — and a share sheet can stand

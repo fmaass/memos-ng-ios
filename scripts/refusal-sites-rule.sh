@@ -336,7 +336,10 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # its refresh observer. 49-50: the staging-lane witnesses in MemosOutboxTests (MEMNG-952) — the
 # lane's rig and the same root reopened as a relaunch, both with no credential predicate (the lane
 # copies from Photos and sends nothing).
-pin "'OutboxRepository(' constructions" 50 \
+# 51: the share sessions' witness in MemosOutboxTests (MEMNG-945) holds the captures a share
+# session's registry, wake and start lane are judged against; it presents no credential of the
+# app's, so it takes the default predicate.
+pin "'OutboxRepository(' constructions" 51 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

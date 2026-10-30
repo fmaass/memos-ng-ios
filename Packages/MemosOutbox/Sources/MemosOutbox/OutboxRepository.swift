@@ -430,6 +430,23 @@ public actor OutboxRepository {
         return try persist(chosen)
     }
 
+    /// A write judged against the credential that ISSUED the request it records, by a fence the
+    /// caller holds rather than this repository's own: the share extension presents a credential
+    /// the app's predicate knows nothing about. The question and the write are on this isolation
+    /// with nothing awaited between them. Nil — and nothing written — when the row moved or the
+    /// issuing credential no longer stands.
+    public func save(
+        _ job: UploadJob,
+        issuedUnder epoch: Int,
+        judgedBy stands: @Sendable (Int) -> Bool,
+        matching snapshot: UploadJob
+    ) throws -> UploadJob? {
+        guard let onDisk = self.job(snapshot.id), onDisk == snapshot, stands(epoch) else {
+            return nil
+        }
+        return try persist(job)
+    }
+
     /// The per-file rebase — see `OutboxPersisting.applyFileAnswer`. The read, the question about
     /// the credential and the write are on this isolation with nothing awaited between them.
     public func applyFileAnswer(

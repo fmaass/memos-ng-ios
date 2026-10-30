@@ -502,7 +502,8 @@ private struct WholeRig {
         sleeper: any OutboxSleeping = ControlledSleeper(),
         rng: @escaping @Sendable () -> Double = { 1 },
         answerPost: (@Sendable (URLRequest) -> OutboxHTTPResponse?)? = nil,
-        wrapHTTP: (@Sendable (ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil
+        wrapHTTP: (@Sendable (ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil,
+        carriedElsewhere: @escaping @Sendable (UUID) -> Bool = { _ in false }
     ) async throws -> WholeRig {
         let root = try Fixture.temporaryDirectory()
         let provider = SwitchableCredentials(Fixture.credentials())
@@ -578,7 +579,8 @@ private struct WholeRig {
             schedulingGate: gate,
             uploads: withUploads ? (wrapUploads?(uploads) ?? uploads) : nil,
             sleeper: sleeper,
-            rng: rng
+            rng: rng,
+            carriedElsewhere: carriedElsewhere
         )
         if attached { await uploads.attach(engine) }
         return WholeRig(
@@ -650,6 +652,19 @@ private struct WholeRig {
 
 @Suite("Whole lane: the engine drives whole rows")
 struct WholeLaneEngineTests {
+    @Test("a capture a share session carries is left alone until it is retired")
+    func carriedCaptureLeftToItsShareSession() async throws {
+        let carried = WholeBox(true)
+        let rig = try await WholeRig.make(carriedElsewhere: { _ in carried.value })
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(rig.uploadPosts == 0)
+        #expect(rig.session.createdTasks.isEmpty)
+        carried.value = false
+        await rig.engine.drain()
+        #expect(rig.uploadPosts == 2)
+    }
+
     @Test("a two-file capture opens both sessions, writes once, then hands off both files")
     func twoFilesInOnePass() async throws {
         let parked = TestGate()
