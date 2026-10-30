@@ -122,6 +122,8 @@ struct TripView: View {
     private var mode: TripMode { modes.mode }
     /// Whether Trip Dates is up.
     @State private var editingSpan = false
+    /// The Guests sheet (Trip Pass), and where it opens, or nil.
+    @State private var guests: TripGuestsEntry?
 
     /// Optional: a test hosts the screen without a session, and has nothing to download with.
     @Environment(SessionStore.self) private var session: SessionStore?
@@ -241,6 +243,9 @@ struct TripView: View {
     static let renameButton = "Rename"
     /// The Manage item that opens the trip's span.
     static let spanButton = TripSpanSheet.title
+    /// The Manage items into the trip's guests (Trip Pass).
+    static let inviteButton = "Invite Guests…"
+    static let guestsButton = "Guests"
     /// The filter menu's name and its row that opens the trip's removed pictures (MEMNG-780).
     static let filterButton = "Filter"
     static let removedRowButton = "Removed from trip"
@@ -688,6 +693,15 @@ struct TripView: View {
                 }
             }
             .background {
+                Color.clear.sheet(item: $guests) { entry in
+                    if let invited = live ?? openedTrip {
+                        TripGuestsSheet(trip: invited, entry: entry, access: access) {
+                            memberStore.invalidate(uid: invited.uid)
+                        }
+                    }
+                }
+            }
+            .background {
                 Color.clear.sheet(isPresented: $editingSpan) {
                     if let dated = live ?? openedTrip {
                         TripSpanSheet(
@@ -753,6 +767,7 @@ struct TripView: View {
             // Another account's screen: no viewer open over the outgoing one's photos, and no
             // selection of them, stays. Its members stay behind their identity (`shownMembers`).
             .onChange(of: identity) {
+                guests = nil
                 viewing = nil
                 journalViewing = nil
                 held = []
@@ -1420,6 +1435,10 @@ struct TripView: View {
             }
             if !isAlbum {
                 Button(Self.spanButton, systemImage: "calendar") { editingSpan = true }
+                // A guest's picture joins a trip by its tag or its dates; an album has neither.
+                Divider()
+                Button(Self.inviteButton, systemImage: "qrcode") { guests = .invite }
+                Button(Self.guestsButton, systemImage: "person.2") { guests = .guests }
             }
             Divider()
             Button(Self.deleteButton(kind), systemImage: "trash", role: .destructive) {

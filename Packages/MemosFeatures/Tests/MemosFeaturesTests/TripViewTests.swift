@@ -3389,7 +3389,10 @@ extension TripScreenRenderTests {
             #expect(xs == xs.sorted() && Set(xs).count == 3, "not in that order: \(xs)")
             let manage = TripMenuProbe.rows(of: TripView.manageButton, in: screen.window)
             #expect(
-                manage == [TripView.renameButton, TripView.spanButton, TripView.deleteButton()],
+                manage == [
+                    TripView.renameButton, TripView.spanButton, TripView.inviteButton,
+                    TripView.guestsButton, TripView.deleteButton(),
+                ],
                 "the ellipsis menu's rows: \(manage)")
             let filter = TripMenuProbe.rows(of: TripView.filterButton, in: screen.window)
             #expect(filter.contains(TripView.removedRowButton), "the filter menu: \(filter)")
