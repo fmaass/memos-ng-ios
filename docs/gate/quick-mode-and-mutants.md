@@ -16,7 +16,12 @@ a lint error stops the run there: generate, build and tests are not invoked and 
 lint's own code. `--iterations <N>` (1 to 1000, refused without `--only-testing`) repeats that one
 scope with `-test-iterations N -run-tests-until-failure`, fails when any run fails or the result
 bundle shows a case run fewer than N times, and adds `iterations=N` to the quick line.
-`--quick --only-testing <id> --mutants <dir>` is the way to run the realness loop (MEMNG-825): `<dir>`
+The per-fix mutant loop is NOT part of an implementation brief any more (owner, 2026-10-31, "drop
+mutants", recorded on MEMNG-936): a change proves its tests real with ONE quick run against the
+pre-change code (the fix reverted, the new tests red, build=0 so the run is not void), and the full gate's
+own realness pass is the only mutant pass before a merge. The mode below stays available for a hand-run
+investigation; nobody is briefed to run it per fix.
+`--quick --only-testing <id> --mutants <dir>` runs the realness loop (MEMNG-825): `<dir>`
 holds 1 to 4 numbered unified diffs (`NN-<name>.patch`), each a mutant the named scope must catch.
 `scripts/mutants-check.sh`, evaluated by the bootstrap before the estate lock is requested, refuses
 with exit 2 a patch that does not apply (`patch -p1 --dry-run` on a scratch copy), creates, deletes,
