@@ -194,7 +194,7 @@ public final class Outbox {
         preferences.onChange { [weak self] in await self?.reconsiderUploads() }
         preferences.onChangeNow { [weak self] in self?.refreshUploadVerdict() }
         uploadVerdict = UploadVerdict(
-            policy: UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData),
+            policy: preferences.networkPolicy,
             path: network.currentPath()
         )
     }
@@ -567,7 +567,7 @@ public final class Outbox {
     /// arriving through `UploadPreferences.apply` is answered with before the foreground drains.
     private func refreshUploadVerdict() {
         uploadVerdict = UploadVerdict(
-            policy: UploadNetworkPolicy(allowsMobileData: uploadPreferences.allowsMobileData),
+            policy: uploadPreferences.networkPolicy,
             path: network.currentPath()
         )
     }
@@ -991,6 +991,29 @@ public final class Outbox {
         }
         await refresh()
         if written == .owedAsEdit { await drainAfterAdoption() }
+        return written
+    }
+
+    /// Lets one capture's videos go over mobile data — "Use mobile data for this one" on a
+    /// Transfers row waiting for Wi-Fi because of a video. Neither setting changes: the mark is the
+    /// capture's own (`UploadJob.videoOverMobileAllowed`) and survives a relaunch.
+    ///
+    /// The write is the repository's, and it is one (`OutboxRepository.releaseVideoOverMobile`);
+    /// only a write that landed drains, so a second tap racing the first writes nothing and starts
+    /// no second drain. A write the disk or the lock refused changed nothing, and is answered as
+    /// the refusal it is.
+    @discardableResult
+    public func releaseVideoOverMobile(_ jobID: UUID) async -> OutboxRepository.MobileVideoRelease {
+        let written: OutboxRepository.MobileVideoRelease
+        do {
+            written = try await repository.releaseVideoOverMobile(of: jobID)
+        } catch {
+            Self.log.error(
+                "A mobile-data release could not be written: \(error.localizedDescription)")
+            written = .refused
+        }
+        await refresh()
+        if written == .released { await drainAfterAdoption() }
         return written
     }
 

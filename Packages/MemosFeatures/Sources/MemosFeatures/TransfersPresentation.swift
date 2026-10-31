@@ -20,6 +20,9 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
     case retryNow
     /// Turn on Upload over mobile data — the upload preference the Settings pane holds.
     case useMobileData
+    /// Let THIS capture's videos go over mobile data, changing neither setting — the outbox's own
+    /// `releaseVideoOverMobile`, offered while a video rule holds the capture.
+    case useMobileDataForThisOne
     /// Sign in again — the sign-out that leads to the sign-in screen.
     case signIn
     /// Sign out of the account on this phone and in as the one the capture was made under — the
@@ -36,6 +39,7 @@ public enum TransfersAction: String, Sendable, Hashable, CaseIterable {
         switch self {
         case .retryNow: "Retry now"
         case .useMobileData: "Use mobile data"
+        case .useMobileDataForThisOne: "Use mobile data for this one"
         case .signIn: "Sign in"
         case .switchAccount: "Sign out and switch account"
         case .remove: "Remove"
@@ -211,6 +215,11 @@ public enum TransfersPresentation {
             if case .retrying = file.reason { return retry }
             if file.state == .uploading { return retry }  // stalled: the reason above said so
             let manifest = job.manifest
+            // A video rule holds it, and the person may let this one go on mobile data — before
+            // the retry, because trying again on the same network would only wait again.
+            if manifest.waitReason?.isVideoRule == true, manifest.videoOverMobileAllowed != true {
+                return .useMobileDataForThisOne
+            }
             if manifest.waitReason == .retrying || manifest.attemptCount > 0 { return retry }
             return nil
         }
@@ -256,6 +265,8 @@ final class TransfersFixer {
             await outbox.retry(jobID)
         case .remove:
             await outbox.discard(jobID)
+        case .useMobileDataForThisOne:
+            await outbox.releaseVideoOverMobile(jobID)
         case .useMobileData:
             if let uploads {
                 await uploads.select(true).value

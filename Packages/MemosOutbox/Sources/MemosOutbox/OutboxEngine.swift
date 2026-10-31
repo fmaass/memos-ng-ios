@@ -669,8 +669,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// once per site and handed to `waitForNetwork`, so the reason written is the one that stopped
     /// the step rather than a second reading of a path that may have moved in between.
     private func networkWait(for job: UploadJob? = nil) -> WaitReason? {
-        let policy = UploadNetworkPolicy(allowsMobileData: preferences.allowsMobileData)
-        return policy.waitReason(on: network.currentPath(), for: job)
+        preferences.networkPolicy.waitReason(on: network.currentPath(), for: job)
     }
 
     /// The capture waits for a network it is allowed to use, and the row says which.

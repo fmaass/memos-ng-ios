@@ -83,7 +83,7 @@ extension TransferActivityDriver {
 
     nonisolated static func pause(for reason: WaitReason?) -> TransferActivityPause? {
         switch reason {
-        case .homeNetwork, .videoOverMobileLimit: .waitingForWiFi
+        case .homeNetwork, .videoOverMobileLimit, .videoOnWiFiOnly: .waitingForWiFi
         case .noNetwork: .noConnection
         case .retrying: .retrying
         case nil: nil

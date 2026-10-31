@@ -143,6 +143,9 @@ public enum WaitReason: String, Codable, Sendable, Equatable, CaseIterable {
     /// Mobile data is allowed, but this capture still has a video over
     /// `UploadNetworkPolicy.mobileVideoLimit` to send, and that waits for Wi-Fi.
     case videoOverMobileLimit
+    /// Mobile data is allowed, but videos are set to go on Wi-Fi only (`MobileVideoPolicy.never`)
+    /// and this capture still has one to send.
+    case videoOnWiFiOnly
     /// A transient failure is spacing itself out (`RetrySchedule`): the one reason that waits on
     /// the clock rather than on an event. Written by every backoff, so a row between attempts
     /// says it is retrying instead of guessing at a network it was never waiting for (MEMNG-657).
@@ -152,8 +155,13 @@ public enum WaitReason: String, Codable, Sendable, Equatable, CaseIterable {
     public var retryClass: RetryClass {
         switch self {
         case .retrying: .transient
-        case .homeNetwork, .noNetwork, .videoOverMobileLimit: .connectivity
+        case .homeNetwork, .noNetwork, .videoOverMobileLimit, .videoOnWiFiOnly: .connectivity
         }
+    }
+
+    /// The two reasons a video rule gives — the ones "Use mobile data for this one" ends.
+    public var isVideoRule: Bool {
+        self == .videoOverMobileLimit || self == .videoOnWiFiOnly
     }
 }
 
@@ -383,6 +391,13 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// Optional and absent on every manifest written before it, which is "nothing is missing".
     public var notArrived: Int?
 
+    /// The person let THIS capture's files go over mobile data with "Use mobile data for this one"
+    /// on its Transfers row: no video rule holds it (`mobileVideoWait`). It changes neither
+    /// setting, and the mobile-data switch still decides as it always does — with that off, this
+    /// capture waits for Wi-Fi like any other. Kept on the manifest, so a relaunch keeps it.
+    /// Optional and absent on every manifest written before it, which is "not let go".
+    public var videoOverMobileAllowed: Bool?
+
     /// The picked items that will never reach this capture: zero while they still may.
     public var missingItems: Int { stillArriving ? 0 : max(0, notArrived ?? 0) }
 
@@ -416,6 +431,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         case stagingLaunch
         case notArrived
         case staging
+        case videoOverMobileAllowed
     }
 
     public init(
@@ -441,7 +457,8 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         transport: UploadTransport? = nil,
         stagingLaunch: UUID? = nil,
         notArrived: Int? = nil,
-        staging: [StagingFile]? = nil
+        staging: [StagingFile]? = nil,
+        videoOverMobileAllowed: Bool? = nil
     ) {
         self.id = id
         self.idempotencyKey = idempotencyKey
@@ -466,6 +483,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.stagingLaunch = stagingLaunch
         self.notArrived = notArrived
         self.staging = staging
+        self.videoOverMobileAllowed = videoOverMobileAllowed
     }
 
     /// The lane a capture is on. Nil is every row begun before the lane was recorded, and those

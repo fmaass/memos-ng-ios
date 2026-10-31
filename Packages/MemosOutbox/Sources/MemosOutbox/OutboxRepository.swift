@@ -901,6 +901,45 @@ public actor OutboxRepository {
         return written
     }
 
+    /// What "Use mobile data for this one" found.
+    public enum MobileVideoRelease: Sendable, Equatable {
+        /// Written: this capture's videos may go over mobile data from now on.
+        case released
+        /// The capture was already let go over mobile data: nothing was written.
+        case unchanged
+        /// Nothing was written: the capture is gone or taken back to the editor.
+        case refused
+    }
+
+    /// Lets ONE capture's videos go over mobile data, whatever the video policy says — "Use mobile
+    /// data for this one" on its Transfers row. Neither setting changes.
+    ///
+    /// ONE mutation, under a shared lease of the root like every other write a person makes here:
+    /// the read, the question and the write are on this isolation with nothing awaited between
+    /// them. So two taps landing together are one write — the second finds the mark already
+    /// there and is answered `.unchanged`, writing nothing — and a pass that read the capture
+    /// before this landed cannot put a video wait back over it: every engine write is fenced on
+    /// the manifest it read, which this changed. A video wait the row was showing is cleared in
+    /// the same write, so the row stops saying it at once; the drain that follows writes whatever
+    /// the network says now.
+    public func releaseVideoOverMobile(of id: UUID) throws -> MobileVideoRelease {
+        let lease: OutboxLease
+        switch lock.acquire(.shared) {
+        case .leased(let held):
+            lease = held
+        case .refused(let failure):
+            throw OutboxStorageError.queueBusy(failure)
+        }
+        defer { lease.release() }
+        guard let job = job(id), job.cancelledAt == nil else { return .refused }
+        guard job.videoOverMobileAllowed != true else { return .unchanged }
+        var next = job
+        next.videoOverMobileAllowed = true
+        if next.waitReason?.isVideoRule == true { next.waitReason = nil }
+        _ = try persist(next)
+        return .released
+    }
+
     /// What letting a capture go found.
     public enum StagingRelease: Sendable, Equatable {
         /// The mark is gone; the create may be sent once its files are up.

@@ -50,9 +50,13 @@ public struct NetworkPath: Sendable, Equatable {
 public struct UploadNetworkPolicy: Sendable, Equatable {
     /// What the person chose in Settings.
     public var allowsMobileData: Bool
+    /// Which videos may go over mobile data when mobile data is allowed at all — the second
+    /// choice in Settings, which only ever narrows the first.
+    public var mobileVideo: MobileVideoPolicy
 
-    public init(allowsMobileData: Bool) {
+    public init(allowsMobileData: Bool, mobileVideo: MobileVideoPolicy = .underLimit) {
         self.allowsMobileData = allowsMobileData
+        self.mobileVideo = mobileVideo
     }
 
     public func permits(_ path: NetworkPath) -> Bool {
@@ -77,20 +81,54 @@ public struct UploadNetworkPolicy: Sendable, Equatable {
     public func waitReason(on path: NetworkPath, for job: UploadJob? = nil) -> WaitReason? {
         if !path.isSatisfied { return .noNetwork }
         if !permits(path) { return .homeNetwork }
-        if let job, path.usesCellular || path.isExpensive, job.owesVideoOverMobileLimit {
-            return .videoOverMobileLimit
+        if let job, path.usesCellular || path.isExpensive {
+            return job.mobileVideoWait(under: mobileVideo)
         }
         return nil
     }
+}
+
+/// Which videos may leave over mobile data once mobile data is allowed: the Settings pane's
+/// "Send videos over mobile data". It never widens the mobile-data switch — with that off nothing
+/// goes over mobile data, videos included — it only narrows it for videos.
+///
+/// The raw values are what the Settings app writes into the app group's suite under
+/// `UploadPreferences.mobileVideoPolicyKey`, and are read on every launch forever: renaming one
+/// would silently put everyone who chose it back on the default.
+public enum MobileVideoPolicy: String, Sendable, Equatable, CaseIterable {
+    /// Every video goes over mobile data, whatever its size.
+    case always
+    /// A video over `UploadNetworkPolicy.mobileVideoLimit` waits for Wi-Fi; a smaller one goes.
+    /// The default, and what an absent or unreadable value means.
+    case underLimit = "under200MB"
+    /// No video goes over mobile data; photos still do.
+    case never
 }
 
 extension UploadJob {
     /// Whether a file of this capture still to be sent is a video over the mobile-data limit.
     /// A file whose bytes the server already holds owes nothing to any network.
     public var owesVideoOverMobileLimit: Bool {
-        files.contains {
-            !$0.isComplete && $0.mime.lowercased().hasPrefix("video/")
-                && $0.byteSize > UploadNetworkPolicy.mobileVideoLimit
+        owedVideos.contains { $0.byteSize > UploadNetworkPolicy.mobileVideoLimit }
+    }
+
+    /// Whether a file of this capture still to be sent is a video of any size.
+    public var owesVideo: Bool { !owedVideos.isEmpty }
+
+    private var owedVideos: [OutboxFile] {
+        files.filter { !$0.isComplete && $0.mime.lowercased().hasPrefix("video/") }
+    }
+
+    /// What this capture waits for, on a network that costs money with mobile data allowed, under
+    /// the video policy `policy` — or nil when its files may go. A capture the person let go over
+    /// mobile data with "Use mobile data for this one" (`videoOverMobileAllowed`) waits for no
+    /// video rule, whatever the policy says.
+    public func mobileVideoWait(under policy: MobileVideoPolicy) -> WaitReason? {
+        if videoOverMobileAllowed == true { return nil }
+        switch policy {
+        case .always: return nil
+        case .underLimit: return owesVideoOverMobileLimit ? .videoOverMobileLimit : nil
+        case .never: return owesVideo ? .videoOnWiFiOnly : nil
         }
     }
 }

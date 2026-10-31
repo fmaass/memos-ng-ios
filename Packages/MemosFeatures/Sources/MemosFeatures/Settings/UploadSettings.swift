@@ -25,6 +25,22 @@ public final class UploadSettings {
     /// a choice made in the Settings app is already where the outbox and the share extension look.
     public static let key = UploadPreferences.allowsMobileDataKey
 
+    /// The pane's second Uploads row: which videos go over mobile data once mobile data is on.
+    /// The choice is the Settings app's to write and the drain's to read at the moment of use
+    /// (`UploadPreferences.mobileVideoPolicy`), so nothing here mirrors it; the row's words are
+    /// held here so the pane is tested against them.
+    public static let videoKey = UploadPreferences.mobileVideoPolicyKey
+    public static let videoTitle = "Send videos over mobile data"
+
+    /// What the pane calls each choice, in the order it lists them.
+    public static func videoLabel(_ policy: MobileVideoPolicy) -> String {
+        switch policy {
+        case .always: "Always"
+        case .underLimit: "Only under 200 MB"
+        case .never: "Never"
+        }
+    }
+
     private let preferences: UploadPreferences
 
     public private(set) var allowsMobileData: Bool

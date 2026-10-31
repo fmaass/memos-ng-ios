@@ -3061,7 +3061,8 @@ check("extension", appex, "live.discomarder.memosng.share")
 # own control type and title, standing under Storage (a keyed row retyped to a group is no row of
 # Storage), the switch off by default, the groups in the order Uploads, Storage, About, and the
 # footer that promises the next launch.
-SETTINGS_KEYS = ["settings.appearance", "uploadOverMobileData", "transfers.sheet",
+SETTINGS_KEYS = ["settings.appearance", "uploadOverMobileData", "uploadVideoOverMobileData",
+                 "transfers.sheet",
                  "compose.pending-card", "settings.mediaCacheSize",
                  "settings.clearMediaCacheOnLaunch", "settings.version", "debug.uploadSpike"]
 STORAGE_ROWS = [("settings.mediaCacheSize", "PSTitleValueSpecifier", "Media cache"),

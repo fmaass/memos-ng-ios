@@ -398,6 +398,8 @@ struct TransferActivityTests {
             StatusCase(states: [.waiting], waits: [.homeNetwork], want: .paused(.waitingForWiFi)),
             StatusCase(
                 states: [.waiting], waits: [.videoOverMobileLimit], want: .paused(.waitingForWiFi)),
+            StatusCase(
+                states: [.waiting], waits: [.videoOnWiFiOnly], want: .paused(.waitingForWiFi)),
             StatusCase(states: [.waiting], waits: [.noNetwork], want: .paused(.noConnection)),
             StatusCase(states: [.waiting], waits: [.retrying], want: .paused(.retrying)),
             StatusCase(states: [.waiting], waits: [nil], want: .paused(nil)),

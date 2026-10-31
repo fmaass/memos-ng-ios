@@ -149,6 +149,32 @@ struct TransfersPresentationTests {
         #expect(row(job(.waiting))?.action == nil)
     }
 
+    @Test("a capture a video rule holds offers Use mobile data for this one, once, and only then")
+    func videoWaitOffersTheOverride() {
+        let video = OutboxFile(
+            relativePath: "v.mov", filename: "v.mov", mime: "video/quicktime",
+            byteSize: UploadNetworkPolicy.mobileVideoLimit + 1)
+        let large = job(.waiting, wait: .videoOverMobileLimit, files: [video])
+        #expect(row(large)?.reason == "Waiting for Wi-Fi (video over 200 MB)")
+        #expect(row(large)?.action == .useMobileDataForThisOne)
+        #expect(TransfersAction.useMobileDataForThisOne.title == "Use mobile data for this one")
+        // Under Never, the same offer beside the sentence that names the setting.
+        let never = job(.waiting, wait: .videoOnWiFiOnly, files: [video])
+        #expect(row(never)?.action == .useMobileDataForThisOne)
+        // Tried before: still the override, not a retry that would only wait again.
+        let tried = job(.waiting, wait: .videoOverMobileLimit, files: [video], attempts: 2)
+        #expect(row(tried)?.action == .useMobileDataForThisOne)
+        // Already let go: not offered a second time.
+        var released = large
+        released.videoOverMobileAllowed = true
+        #expect(row(released)?.action != .useMobileDataForThisOne)
+        // Any other wait never offers it.
+        #expect(row(job(.waiting, wait: .homeNetwork, files: [video]))?.action == nil)
+        // Mobile data off outranks it: the switch is the fix, not this capture's exception.
+        #expect(
+            row(large, verdict: .refused(.cellularWhileMobileDataOff))?.action == .useMobileData)
+    }
+
     @Test("a moving file says nothing; a stalled or refused one says why and offers its fix")
     func uploadingRows() {
         let moving = job(.uploading)
@@ -317,6 +343,30 @@ struct TransfersFixTests {
             reopen: { _ in })
         #expect(rig.outbox.uploadPreferences.allowsMobileData)
         #expect(rig.outbox.uploadVerdict == .permitted)
+    }
+
+    @Test("Use mobile data for this one releases that capture and changes neither setting")
+    func useMobileDataForThisOne() async throws {
+        let rig = try FixRig()
+        defer { rig.forget() }
+        let video = OutboxFile(
+            relativePath: "v.mov", filename: "v.mov", mime: "video/quicktime",
+            byteSize: UploadNetworkPolicy.mobileVideoLimit + 1)
+        let id = try await rig.queued(job(.waiting, wait: .videoOverMobileLimit, files: [video]))
+        let other = try await rig.queued(
+            job(.waiting, wait: .videoOverMobileLimit, files: [video]))
+        let done = await TransfersFixer().perform(
+            .useMobileDataForThisOne, jobID: id, outbox: rig.outbox, uploads: rig.uploads,
+            signIn: {}, reopen: { _ in })
+        #expect(done)
+        let after = await rig.repository.job(id)
+        #expect(after?.videoOverMobileAllowed == true)
+        #expect(after?.waitReason != .videoOverMobileLimit)
+        #expect(await rig.repository.job(other)?.videoOverMobileAllowed == nil)
+        #expect(rig.uploads.allowsMobileData == false)
+        #expect(rig.outbox.uploadPreferences.allowsMobileData == false)
+        let written = UserDefaults.standard.persistentDomain(forName: rig.suite)
+        #expect(written?[UploadPreferences.mobileVideoPolicyKey] == nil)
     }
 
     @Test("Sign in takes the sign-in route and leaves the capture as it was")

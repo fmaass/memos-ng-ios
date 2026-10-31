@@ -249,6 +249,9 @@ public enum PendingMemoPresentation {
             if job.waitReason == .videoOverMobileLimit, job.owesVideoOverMobileLimit {
                 return Self.waitingForWiFiVideo
             }
+            if job.waitReason == .videoOnWiFiOnly, job.owesVideo {
+                return Self.waitingForWiFiVideosOnWiFiOnly
+            }
             if job.waitReason == .retrying || job.attemptCount > 0
                 || job.files.contains(where: { ($0.attemptCount ?? 0) > 0 })
             {
@@ -260,6 +263,10 @@ public enum PendingMemoPresentation {
 
     /// What a capture still owing a video over the mobile-data limit says while on mobile data.
     static let waitingForWiFiVideo = "Waiting for Wi-Fi (video over 200 MB)"
+
+    /// The same wait under "Send videos over mobile data: Never" — it names the setting, because
+    /// no size would send it.
+    static let waitingForWiFiVideosOnWiFiOnly = "Waiting for Wi-Fi (videos are set to Wi-Fi only)"
 
     /// What a capture spacing out a transient failure says: the queue sends it again by itself,
     /// in seconds, and nothing is asked of the person.

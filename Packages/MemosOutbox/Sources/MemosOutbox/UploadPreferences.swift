@@ -14,6 +14,10 @@ public final class UploadPreferences: @unchecked Sendable {
     /// Namespaced by nothing, deliberately: this suite belongs to the outbox alone, and the key is
     /// read on every launch forever — renaming it would silently put everyone back on wifi-only.
     public static let allowsMobileDataKey = "uploadOverMobileData"
+    /// "Send videos over mobile data" (`MobileVideoPolicy`), written by the Settings app beside the
+    /// switch above. Read on every launch forever, like it: a rename would silently put everyone
+    /// back on the default.
+    public static let mobileVideoPolicyKey = "uploadVideoOverMobileData"
 
     private let defaults: UserDefaults
     private let lock = NSLock()
@@ -35,6 +39,18 @@ public final class UploadPreferences: @unchecked Sendable {
     /// costs nobody a phone plan.
     public var allowsMobileData: Bool {
         defaults.bool(forKey: Self.allowsMobileDataKey)
+    }
+
+    /// Only under 200 MB unless someone chose otherwise: an absent key — the pane never opened, a
+    /// process that registered no defaults — and a value no build wrote both read as the default.
+    public var mobileVideoPolicy: MobileVideoPolicy {
+        let stored = defaults.string(forKey: Self.mobileVideoPolicyKey)
+        return stored.flatMap(MobileVideoPolicy.init(rawValue:)) ?? .underLimit
+    }
+
+    /// Both choices as the policy reads them, read now — the one way the drain asks.
+    public var networkPolicy: UploadNetworkPolicy {
+        UploadNetworkPolicy(allowsMobileData: allowsMobileData, mobileVideo: mobileVideoPolicy)
     }
 
     public func onChange(_ handler: @escaping OutboxTrigger) {

@@ -38,14 +38,15 @@ private func row(keyed key: String, in rows: [[String: Any]]) throws -> [String:
 @MainActor
 @Suite("The Settings app's pane")
 struct SettingsBundlePaneTests {
-    @Test("the pane holds exactly the eight keys the app reads, in the order it shows them")
-    func exactlyEightKeys() throws {
+    @Test("the pane holds exactly the nine keys the app reads, in the order it shows them")
+    func exactlyNineKeys() throws {
         let keys = try bundledRows().compactMap { $0["Key"] as? String }
         // The last is the MEMNG-538 spike switch (kill date 2026-11-03), under About. The third is
         // the transfers switch (MEMNG-947) and the fourth the pending-card switch (MEMNG-951),
-        // both under Uploads.
+        // both under Uploads. The video choice (MEMNG-960) stands under the switch it narrows.
         let expected = [
-            AppSettings.appearanceKey, UploadSettings.key, TransfersFlag.toggleKey,
+            AppSettings.appearanceKey, UploadSettings.key, UploadSettings.videoKey,
+            TransfersFlag.toggleKey,
             PendingCardFlag.toggleKey, SettingsBundleSync.mediaCacheSizeKey,
             SettingsBundleSync.clearMediaCacheKey, SettingsBundleSync.versionKey,
             UploadSpike.toggleKey,
@@ -104,6 +105,21 @@ struct SettingsBundlePaneTests {
         #expect(toggle["DefaultValue"] as? Bool == false)
         let groups = rows.filter { $0["Type"] as? String == "PSGroupSpecifier" }
         #expect(groups.contains { $0["FooterText"] as? String == UploadSettings.footer })
+    }
+
+    @Test("the video row offers the policy's choices, by their stored names, the default chosen")
+    func videoRowIsThePolicy() throws {
+        let rows = try bundledRows()
+        let picker = try row(keyed: UploadSettings.videoKey, in: rows)
+        #expect(UploadSettings.videoKey == UploadPreferences.mobileVideoPolicyKey)
+        #expect(picker["Type"] as? String == "PSMultiValueSpecifier")
+        #expect(picker["Title"] as? String == UploadSettings.videoTitle)
+        #expect(picker["Values"] as? [String] == MobileVideoPolicy.allCases.map(\.rawValue))
+        #expect(
+            picker["Titles"] as? [String]
+                == MobileVideoPolicy.allCases.map(UploadSettings.videoLabel))
+        #expect(picker["Titles"] as? [String] == ["Always", "Only under 200 MB", "Never"])
+        #expect(picker["DefaultValue"] as? String == MobileVideoPolicy.underLimit.rawValue)
     }
 
     /// What makes the Settings app's write the outbox's read: the pane's root names the very group

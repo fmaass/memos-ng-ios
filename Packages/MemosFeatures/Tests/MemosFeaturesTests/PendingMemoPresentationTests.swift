@@ -141,6 +141,26 @@ struct PendingMemoPresentationTests {
                 == "No network — it will send when the phone is back online")
     }
 
+    @Test("under Never a video of any size says it waits for Wi-Fi because of the setting")
+    func aVideoUnderNeverNamesTheSetting() {
+        let video = OutboxFile(
+            relativePath: "v.mov", filename: "IMG_3.MOV", mime: "video/quicktime",
+            byteSize: 1_000, bytesConfirmed: 0
+        )
+        let row = job(files: [video], waitReason: .videoOnWiFiOnly)
+        #expect(
+            PendingMemoPresentation.status(for: row, verdict: .permitted)
+                == "Waiting for Wi-Fi (videos are set to Wi-Fi only)")
+        // A video the server already holds owes nothing: the stale marker says nothing about it.
+        var sent = video
+        sent.bytesConfirmed = sent.byteSize
+        sent.uploadUID = "u"
+        let stale = job(files: [sent], waitReason: .videoOnWiFiOnly)
+        #expect(
+            PendingMemoPresentation.status(for: stale, verdict: .permitted)
+                != "Waiting for Wi-Fi (videos are set to Wi-Fi only)")
+    }
+
     @Test("a capture the server found too large names its fix: remove")
     func tooLargeNamesRemove() {
         let held = job(state: .held, holdReason: .tooLarge, lastError: "413")
