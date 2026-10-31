@@ -4,7 +4,7 @@ import Foundation
 import Testing
 
 /// A value a `@Sendable` script reads and a test changes between two steps.
-private final class WholeBox<Value: Sendable>: @unchecked Sendable {
+final class WholeBox<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Value
 
@@ -158,7 +158,7 @@ func bounded(
 }
 
 /// The engine is quiet, within the deadline.
-private func settled(_ engine: OutboxEngine) async throws {
+func settled(_ engine: OutboxEngine) async throws {
     try await bounded("the engine going quiet") { await engine.untilQuiescent() }
 }
 
@@ -447,7 +447,7 @@ private actor EarlyEndingUploads: OutboxUploadScheduling {
 
 /// The real engine, the real repository and the PRODUCTION `BackgroundUploadScheduler`, over a
 /// scripted task session and a scripted server. A capture of one picture and one video.
-private struct WholeRig {
+struct WholeRig {
     let root: URL
     let repository: OutboxRepository
     let http: ScriptedHTTP
