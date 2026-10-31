@@ -45,7 +45,7 @@ struct IngestTests {
                 into: repository
             )
 
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }
@@ -78,7 +78,7 @@ struct IngestTests {
                 into: repository
             )
 
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }
@@ -100,7 +100,7 @@ struct IngestTests {
                 expecting: Fixture.binding(),
                 into: repository
             )
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }
@@ -260,7 +260,7 @@ struct IngestTests {
                 into: repository
             )
 
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }
@@ -366,7 +366,7 @@ struct IngestTests {
                 into: repository
             )
 
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }
@@ -397,7 +397,7 @@ struct IngestTests {
                 into: repository
             )
 
-            guard case .enqueued(let id) = outcome else {
+            guard case .enqueued(let id, _) = outcome else {
                 Issue.record("expected the share to be queued, got \(outcome)")
                 return
             }

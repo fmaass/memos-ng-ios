@@ -393,6 +393,40 @@ struct ManageTokensStoreTests {
         #expect(rows(store.state)?.map(\.id) == [1])
     }
 
+    /// MEMNG-938: the share extension's capture grant is a row of the server's own list, named
+    /// as the server names it, and it dies with the device token that minted it. The scripted
+    /// server below keeps that cascade, so what is asserted is the store's read-back of it.
+    @Test("the capture grant is listed, and revoking the device token it hangs off removes it")
+    func captureGrantListedAndRevokedWithItsToken() async throws {
+        let revoked = LockedValue<Set<Int>>([])
+        let store = makeStore(seen: LockedValue<[Seen]>([])) { operation in
+            switch operation {
+            case mintOperation: return .json(liveGrant)
+            case listOperation:
+                // Grant 9 was minted by token 1: it goes when 1 goes.
+                let gone = revoked.get()
+                var rows: [String] = []
+                if !gone.contains(1) {
+                    rows.append(Stub.pat(id: 1, name: "Kitchen phone"))
+                    if !gone.contains(9) {
+                        rows.append(Stub.pat(id: 9, name: "Capture grant, phone"))
+                    }
+                }
+                rows.append(Stub.pat(id: 4, name: "Laptop"))
+                return .json("[\(rows.joined(separator: ","))]")
+            case revokeOperation:
+                revoked.set(revoked.get().union([1]))
+                return .status(.noContent)
+            default: return .status(.internalServerError)
+            }
+        }
+
+        await signOn(store)
+        #expect(rows(store.state)?.map(\.name).contains("Capture grant, phone") == true)
+        #expect(await store.revoke(1))
+        #expect(rows(store.state)?.map(\.id) == [4])
+    }
+
     /// A 404 from `/api/pats/{id}` is a token that is already gone — NOT a server without token
     /// management. Reading it as the latter would tell somebody their server cannot do this,
     /// having just watched it do it.

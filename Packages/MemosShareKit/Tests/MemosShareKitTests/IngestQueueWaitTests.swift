@@ -50,7 +50,7 @@ struct IngestQueueWaitTests {
             into: repository
         )
 
-        guard case .enqueued(let id) = outcome else {
+        guard case .enqueued(let id, _) = outcome else {
             Issue.record("expected the share to be queued once the hold dropped, got \(outcome)")
             return
         }

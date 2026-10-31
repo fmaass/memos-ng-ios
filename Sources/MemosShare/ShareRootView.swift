@@ -5,9 +5,11 @@ import SwiftUI
 
 /// The whole share sheet: what is being shared, a note, who will see it, and Post.
 ///
-/// It PERSISTS and nothing more. The app owns the one background upload session — two processes
-/// cannot share it — so this writes the capture into the queue in the app group and returns; the
-/// bytes move on the app's next launch or background refresh.
+/// It PERSISTS first: the capture is written into the queue in the app group. When the app has
+/// left a capture grant beside the licence that matches the issue the capture was enqueued under,
+/// the extension then opens the uploads itself under the capture's own background session
+/// (`ShareTransfer`); without one it stops there, and the bytes move on the app's next launch or
+/// background refresh.
 struct ShareRootView: View {
     let providers: [NSItemProvider]
     let finish: () -> Void
@@ -24,6 +26,8 @@ struct ShareRootView: View {
     @State private var isReading = true
     @State private var isPosting = false
     @State private var problem: String?
+    /// Where the bytes will go, said before Post: set when no capture grant would be handed over.
+    @State private var uploadNotice: String?
     /// Where the providers' files are copied to before the outbox takes its own copy. Held in
     /// state so it survives a redraw, and removed on the way out either way.
     @State private var staging = URL.temporaryDirectory
@@ -47,6 +51,8 @@ struct ShareRootView: View {
                     }
                 } else if route == nil {
                     Text(Self.signInFirst).foregroundStyle(.secondary)
+                } else if let uploadNotice {
+                    Text(uploadNotice).foregroundStyle(.secondary)
                 }
                 // Outside the item list on purpose: when NOTHING could be copied there are no
                 // items to hang this off, and a sheet that says nothing while refusing to post is
@@ -116,7 +122,14 @@ struct ShareRootView: View {
     }
 
     private func read() async {
-        route = ShareRoute.live()
+        let opened = ShareRoute.live()
+        route = opened
+        // The capture grant is the MEMBER's alone, so is what this says about it: a guest share
+        // has no grant path at all, and the trip's own sentence covers it.
+        uploadNotice =
+            opened?.kind == .member
+            ? ShareUploadPlan.notice(licence: opened?.licence, grants: CaptureGrantStore.live())
+            : nil
         try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         let loaded = await SharedItemLoader.load(providers, into: staging)
         items = loaded.items
@@ -158,19 +171,27 @@ struct ShareRootView: View {
                 into: repository
             )
             switch outcome {
-            case .enqueued(let job):
-                // The capture is queued. With an upload credential the extension also opens its
-                // upload sessions and hands the files to the capture's own background session;
-                // the identity in the app group names an account and never carries a token, so
-                // until the capture grant supplies one this starts nothing and the app sends it.
-                // Member queue only: its session and licence are the member's, and a guest capture
-                // must never be sent under them — the guest outbox in the app sends it.
+            case .enqueued(let job, let admitted):
+                // The capture is queued. Member queue only from here: its session, licence and
+                // capture grant are the member's, and a guest capture must never be sent under
+                // them — the guest outbox in the app sends it. With a grant stamped with the
+                // licence issue the capture was ADMITTED under — present and unexpired — the
+                // extension also opens its upload sessions and hands the files to the capture's
+                // own background session; every request presents the grant, never the session
+                // token. Without one this starts nothing and the app sends it.
                 if kind == .member {
-                    let opening = OutboxAccountStore.live()?.currentLicence()
+                    let grants = CaptureGrantStore(root: root)
+                    let credential = ShareUploadPlan.credential(
+                        enqueuedUnder: admitted, grants: grants)
                     _ = await ShareTransfer.live(
-                        jobID: job, credential: nil, root: root, repository: repository,
-                        stillCurrent: { _ in
-                            OutboxAccountStore.live()?.currentLicence() == opening
+                        jobID: job, credential: credential, root: root, repository: repository,
+                        // Read from the files at every ask: a sign-out, an account change or a
+                        // re-mint in the app ends this grant's standing, and the app is another
+                        // process.
+                        stillCurrent: { epoch in
+                            grants.stillStands(
+                                epoch: epoch, enqueuedUnder: admitted,
+                                standing: OutboxAccountStore(root: root).currentLicence())
                         }
                     )
                 }

@@ -80,6 +80,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     // going from unconfirmed to confirmed — is a moment only the session knows.
     private(set) lazy var session = SessionStore(
         account: OutboxAccountStore.live(),
+        // Beside the licence, and removed with it: the share extension's upload-only credential.
+        captureGrants: CaptureGrantStore.live(),
         lastKnownUser: LastKnownUserFile.live(),
         snapshots: TimelineSnapshotStore.live(),
         // A route coming back is the one recovery trigger the app has that nobody has to be

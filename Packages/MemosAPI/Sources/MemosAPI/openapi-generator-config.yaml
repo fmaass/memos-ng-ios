@@ -79,6 +79,7 @@ filter:
     - list_renditions_api_attachments__uid__renditions_get
     - list_tags_api_tags_get
     - logout_api_auth_logout_post
+    - mint_capture_grant_api_tokens_capture_grant_post
     - native_exchange_api_auth_native_exchange_post
     - native_logout_api_auth_native_logout_post
     - native_manage_grant_api_auth_native_manage_grant_post
@@ -97,6 +98,7 @@ filter:
     - remove_picture_tag_api_attachments__uid__tags__name__delete
     - rename_native_token_api_auth_native_token_patch
     - revoke_device_api_passes__uid__devices__device_uid__delete
+    - revoke_capture_grant_api_tokens_capture_grant__grant_id__delete
     - revoke_pass_api_passes__uid__delete
     - revoke_pat_api_pats__pat_id__delete
     - run_digest_now_api_admin_digest_run_post

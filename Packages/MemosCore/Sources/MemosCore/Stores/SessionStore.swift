@@ -187,6 +187,21 @@ public final class SessionStore {
     /// own — the share extension. Nil unless the app composes one, so a test never writes into
     /// the real app group container.
     private let account: (any OutboxAccountPublishing)?
+    /// The capture grant's file beside that licence (MEMNG-938): the upload-only credential the
+    /// share extension may present. Nil unless the app composes one, for the same reason.
+    private let captureGrants: CaptureGrantStore?
+    /// The mint in flight, with the authority epoch and the retirement count it was asked under.
+    /// A second foreground under the same pair JOINS it — one request on the wire; under another
+    /// pair it is replaced, and the old answer's own fence writes nothing.
+    private var captureGrantMint: (epoch: Int, retirement: Int, task: Task<Void, Never>)?
+    /// Moved by every retirement of the grant (`retireCaptureGrant`), so a mint that was on the
+    /// wire across a sign-out writes nothing when it lands, even before the epoch has moved.
+    private var captureGrantRetirements = 0
+    /// The session generations a sign-out is ending right now, one entry per sign-out in flight.
+    /// While the current generation is listed, `mintCaptureGrant` REFUSES (it does not join): a
+    /// mint started then would put a fresh grant on the server under a token that is being
+    /// revoked, and a file beside a licence that is about to go.
+    private var captureGrantRetiring: [Int] = []
     /// The clock the MEDIA layer fences its decoded-image cache against. Rotated at the same two
     /// sites as the account licence below, because it scopes to identity in exactly the same way:
     /// a decoded photo is filed under an attachment uid, and a uid means nothing across servers.
@@ -403,6 +418,7 @@ public final class SessionStore {
         },
         now: @escaping @Sendable () -> Date = Date.init,
         account: (any OutboxAccountPublishing)? = nil,
+        captureGrants: CaptureGrantStore? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
         // The DIRECTORY, not a writer over it. The writer is built below, against this
@@ -427,6 +443,7 @@ public final class SessionStore {
         self.noticeSleeper = noticeSleeper
         self.now = now
         self.account = account
+        self.captureGrants = captureGrants
         self.identity = identity
         self.lastKnownUser = lastKnownUser
         self.onVerified = onVerified
@@ -1275,8 +1292,105 @@ public final class SessionStore {
     /// The app came back in front of somebody. The one trigger the Features layer owns.
     public func enteredForeground() async {
         isForegrounded = true
-        guard awaitingConfirmation else { return }
-        await revalidate(attempt: 0)
+        if awaitingConfirmation { await revalidate(attempt: 0) }
+        // After the check, so a foreground that ended the session mints nothing for it.
+        await mintCaptureGrant()
+    }
+
+    // MARK: - the capture grant (MEMNG-938)
+
+    /// Mints the share extension's capture grant with the device token and leaves it beside the
+    /// licence, stamped with the licence issue it was asked under. Once per foreground: the server
+    /// rotates on every mint, so a device holds one live grant however often it comes back.
+    ///
+    /// SINGLE-FLIGHT per authority: overlapping calls under the same epoch join the one request.
+    /// The answer is judged against what ISSUED it — the authority epoch (a renewal destroys the
+    /// token a grant dies with), the retirement count (a sign-out under way) and the licence on
+    /// disk — synchronously, with nothing awaited between that judgement and the write.
+    public func mintCaptureGrant() async {
+        guard let captureGrants, let client, let configuration, let user = state.user,
+            let licence = account?.currentLicence(), let issue = licence.incarnation,
+            licence.binding
+                == AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
+        else { return }
+        guard !captureGrantRetiring.contains(sessionGeneration) else {
+            MemosLog.session.info("no capture grant while this session is signing out")
+            return
+        }
+        let issued = epoch.current
+        let retirement = captureGrantRetirements
+        if let flight = captureGrantMint, flight.epoch == issued, flight.retirement == retirement {
+            return await flight.task.value
+        }
+        let task = Task { @MainActor [self] in
+            await performCaptureGrantMint(
+                client: client, into: captureGrants, licence: licence, issue: issue,
+                issued: issued, retirement: retirement)
+        }
+        captureGrantMint = (issued, retirement, task)
+        await task.value
+        // Only the flight that owns the slot clears it: a replaced one finishing later must not
+        // drop its successor's handle.
+        if captureGrantMint?.task == task { captureGrantMint = nil }
+    }
+
+    private func performCaptureGrantMint(
+        client: any APIProtocol, into grants: CaptureGrantStore, licence: PublishedLicence,
+        issue: UUID, issued: Int, retirement: Int
+    ) async {
+        do {
+            let response = try await client.mintCaptureGrantApiTokensCaptureGrantPost(.init())
+            guard case .created(let created) = response else {
+                MemosLog.session.info("POST /api/tokens/capture-grant answered without a grant")
+                return
+            }
+            let minted = try created.body.json
+            guard epoch.current == issued, captureGrantRetirements == retirement,
+                account?.currentLicence() == licence
+            else {
+                MemosLog.session.info("a capture grant answered for an authority that has moved")
+                return
+            }
+            try grants.write(
+                PublishedCaptureGrant(
+                    id: minted.id, token: minted.token, expiresAt: minted.expiresAt,
+                    binding: licence.binding, incarnation: issue))
+        } catch {
+            if let refusal = StoreFailure.refusal(error) {
+                // The device token itself was turned down: the same rule as every other read,
+                // judged against the credential that earned it.
+                await handle(refusal)
+                return
+            }
+            let detail = String(describing: error)
+            MemosLog.session.info("no capture grant this time: \(detail, privacy: .public)")
+        }
+    }
+
+    /// Ends the capture grant with the session, synchronously: any mint in flight is fenced out
+    /// and the file is gone before this returns. Hands back the grant's id for the revoke, which
+    /// the caller sends with the token that minted it.
+    private func retireCaptureGrant() -> Int? {
+        guard let captureGrants else { return nil }
+        captureGrantRetirements += 1
+        captureGrantMint = nil
+        let standing = captureGrants.current()
+        // A failure here is retried by the licence's own revocation, which removes the grant
+        // first and remembers when it could not (`clearAccountLicence`).
+        try? captureGrants.clear()
+        return standing?.id
+    }
+
+    /// DELETE /api/tokens/capture-grant/{id}, best effort. The grant dies with its token on the
+    /// server anyway, so nothing here decides anything: whatever the token's fate is, the request
+    /// that follows (the sign-out's own revoke) is the one that settles it.
+    private static func revokeCaptureGrant(_ id: Int, with client: any APIProtocol) async {
+        do {
+            _ = try await client.revokeCaptureGrantApiTokensCaptureGrantGrantIdDelete(
+                .init(path: .init(grantId: id)))
+        } catch {
+            MemosLog.session.info("the capture grant revoke did not go through")
+        }
     }
 
     /// Somebody asked for the check now — the notice's own button, and the only trigger a reader
@@ -1372,6 +1486,7 @@ public final class SessionStore {
     @discardableResult
     public func signOut() async -> SignOutOutcome {
         guard let client else {
+            _ = retireCaptureGrant()
             let wiped = await wipeCredential()
             // Fenced like every other complaint this file writes after a keychain await: anything
             // that completed inside the delete owns the session now, and a sentence about the
@@ -1382,7 +1497,18 @@ public final class SessionStore {
         // The revoke is a request, and A's answer to it can land after B has signed in. Every
         // branch below WIPES or writes, so each one asks whether the session it set out to end is
         // still the session on this device — a 204 for A's token must not destroy B's.
+        // The generation is taken BEFORE the first await (the grant's revoke below), so every
+        // effect after it is judged against the session this sign-out set out to end.
         let issued = sessionGeneration
+        // Retiring from here to the end: no new mint may start for this session meanwhile.
+        captureGrantRetiring.append(issued)
+        defer {
+            if let index = captureGrantRetiring.firstIndex(of: issued) {
+                captureGrantRetiring.remove(at: index)
+            }
+        }
+        // The capture grant goes FIRST, while the token that minted it can still revoke it.
+        if let grant = retireCaptureGrant() { await Self.revokeCaptureGrant(grant, with: client) }
         do {
             let response = try await client.nativeLogoutApiAuthNativeLogoutPost(.init())
             guard owns(issued) else {
@@ -1894,6 +2020,12 @@ public final class SessionStore {
     private func persist(
         token: String, configuration: ServerConfiguration
     ) async -> Persistence {
+        // An account change ends the outgoing session's capture grant: the file goes now, and the
+        // outgoing client — still presenting the token that minted it — asks the server to
+        // revoke it, without holding this sign-in up.
+        if let grant = retireCaptureGrant(), let outgoing = client {
+            Task { await Self.revokeCaptureGrant(grant, with: outgoing) }
+        }
         guard clearAccountLicence() else {
             // Nothing was withdrawn, so the incarnation is the one the caller is still in.
             return Persistence(outcome: .licenceNotRevoked, installing: sessionGeneration)

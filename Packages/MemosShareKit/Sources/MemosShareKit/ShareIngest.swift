@@ -5,8 +5,10 @@ import MemosOutbox
 public enum ShareOutcome: Sendable, Equatable {
     /// The capture is on disk in the app group, whole, under this job id. What sends it is decided
     /// after this returns: the extension's own per-capture session when it holds an upload
-    /// credential (`ShareTransfer`), else the app's next drain.
-    case enqueued(UUID)
+    /// credential (`ShareTransfer`), else the app's next drain. Carries the licence the capture was
+    /// ADMITTED under — the one its write was authorised against — because that, and not whatever
+    /// is published by the time anybody asks, is what a capture grant has to match.
+    case enqueued(UUID, under: PublishedLicence)
     /// Nobody is signed in as far as anything outside the app can tell, so nothing was written.
     case notSignedIn
     /// The account changed between the sheet opening and Post — a sign-out and a sign-in, or a
@@ -125,7 +127,7 @@ public enum ShareIngest {
                     under: SendAuthority { readLicence() == opening }
                 )
             }
-            return .enqueued(job.id)
+            return .enqueued(job.id, under: opening)
         } catch is SendAuthorityWithdrawn {
             return .accountChanged
         }

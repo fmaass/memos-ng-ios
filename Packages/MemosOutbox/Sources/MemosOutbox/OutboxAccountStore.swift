@@ -92,7 +92,11 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     ///   describes, so a container that has one has the other.
     public init(root: URL) {
         self.url = root.appending(path: "account.json")
+        self.grants = CaptureGrantStore(root: root)
     }
+
+    /// The capture grant beside this licence — its lifecycle is the licence's (`CaptureGrantStore`).
+    private let grants: CaptureGrantStore
 
     /// The store in the app group, or nil when the container is not reachable — on a device that
     /// means the entitlement is missing, and an extension in that state cannot enqueue at all.
@@ -128,6 +132,10 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     public func publish(_ binding: AccountBinding) {
         let standing = currentLicence()
         let issue = standing?.binding == binding ? standing?.incarnation ?? UUID() : UUID()
+        // A NEW issue is an account change as far as anything outside the app can tell, and the
+        // capture grant beside the licence belongs to the issue it was minted under. It goes
+        // first, before the new licence exists, so no instant pairs the new licence with it.
+        if issue != standing?.incarnation { try? grants.clear() }
         guard
             let data = try? JSONEncoder().encode(
                 PublishedLicence(binding: binding, incarnation: issue)
@@ -144,6 +152,10 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     /// Revoking a licence that is not there is success, not an error: the point of a revocation is
     /// that nothing is left, whatever state it started from.
     public func clear() throws {
+        // The capture grant first: it is the credential, and the licence is what admits a capture
+        // to use one. A grant that would not delete still names this issue, which no later licence
+        // carries, so it is never handed to a capture again — but it is said, by throwing.
+        try grants.clear()
         do {
             try FileManager.default.removeItem(at: url)
         } catch let error as CocoaError where error.code == .fileNoSuchFile {

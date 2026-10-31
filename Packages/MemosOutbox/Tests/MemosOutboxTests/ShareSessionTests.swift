@@ -193,6 +193,41 @@ struct ShareSessionTests {
         #expect(identities.allSatisfy { $0.epoch == 7 && $0.attempt == 0 })
     }
 
+    @Test("the extension's requests present the capture grant and never the session token")
+    func extensionPresentsTheGrantOnTheWire() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try Self.repository(root)
+        // What the app left in the app group: the licence, and the grant stamped with its issue.
+        let account = OutboxAccountStore(root: root)
+        account.publish(Fixture.binding())
+        let licence = try #require(account.currentLicence())
+        let grants = CaptureGrantStore(root: root)
+        try grants.write(
+            PublishedCaptureGrant(
+                id: 12, token: "memos_cap_wire", expiresAt: Date().addingTimeInterval(86_400),
+                binding: licence.binding, incarnation: try #require(licence.incarnation)))
+        let job = try await Self.enqueue(repository, in: root, files: 2)
+        let credential = try #require(grants.uploadCredential(enqueuedUnder: licence))
+        let http = Self.serving(status: 201)
+        let session = ScriptedUploadTaskSession()
+        let outcome = await ShareTransfer.start(
+            jobID: job.id, credential: credential, registry: SessionRegistry(root: root),
+            repository: repository, http: http, allowsMobileData: false,
+            stillCurrent: { epoch in
+                grants.stillStands(
+                    epoch: epoch, enqueuedUnder: licence, standing: account.currentLicence())
+            },
+            session: { _ in session })
+        #expect(outcome == .started(identifier: ShareSession.identifier(jobID: job.id), tasks: 2))
+        let presented =
+            http.requests.map { $0.value(forHTTPHeaderField: "Authorization") }
+            + session.createdTasks.map { $0.request.value(forHTTPHeaderField: "Authorization") }
+        #expect(presented.count == 4)
+        #expect(presented.allSatisfy { $0 == "Bearer memos_cap_wire" })
+        #expect(!presented.contains { $0?.contains("pat") ?? true })
+    }
+
     @Test("a refused upload session is a typed value carrying the presented epoch; nothing stays")
     func refusedStartCarriesPresentedEpoch() async throws {
         let root = try Fixture.temporaryDirectory()

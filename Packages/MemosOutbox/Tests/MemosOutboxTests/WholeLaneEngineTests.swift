@@ -665,6 +665,127 @@ struct WholeLaneEngineTests {
         #expect(rig.uploadPosts == 2)
     }
 
+    /// MEMNG-945 comment 13574: finalize must not depend on the system waking the app for the
+    /// extension's session. Nothing here delivers `handleEventsForBackgroundURLSession` or a
+    /// session's finished-events callback: the extension hands the bodies over and is gone, the
+    /// transfers finish, and the capture is finalized by the app's NEXT foreground pass — what
+    /// `Outbox.appBecameActive()` and the launch/background-refresh `startOutbox` run: reattach
+    /// (`ShareSessions.wake`), then the drain.
+    @Test("finalize needs no app wake: the next foreground pass retires the session and creates")
+    func finalizeWithoutAWake() async throws {
+        let registry = WholeBox<SessionRegistry?>(nil)
+        let rig = try await WholeRig.make(
+            answerHead: { request in
+                // Every body arrived: the server's own offset is each file's whole size.
+                let size = request.url?.lastPathComponent == "u1" ? "1000" : "3000"
+                return OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": size])
+            },
+            carriedElsewhere: { registry.value?.carries(jobID: $0) ?? false }
+        )
+        defer { rig.cleanUp() }
+        registry.value = SessionRegistry(root: rig.root)
+        let sessions = try #require(registry.value)
+        let extensionPosts = Counter()
+        let extensionHTTP = ScriptedHTTP { _ in
+            // One POST per file, in the capture's order: u1 the picture, u2 the video.
+            extensionPosts.increment()
+            return ScriptedHTTP.session(
+                uid: "u\(extensionPosts.count)", chunkSize: 5 * 1024 * 1024, received: 0)
+        }
+        let shareSession = ScriptedUploadTaskSession()
+        let started = await ShareTransfer.start(
+            jobID: rig.job.id,
+            credential: ShareUploadCredential(token: "grant", epoch: 3, binding: Fixture.binding()),
+            registry: sessions, repository: rig.repository, http: extensionHTTP,
+            allowsMobileData: false, stillCurrent: { _ in true }, session: { _ in shareSession })
+        let identifier = ShareSession.identifier(jobID: rig.job.id)
+        #expect(started == .started(identifier: identifier, tasks: 2))
+
+        // While the share session carries it the app's drain leaves it alone.
+        await rig.engine.drain()
+        #expect(rig.http.requests(method: "HEAD").isEmpty)
+        #expect(rig.completion.idempotencyKeys.isEmpty)
+
+        // The transfers finished in the system; no wake reached the app. The next foreground:
+        let finished = ScriptedUploadTaskSession(
+            listing: shareSession.createdTasks.map {
+                WholeTaskListing(
+                    taskIdentifier: $0.taskIdentifier, taskDescription: $0.description,
+                    state: .completed)
+            })
+        let verdicts = await ShareSessions(registry: sessions) { _ in finished }
+            .wake(repository: rig.repository)
+        #expect(verdicts == [identifier: .retired])
+        await rig.engine.drain()
+        #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
+        #expect(rig.attemptedUploadPosts == 0)
+    }
+
+    /// The same capture, finalized by the background REFRESH pass alone (MEMNG-945): no
+    /// foreground, no `handleEventsForBackgroundURLSession`, no session's finished-events callback.
+    /// What runs is exactly what the app's `BGAppRefreshTask` handler runs through the real
+    /// `Outbox` facade — `wake(holding:)` around adopt, reattach and start — in a process the
+    /// system launched for the refresh, so nothing has opened or closed its scheduling gate.
+    @MainActor
+    @Test("finalize needs no app wake: the background refresh pass alone retires and creates")
+    func finalizeThroughTheRefreshPass() async throws {
+        let rig = try await WholeRig.make(
+            withUploads: false, attached: false,
+            answerHead: { request in
+                let size = request.url?.lastPathComponent == "u1" ? "1000" : "3000"
+                return OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": size])
+            }
+        )
+        defer { rig.cleanUp() }
+        let sessions = SessionRegistry(root: rig.root)
+        let extensionPosts = Counter()
+        let extensionHTTP = ScriptedHTTP { _ in
+            extensionPosts.increment()
+            return ScriptedHTTP.session(
+                uid: "u\(extensionPosts.count)", chunkSize: 5 * 1024 * 1024, received: 0)
+        }
+        let shareSession = ScriptedUploadTaskSession()
+        let started = await ShareTransfer.start(
+            jobID: rig.job.id,
+            credential: ShareUploadCredential(token: "grant", epoch: 3, binding: Fixture.binding()),
+            registry: sessions, repository: rig.repository, http: extensionHTTP,
+            allowsMobileData: false, stillCurrent: { _ in true },
+            // Formed nonisolated: this test runs on the main actor, the extension's start does not.
+            session: { @Sendable _ in shareSession })
+        let identifier = ShareSession.identifier(jobID: rig.job.id)
+        #expect(started == .started(identifier: identifier, tasks: 2))
+
+        // The transfers finished in the system while no process of the app was running.
+        let listing = shareSession.createdTasks.map {
+            WholeTaskListing(
+                taskIdentifier: $0.taskIdentifier, taskDescription: $0.description,
+                state: .completed)
+        }
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_750_000_000))
+        let outbox = Outbox(
+            repository: rig.repository, credentials: rig.credentials, http: rig.http,
+            scheduler: ScriptedScheduler(), completion: rig.completion, network: rig.network,
+            preferences: rig.preferences,
+            uploads: BackgroundUploadScheduler(
+                session: ScriptedUploadTaskSession(), now: { clock.now },
+                pause: { clock.advance(11) }),
+            shareSessions: ShareSessions(registry: sessions) { _ in
+                ScriptedUploadTaskSession(listing: listing)
+            }
+        )
+        let wake = OutboxBackgroundCompletion().enterWake()
+        await outbox.wake(holding: wake) {
+            await outbox.adopt()
+            await outbox.reattachShareSessions()
+            await outbox.start()
+        }
+
+        #expect(!sessions.contains(identifier: identifier))
+        #expect(!rig.http.requests(method: "HEAD").isEmpty, "resumed from the server's offset")
+        #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
+        #expect(rig.attemptedUploadPosts == 0)
+    }
+
     @Test("a two-file capture opens both sessions, writes once, then hands off both files")
     func twoFilesInOnePass() async throws {
         let parked = TestGate()
