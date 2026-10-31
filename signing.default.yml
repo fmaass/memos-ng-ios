@@ -15,3 +15,9 @@ targets:
       base:
         CODE_SIGN_IDENTITY: "-"
         CODE_SIGN_STYLE: Manual
+  # The Live Activity's widget extension, the same way.
+  MemosActivity:
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual

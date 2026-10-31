@@ -10,9 +10,10 @@
 #      missing or malformed --build (a whole number without a leading zero), a --build not greater
 #      than the current one (a re-run on the same number is a refusal, never a second section), a
 #      notes file that is missing, empty or blank, that names a tracker key, that says we/us/our,
-#      or whose project.yml does not name exactly two equal build key lines;
-#   2. builds both results in a private temporary directory: project.yml with BOTH
-#      `CURRENT_PROJECT_VERSION:` key lines set to <n> by an anchored sed (a key line starts with the
+#      or whose project.yml does not name at least two build key lines, all equal (one per target
+#      that carries the pair: the app and each of its extensions);
+#   2. builds both results in a private temporary directory: project.yml with EVERY
+#      `CURRENT_PROJECT_VERSION:` key line set to <n> by an anchored sed (a key line starts with the
 #      key after indentation, as scripts/release-notes-rule.sh reads it, so a comment naming the key
 #      is never one), every MARKETING_VERSION line left as it was; ReleaseNotes.md with
 #      `## <version> (<n>)`, a blank line and the body inserted under the intro, above the first
@@ -83,9 +84,11 @@ key_values() { # FILE KEY
 version="$(key_values "$PROJECT" MARKETING_VERSION | head -n 1)"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse bad-project "$PROJECT names no MARKETING_VERSION key line (read '$version')"
 builds="$(key_values "$PROJECT" CURRENT_PROJECT_VERSION | paste -sd ' ' -)"
-[[ "$builds" =~ ^([0-9]+)\ ([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ] ||
-  refuse bad-project "$PROJECT must name exactly two equal CURRENT_PROJECT_VERSION key lines (read '$builds')"
-current="${BASH_REMATCH[1]}"
+current="${builds%% *}"
+[[ "$builds" =~ ^[0-9]+(\ [0-9]+)+$ ]] && [ "$builds" = "$(printf '%s' "$builds" | sed -E "s/[0-9]+/$current/g")" ] ||
+  refuse bad-project "$PROJECT must name at least two equal CURRENT_PROJECT_VERSION key lines (read '$builds')"
+# What the key lines must read after the rewrite: as many as there are now, each the new number.
+want_builds="$(printf '%s' "$builds" | sed -E "s/[0-9]+/$build/g")"
 [ "$build" -gt "$current" ] || refuse build-not-greater "--build $build is not greater than the current build $current"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/bump-build.XXXXXX")" || refuse no-temp "cannot create a temporary directory"
@@ -93,8 +96,8 @@ trap 'rm -rf "${work:?}"' EXIT
 
 sed -E "s/^([[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*)\"?[0-9]+\"?([[:space:]]*(#.*)?)\$/\\1\"$build\"\\2/" \
   "$PROJECT" > "$work/project.yml" || refuse no-temp "cannot write the new $PROJECT"
-[ "$(key_values "$work/project.yml" CURRENT_PROJECT_VERSION | paste -sd ' ' -)" = "$build $build" ] ||
-  refuse bad-project "the rewritten $PROJECT does not name $build on exactly two key lines"
+[ "$(key_values "$work/project.yml" CURRENT_PROJECT_VERSION | paste -sd ' ' -)" = "$want_builds" ] ||
+  refuse bad-project "the rewritten $PROJECT does not name $build on every key line"
 [ "$(grep -n MARKETING_VERSION "$PROJECT")" = "$(grep -n MARKETING_VERSION "$work/project.yml")" ] ||
   refuse bad-project "the rewrite would change a MARKETING_VERSION line"
 
@@ -204,9 +207,9 @@ if ! { cat "$work/project.yml" > "$PROJECT" && cat "$work/notes.md" > "$NOTES"; 
   echo "bump-build: FAILED: writing $PROJECT or $NOTES failed; both are back at HEAD" >&2
   exit 1
 fi
-if [ "$(key_values "$PROJECT" CURRENT_PROJECT_VERSION | paste -sd ' ' -)" != "$build $build" ]; then
+if [ "$(key_values "$PROJECT" CURRENT_PROJECT_VERSION | paste -sd ' ' -)" != "$want_builds" ]; then
   put_back
-  echo "bump-build: FAILED: $PROJECT did not read back $build on both key lines; both files are back at HEAD" >&2
+  echo "bump-build: FAILED: $PROJECT did not read back $build on every key line; both files are back at HEAD" >&2
   exit 1
 fi
 if ! git add -- "$PROJECT" "$NOTES" ||

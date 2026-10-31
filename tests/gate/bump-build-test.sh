@@ -169,6 +169,26 @@ mkrepo noanchor
 printf '# TestFlight notes\n\nOnly an intro.\n' > "$r/$NOTES"; git -C "$r" commit -q -am intro
 before="$(state)"
 run_bump --build 50 --notes-file "$nf"; refused no-anchor no-section-anchor "$before"
+# a third target carrying the pair (the Live Activity's extension): every key line moves together
+third_target() { # BUILD — appended to $r/project.yml and committed
+  printf '  MemosActivity:\n    settings:\n      base:\n        MARKETING_VERSION: "2.4.0"\n        CURRENT_PROJECT_VERSION: "%s"\n' "$1" >> "$r/project.yml"
+  git -C "$r" commit -q -am third
+}
+mkrepo three
+third_target 49
+run_bump --build 50 --notes-file "$nf"
+check_eq three/exit 0 "$rc"
+check_eq three/every-key-line "50 50 50" "$(key_lines "$r/project.yml" | paste -sd ' ' -)"
+# the third site disagreeing is the same refusal as two disagreeing
+mkrepo three-split
+third_target 48
+before="$(state)"
+run_bump --build 50 --notes-file "$nf"; refused three-disagree bad-project "$before"
+# one key line is no app-and-extension pair at all
+mkrepo one
+sed -i '/MemosShare:/,$d' "$r/project.yml"; git -C "$r" commit -q -am one
+before="$(state)"
+run_bump --build 50 --notes-file "$nf"; refused one-key-line bad-project "$before"
 
 # --- a good run ---
 mkrepo good
@@ -265,7 +285,10 @@ real_case() { # NAME NOTES-SOURCE BUILD — the live project.yml with these note
   body good "$GOOD"
   run_bump --build "$n" --notes-file "$nf"
   check_eq "$name/exit" 0 "$rc"
-  check_eq "$name/both-key-lines" "$n $n" "$(key_lines "$r/project.yml" | paste -sd ' ' -)"
+  # Every key line the live tree has (the app and each extension carrying the pair) reads n.
+  check_eq "$name/every-key-line" "$(key_lines "$repo_root/project.yml" | sed "s/.*/$n/" | paste -sd ' ' -)" \
+    "$(key_lines "$r/project.yml" | paste -sd ' ' -)"
+  check_eq "$name/live-tree-has-pairs" 1 "$([ "$(key_lines "$repo_root/project.yml" | grep -c .)" -ge 2 ] && echo 1 || echo 0)"
   check_eq "$name/key-mentions-unchanged" "$key_mentions" "$(grep -c 'CURRENT_PROJECT_VERSION' "$r/project.yml")"
   check_eq "$name/marketing-version-identical" "$mv_before" "$(grep -n 'MARKETING_VERSION' "$r/project.yml")"
   check_eq "$name/diff-names-no-marketing-version" 0 "$(git -C "$r" diff -U0 HEAD~1 HEAD | grep -c '^[-+].*MARKETING_VERSION')"

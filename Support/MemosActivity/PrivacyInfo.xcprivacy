@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Privacy manifest for the MemosActivity widget extension.
+
+  An .appex is its own bundle and Apple reads its manifest separately from the host app's. This
+  extension draws the transfers Live Activity and calls no file-timestamp or defaults API itself,
+  but it links MemosOutbox — the package that defines the activity's attributes and content state
+  — and so carries the outbox's two declared uses, for the reasons the share extension's manifest
+  gives for the same package (Support/MemosShare/PrivacyInfo.xcprivacy):
+
+    NSPrivacyAccessedAPICategoryFileTimestamp — `.creationDateKey`, read by OutboxRepository off
+    an outbox manifest in the app group container (C617.1).
+
+    NSPrivacyAccessedAPICategoryUserDefaults — the outbox's mobile-data choice in the app group's
+    suite (1C8F.1), with the fallback to this process's own defaults (CA92.1).
+
+  Nothing is collected and nothing is tracked: the extension only draws what the app hands the
+  system.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+                <string>1C8F.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

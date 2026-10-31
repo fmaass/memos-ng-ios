@@ -144,6 +144,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         uploadSettings = outbox.map {
             UploadSettings(preferences: $0.uploadPreferences)
         }
+        // The transfers Live Activity follows every read the ledger applies, the ones a background
+        // upload's delegate event triggers included (MEMNG-948).
+        LiveTransferActivity.follow(outbox?.transfers)
         // ATTACHED AT LAUNCH, ahead of everything. The system can deliver a finished chunk's
         // result the instant this process exists, and a result that finds no handler is discarded
         // with the server's own byte count in it. Nothing here waits on a session: recording what

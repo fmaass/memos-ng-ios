@@ -16,6 +16,7 @@ default_platform(:ios)
 
 APP_ID   = "live.discomarder.memosng"
 EXT_ID   = "live.discomarder.memosng.share"
+ACT_ID   = "live.discomarder.memosng.activity"
 TEAM_ID  = "Y2JQ4VAF85"
 SCHEME   = "MemosNG"
 PROJECT  = "MemosNG.xcodeproj"
@@ -127,6 +128,10 @@ def prepare_signing(key)
     api_key: key, app_identifier: EXT_ID, force: true,
     output_path: "#{ROOT}/fastlane/profiles", filename: "ext.mobileprovision",
   )
+  prof_act = get_provisioning_profile(
+    api_key: key, app_identifier: ACT_ID, force: true,
+    output_path: "#{ROOT}/fastlane/profiles", filename: "act.mobileprovision",
+  )
 
   # The archive step signs each target directly, so the profile must be written into the
   # project per target -- export_options only governs the (unused) export step.
@@ -137,6 +142,10 @@ def prepare_signing(key)
   update_code_signing_settings(
     use_automatic_signing: false, path: PROJECT, team_id: TEAM_ID,
     targets: ["MemosShare"], code_sign_identity: "Apple Distribution", profile_name: prof_ext,
+  )
+  update_code_signing_settings(
+    use_automatic_signing: false, path: PROJECT, team_id: TEAM_ID,
+    targets: ["MemosActivity"], code_sign_identity: "Apple Distribution", profile_name: prof_act,
   )
 end
 

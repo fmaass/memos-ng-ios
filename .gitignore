@@ -2,6 +2,7 @@
 *.xcodeproj
 Support/Info.plist
 Support/MemosShare-Info.plist
+Support/MemosActivity-Info.plist
 *.xcworkspace
 # build products
 .build/

@@ -86,8 +86,9 @@ public struct TransferJob: Sendable, Equatable, Identifiable {
     }
 }
 
-/// The whole queue in four numbers — the strip's line.
-public struct TransferSummary: Sendable, Equatable {
+/// The whole queue in four numbers — the strip's line, and the Live Activity's content state
+/// (`TransferActivityState`), which is why it codes: the system hands it to the widget extension.
+public struct TransferSummary: Sendable, Hashable, Codable {
     public var jobs: Int
     public var filesDone: Int
     public var filesTotal: Int
@@ -152,6 +153,11 @@ public final class TransferLedger {
     /// Each applied read that saw the server confirm more bytes: when, and how many more.
     private var confirmations: [Confirmation] = []
     private let clock: @Sendable () -> Date
+    /// Told of every read `apply` accepted, after the ledger took it in, with the captures it now
+    /// shows — and of no read it refused, so a late read never reaches what follows the ledger.
+    /// Synchronous on the main actor: the reads arrive in the order they were applied. The Live
+    /// Activity follows the queue through this (`TransferActivityDriver`).
+    @ObservationIgnored public var onApplied: (@MainActor ([TransferJob]) -> Void)?
 
     struct Confirmation: Equatable {
         var at: Date
@@ -187,6 +193,7 @@ public final class TransferLedger {
             emptiedAt = nil
         }
         if jobs != projected { jobs = projected }
+        onApplied?(jobs)
         return true
     }
 
