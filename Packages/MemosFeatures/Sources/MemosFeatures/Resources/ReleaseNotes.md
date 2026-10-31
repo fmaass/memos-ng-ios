@@ -5,6 +5,17 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (76)
+
+- I can invite guests to a trip with a scannable QR pass, see who joined on which device, and revoke a device or end the pass.
+- A guest who scans a trip pass can upload pictures to that one trip in guest mode, without touching my own sign-in.
+- An upload in flight shows as a Live Activity on the lock screen and in the Dynamic Island.
+- A local notification tells me when a memo is live or when a file needs a fix, and tapping it opens that memo or the Transfers sheet.
+- An interrupted upload resumes from where the server left off instead of sending the whole file again.
+- Picked photos are staged into the queue in the background, so a large pick survives the app leaving the screen.
+- Uploads started from the share sheet run in their own background session and finish even after the share sheet closes.
+- I can change a memo's visibility while it is still uploading, from the memo or from the Transfers sheet.
+
 ## 2.4.0 (75)
 
 - The Library, Years, Months and Tags now start on everyone's Public pictures, not only mine; a month's, a year's and a tag's Journal shows Public memos only.
