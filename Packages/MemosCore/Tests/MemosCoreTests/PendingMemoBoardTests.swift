@@ -161,4 +161,79 @@ struct PendingMemoBoardTests {
         #expect(store.pendingCards.isEmpty)
         #expect(store.identityKey(forUID: "m9") == PendingMemoBoard.key(for: capture.id))
     }
+
+    @Test("what a card said had not arrived is carried onto the memo it became (MEMNG-1049)")
+    func missingCountOutlivesTheSwap() {
+        var board = PendingMemoBoard()
+        var capture = job()
+        capture.notArrived = 2
+        var other = job("no losses", at: 1_750_000_100)
+        other.notArrived = nil
+        board.show([capture, other], resolved: [:])
+        // Both created; the jobs left the queue; the list now holds both memos.
+        board.show([], resolved: [capture.id: "m1", other.id: "m2"])
+        #expect(board.visible(present: ["m1", "m2"]).isEmpty)
+        board.settle([capture.id, other.id])
+        #expect(board.resolvedJobIDs.isEmpty)
+        #expect(board.missingItems(for: "m1") == 2)
+        #expect(board.missingItems(for: "m2") == 0)
+        #expect(board.missingItems(for: "never-a-card") == 0)
+        // Another account is a new board: the line was about the one that left.
+        board.reset()
+        #expect(board.missingItems(for: "m1") == 0)
+    }
+
+    @MainActor
+    @Test("the timeline draws the missing line on the memo once the card has settled")
+    func timelineCarriesTheMissingLineOntoTheMemo() async {
+        let store = TimelineStore()
+        var capture = job()
+        capture.notArrived = 1
+        let identity = TimelineSnapshotIdentity(
+            server: Self.binding.serverBaseURL, subject: Self.binding.ownerSubject)
+        store.showPending([capture], resolved: [:], for: identity)
+        store.showPending([], resolved: [capture.id: "m1"], for: identity)
+        let landing = Stub.client { _, _, _ in Stub.json(Stub.memoList(["m1"], nextCursor: nil)) }
+        await store.refresh(using: landing.handle, baseURL: Stub.baseURL)
+        #expect(store.memos.map(\.uid) == ["m1"])
+        #expect(store.pendingCards.isEmpty)
+        #expect(store.missingItems(forUID: "m1") == 1)
+    }
+
+    @MainActor
+    @Test("a read in flight settles only the cards resolved before it left")
+    func suspendedRefreshSettlesOnlyWhatItWasAskedAbout() async {
+        let store = TimelineStore()
+        let first = job("A", at: 1_750_000_000)
+        let second = job("B", at: 1_750_000_100)
+        let identity = TimelineSnapshotIdentity(
+            server: Self.binding.serverBaseURL, subject: Self.binding.ownerSubject)
+        store.showPending([first, second], resolved: [:], for: identity)
+        // A became a memo before the read; B is still in the queue.
+        store.showPending([second], resolved: [first.id: "mA"], for: identity)
+
+        let arrived = Gate()
+        let release = Gate()
+        let reads = Stub.client { _, _, operation in
+            if operation == "list_memos_api_memos_get" {
+                arrived.open()
+                await release.wait()
+            }
+            // Neither memo is on the page read: only what the read was asked about may go.
+            return Stub.json(Stub.memoList(["x"], nextCursor: nil))
+        }
+        let read = Task { await store.refresh(using: reads.handle, baseURL: Stub.baseURL) }
+        await arrived.wait()
+        // B resolves while the read is in the air.
+        store.showPending([], resolved: [first.id: "mA", second.id: "mB"], for: identity)
+        release.open()
+        await read.value
+
+        #expect(store.memos.map(\.uid) == ["x"])
+        #expect(store.pendingCards.map(\.job.id) == [second.id])
+        // The next read that lands was asked about B, and settles it.
+        let next = Stub.client { _, _, _ in Stub.json(Stub.memoList(["x"], nextCursor: nil)) }
+        await store.refresh(using: next.handle, baseURL: Stub.baseURL)
+        #expect(store.pendingCards.isEmpty)
+    }
 }

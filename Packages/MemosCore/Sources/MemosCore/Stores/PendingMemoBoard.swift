@@ -43,6 +43,10 @@ public struct PendingMemoBoard: Sendable, Equatable {
     private var withdrawn: Set<UUID> = []
     /// The key each memo that replaced a card keeps for as long as this board lives.
     private var keys: [String: String] = [:]
+    /// The picked items each memo that replaced a card went without, kept as long as its key: the
+    /// card said so, and a capture with words becomes its memo seconds after the release, so a
+    /// sentence that left with the card would be one nobody had the time to read (MEMNG-1049).
+    private var missing: [String: Int] = [:]
 
     public init() {}
 
@@ -51,6 +55,10 @@ public struct PendingMemoBoard: Sendable, Equatable {
 
     /// The key the memo `uid` is drawn under: its card's, when it was one.
     public func key(for uid: String) -> String { keys[uid] ?? uid }
+
+    /// The picked items the memo `uid` went without, as its card named them; zero for a memo that
+    /// never was a card or whose card named none.
+    public func missingItems(for uid: String) -> Int { missing[uid] ?? 0 }
 
     /// The queue as last read, and the memos its finished captures became.
     ///
@@ -73,7 +81,11 @@ public struct PendingMemoBoard: Sendable, Equatable {
             next.append(kept)
         }
         for card in next {
-            if let uid = card.resolvedUID { keys[uid] = card.id }
+            guard let uid = card.resolvedUID else { continue }
+            keys[uid] = card.id
+            // The count the card last showed: a card kept after its capture left the queue still
+            // holds the job as the queue last listed it, released and counted.
+            if card.job.missingItems > 0 { missing[uid] = card.job.missingItems }
         }
         // Newest capture first, above the server's own memos.
         cards = next.sorted { $0.date > $1.date }

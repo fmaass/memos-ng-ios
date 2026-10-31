@@ -930,6 +930,10 @@ public final class TimelineStore {
     public func identityKey(for memo: Memo) -> String { identityKey(forUID: memo.uid) }
     public func identityKey(forUID uid: String) -> String { pending.key(for: uid) }
 
+    /// The picked items a memo went without, carried over from the card it replaced so the line
+    /// that says so outlives the swap (MEMNG-1049).
+    public func missingItems(forUID uid: String) -> Int { pending.missingItems(for: uid) }
+
     /// Empties the loaded list.
     ///
     /// The timeline never does this — a list that blanks because one refresh failed is a worse lie

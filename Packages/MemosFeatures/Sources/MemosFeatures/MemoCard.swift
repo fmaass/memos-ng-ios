@@ -32,6 +32,9 @@ struct MemoCard: View {
     /// computes tile rectangles for itself keeps passing after the reporting is deleted, which is
     /// exactly the hole this closes (`MemoCardTapTests`).
     let reportTiles: (([MemoCardTap.Tile]) -> Void)?
+    /// The pictures this memo went without, when it was a pending card that said so
+    /// (`PendingMemoPresentation.missingNote(count:)`); nil on every other memo.
+    let missingNote: String?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var avatar = DesignTokens.Metric.avatar
@@ -51,13 +54,15 @@ struct MemoCard: View {
         mediaZoom: Namespace.ID? = nil,
         openMemo: @escaping () -> Void = {},
         openAttachment: @escaping (MemoAttachment) -> Void = { _ in },
-        reportTiles: (([MemoCardTap.Tile]) -> Void)? = nil
+        reportTiles: (([MemoCardTap.Tile]) -> Void)? = nil,
+        missingNote: String? = nil
     ) {
         self.memo = memo
         self.mediaZoom = mediaZoom
         self.openMemo = openMemo
         self.openAttachment = openAttachment
         self.reportTiles = reportTiles
+        self.missingNote = missingNote
     }
 
     var body: some View {
@@ -70,6 +75,13 @@ struct MemoCard: View {
             photos
             if !memo.tags.isEmpty {
                 tags
+            }
+            // The pending card's line, drawn the same way, so the swap does not take it away.
+            if let missingNote {
+                Label(missingNote, systemImage: "photo.badge.exclamationmark")
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, DesignTokens.Space.roomy)
             }
         }
         .padding(.vertical, DesignTokens.Space.roomy)

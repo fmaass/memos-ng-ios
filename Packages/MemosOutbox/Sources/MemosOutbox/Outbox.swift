@@ -671,9 +671,12 @@ public final class Outbox {
             return false
         }
         await engine.abandonTasks(jobID: jobID)
-        _ = await repository.delete(landed, ifStillCurrent: landed)
+        // The delete is fenced on the row this call wrote, and the hop above is an instant for
+        // another write to land in. Losing it leaves a cancelled capture on disk, so the answer is
+        // the delete's: a card hidden over a row that is still there would come back next launch.
+        let removed = await repository.delete(landed, ifStillCurrent: landed)
         await refresh()
-        return true
+        return removed
     }
 
     private func enqueueJob(
@@ -758,9 +761,15 @@ public final class Outbox {
     /// landed so far, and every late file would then be refused by the capture it was picked for —
     /// a picture gone in silence. The write below is fenced on this snapshot, and a capture never
     /// goes back to arriving, so one read as let go is still let go when the mark lands.
+    ///
+    /// Refused for a capture with nothing to send (MEMNG-1049): the draft would be empty, and the
+    /// only re-post it could lead to is one `resubmit` refuses. The row offers Remove alone; this
+    /// is the guard, the row is the sentence.
     public func cancel(_ jobID: UUID) async -> RestoredDraft? {
         guard let snapshot = await repository.job(jobID) else { return nil }
-        guard snapshot.editUnansweredSince == nil, !snapshot.stillArriving else { return nil }
+        guard snapshot.editUnansweredSince == nil, !snapshot.stillArriving,
+            !snapshot.hasNothingToSend
+        else { return nil }
         let taken = snapshot.cancelled(at: Date())
         let written = try? await repository.save(
             taken, ifStillCurrent: nil, matching: snapshot, else: taken

@@ -499,7 +499,9 @@ public struct TimelineView: View {
                             memo: memo,
                             mediaZoom: mediaZoom,
                             openMemo: { path.append(MemoRoute(uid: memo.uid)) },
-                            openAttachment: { open($0, of: memo) }
+                            openAttachment: { open($0, of: memo) },
+                            missingNote: PendingMemoPresentation.missingNote(
+                                count: timeline.missingItems(forUID: memo.uid))
                         )
                         .cardRow()
                         // The key its pending card was drawn under, when it was one (MEMNG-951).

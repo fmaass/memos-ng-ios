@@ -174,7 +174,14 @@ public enum PendingMemoPresentation {
     /// The line a capture carries when picked items never reached it: they are still in Photos,
     /// and the memo goes without them — said, never left to be discovered.
     public static func missingNote(for job: UploadJob) -> String? {
-        switch job.missingItems {
+        missingNote(count: job.missingItems)
+    }
+
+    /// The same line for a count carried past the capture — the memo its card became draws it
+    /// (`TimelineStore.missingItems(forUID:)`, MEMNG-1049), so the sentence does not leave with
+    /// the card that said it first.
+    public static func missingNote(count: Int) -> String? {
+        switch count {
         case 0: nil
         case 1: "1 photo could not be added — it is still in Photos"
         case let count: "\(count) photos could not be added — they are still in Photos"

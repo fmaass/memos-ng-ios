@@ -296,6 +296,17 @@ struct PostWhileImportingTests {
         #expect(editable?.disabledReason == nil)
     }
 
+    @Test("the memo a card became says the card's line about what never came (MEMNG-1049)")
+    func missingLineIsTheSameOnTheMemo() {
+        let card = row { $0.notArrived = 2 }?.missingNote
+        #expect(card != nil)
+        #expect(PendingMemoPresentation.missingNote(count: 2) == card)
+        #expect(
+            PendingMemoPresentation.missingNote(count: 1)
+                == "1 photo could not be added — it is still in Photos")
+        #expect(PendingMemoPresentation.missingNote(count: 0) == nil)
+    }
+
     @Test("a capture picked items never reached says so in one line, naming Photos")
     func missingItemsAreNamedOnTheCard() {
         #expect(

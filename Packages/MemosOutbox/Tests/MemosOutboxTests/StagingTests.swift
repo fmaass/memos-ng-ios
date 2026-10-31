@@ -16,6 +16,7 @@ struct StagingTests {
         let repository: OutboxRepository
         let http: ScriptedHTTP
         let outbox: Outbox
+        let scheduler: ScriptedScheduler
         let preferencesName: String
 
         var memoPosts: [URLRequest] {
@@ -48,18 +49,19 @@ struct StagingTests {
         }
         let preferences = Fixture.preferences(allowsMobileData: true)
         let box = AttemptHandlerBox()
+        let scheduler = ScriptedScheduler()
         let outbox = Outbox(
             repository: repository,
             credentials: provider,
             http: http,
-            scheduler: ScriptedScheduler(),
+            scheduler: scheduler,
             completion: MemoCompletionEndpoint(http: http),
             network: StubNetworkPath(),
             preferences: preferences.store,
             attachScheduler: { handler in box.value = handler }
         )
         return Harness(
-            root: root, repository: repository, http: http, outbox: outbox,
+            root: root, repository: repository, http: http, outbox: outbox, scheduler: scheduler,
             preferencesName: preferences.name
         )
     }
@@ -282,6 +284,33 @@ struct StagingTests {
         #expect(await harness.repository.job(job.id) == creating)
     }
 
+    @Test("Remove that loses its delete to a write in its hop says so, and the row stays")
+    func withdrawLosingItsDeleteIsRefused() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let enqueued = try await harness.repository.enqueue(
+            content: "two hands", visibility: nil, capturedAt: Date(),
+            binding: Fixture.binding(), sources: []
+        )
+        let id = enqueued.id
+        // Inside the hop between Remove's cancelled mark and its delete, another write lands on
+        // the row — a Cancel of the same capture a minute on, written through the same fence as
+        // `Outbox.cancel` writes it. The row on disk is no longer the one Remove marked.
+        let repository = harness.repository
+        let competing = LockedBox<UploadJob?>(nil)
+        harness.scheduler.beforeInFlight = {
+            guard let row = await repository.job(id), let marked = row.cancelledAt else { return }
+            let later = row.cancelled(at: marked.addingTimeInterval(60))
+            competing.value =
+                (try? await repository.save(later, ifStillCurrent: nil, matching: row, else: later))
+                ?? nil
+        }
+        #expect(await !harness.outbox.withdraw(id))
+        let written = try #require(competing.value, "the competing write never landed")
+        #expect(await harness.repository.job(id) == written)
+        #expect(harness.outbox.jobs.map(\.id) == [id])
+    }
+
     @Test("Cancel is refused while files still arrive; once let go the capture comes back whole")
     func cancelRefusedWhileFilesArrive() async throws {
         let harness = try harness()
@@ -355,7 +384,7 @@ struct StagingTests {
         #expect(kept.missingItems == 1)
     }
 
-    @Test("a kept capture with nothing in it is never sent again, whatever the editor hands back")
+    @Test("a kept capture with nothing in it is never handed back nor sent again")
     func nothingToSendIsNeverResubmitted() async throws {
         let harness = try harness()
         defer { harness.cleanUp() }
@@ -364,11 +393,43 @@ struct StagingTests {
         await harness.outbox.release(id)
         let kept = try #require(await harness.repository.job(id))
         #expect(kept.hasNothingToSend)
-        let draft = try #require(await harness.outbox.cancel(id))
-        let before = try #require(await harness.repository.job(id))
+        // Cancel refuses it (MEMNG-1049): an empty draft is a re-post the queue would refuse.
+        #expect(await harness.outbox.cancel(id) == nil)
+        #expect(await harness.repository.job(id) == kept)
+        // And whatever an editor hands back for it, the re-post is refused all the same.
+        let draft = RestoredDraft(
+            jobID: id, content: "", visibility: nil, capturedAt: kept.capturedAt, pictures: [])
         #expect(await harness.outbox.resubmit(id, draft: draft) == .refused(.nothingToSend))
-        #expect(await harness.repository.job(id) == before)
+        #expect(await harness.repository.job(id) == kept)
         #expect(harness.memoPosts.isEmpty)
+    }
+
+    @Test("a release the disk refused leaves the capture arriving; the next one lets it go once")
+    func releaseThatFailedToPersistIsTakenLater() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let id = try #require(
+            await harness.outbox.stage(
+                content: "dunes", visibility: nil, sources: [try source(harness, "a.heic")],
+                arriving: 1))
+        let staged = try #require(await harness.repository.job(id))
+        let restore = try Fixture.permissions(
+            0o500, on: harness.root.appending(path: "outbox").appending(path: "jobs"))
+        await harness.outbox.release(id)
+        restore()
+        // Nothing half-written: the capture is exactly as it was, still taking files, its create
+        // still held, and the late file still has somewhere to go.
+        #expect(await harness.repository.job(id) == staged)
+        #expect(harness.outbox.jobs.first?.stillArriving == true)
+        #expect(harness.memoPosts.isEmpty)
+        #expect(await harness.outbox.append([try source(harness, "b.heic")], to: id))
+        // Recovery in the same launch: the next release is taken, once.
+        await harness.outbox.release(id)
+        let released = try #require(await harness.repository.job(id))
+        #expect(!released.stillArriving)
+        #expect(released.files.map(\.filename) == ["a.heic", "b.heic"])
+        #expect(released.missingItems == 0)
+        #expect(await !harness.outbox.append([try source(harness, "c.heic")], to: id))
     }
 
     @Test("a re-post clears what the card said had not arrived")
@@ -424,5 +485,18 @@ private final class MemoCounter: @unchecked Sendable {
             count += 1
             return "m\(count)"
         }
+    }
+}
+
+/// What a write a case put inside a hop landed as, read back once the hop is over.
+private final class LockedBox<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+
+    init(_ value: Value) { stored = value }
+
+    var value: Value {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
     }
 }
