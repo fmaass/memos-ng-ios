@@ -36,6 +36,50 @@ struct RootURLRouteTests {
     }
 }
 
+/// What a universal link from the trip door can look like when it arrives.
+///
+/// The door's association claims `/p/*` for this app (read live 2026-10-31), so the system hands
+/// the app every URL under `/p/` on that host — from the Camera, from Messages — through
+/// `onOpenURL` or a browsing activity, and both reach `RootURLRoute`. What the system delivers is
+/// the URL as it was shared, query and fragment included, so each of those shapes must still be
+/// read as the pass; a claimed shape that is not a pass, and the home host, must not.
+@Suite("Universal links from the trip door")
+struct TripDoorUniversalLinkTests {
+    @Test(
+        "every shape of a /p/<secret> link the door's association hands over opens that pass",
+        arguments: [
+            ("https://trip.discomarder.live/p/abc123", "abc123"),
+            ("https://trip.discomarder.live/p/abc123?utm_source=qr", "abc123"),
+            ("https://trip.discomarder.live/p/abc123#join", "abc123"),
+            ("https://trip.discomarder.live/p/abc123/", "abc123"),
+            ("https://trip.discomarder.live/p/k3y%2DSecret", "k3y-Secret"),
+            ("https://TRIP.discomarder.live/p/abc123", "abc123"),
+        ]
+    )
+    func claimedPassShapesOpenThePass(_ spelled: String, _ secret: String) throws {
+        let url = try #require(URL(string: spelled))
+        #expect(RootURLRoute.route(url) == .tripPass(secret))
+    }
+
+    @Test(
+        "a path the wildcard claims but no pass has, and the home host, never redeem",
+        arguments: [
+            // Rejected host: the home server is internal-only and is no guest door.
+            "https://memos.discomarder.live/p/abc123",
+            // Rejected paths: `/p/*` also matches these, and none of them names one pass.
+            "https://trip.discomarder.live/p/abc123/extra",
+            "https://trip.discomarder.live/p/",
+            // Rejected paths outside the claim, should one ever reach the app.
+            "https://trip.discomarder.live/x/abc123",
+            "https://trip.discomarder.live/.well-known/apple-app-site-association",
+        ]
+    )
+    func unclaimedShapesReachTheInbox(_ spelled: String) throws {
+        let url = try #require(URL(string: spelled))
+        #expect(RootURLRoute.route(url) == .inbox)
+    }
+}
+
 /// The scanner's one answer, claimed synchronously where VisionKit reports a code.
 @Suite("The trip pass scanner's claim")
 struct TripPassScanClaimTests {

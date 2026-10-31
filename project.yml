@@ -128,6 +128,14 @@ targets:
           - applinks:memos.discomarder.live?mode=developer
           - webcredentials:memos.discomarder.live
           - webcredentials:memos.discomarder.live?mode=developer
+          # The trip door is the one host whose association IS publicly fetchable: it is the public
+          # guest door, and its AASA claims /p/* for this app id. A pass link opened from the
+          # Camera or Messages then opens the app on that pass (RootView's onOpenURL and browsing
+          # activity, through RootURLRoute into the guest redeem), and falls back to the door's
+          # landing page where the app is not installed. Only applinks: a guest never signs in
+          # here, so there is no webcredentials twin. No other home host is claimed this way.
+          - applinks:trip.discomarder.live
+          - applinks:trip.discomarder.live?mode=developer
         com.apple.security.application-groups:
           - group.live.discomarder.memosng
         keychain-access-groups:
