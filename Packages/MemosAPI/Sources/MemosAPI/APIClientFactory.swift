@@ -65,6 +65,15 @@ public enum APIClientFactory {
         )
     }
 
+    /// The transport the trip-pass door is spoken to over (`GuestSessionStore`): the same bounded
+    /// session and NO middleware, so the member's bearer token can never be attached to a guest
+    /// request — the guest token is the caller's, set on each request it builds.
+    public static func guestTransport(
+        urlSession: URLSession = APIClientFactory.urlSession
+    ) -> any ClientTransport {
+        URLSessionTransport(configuration: .init(session: urlSession))
+    }
+
     /// The seam tests substitute: a real generated client over a transport that answers from a
     /// script.
     public static func make(

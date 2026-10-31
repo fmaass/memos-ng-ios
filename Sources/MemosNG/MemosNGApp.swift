@@ -50,6 +50,9 @@ struct MemosNGApp: App {
                 // The upload preference, over the very store the outbox is listening to, so
                 // turning it on sends what is already queued instead of only the next capture.
                 .environment(appDelegate.uploadSettings)
+                // Guest mode: the trip pass this device holds, if any. Its own store over its own
+                // Keychain accounts — the member's session above is never handed any of it.
+                .environment(appDelegate.guestSession)
         }
     }
 }
@@ -97,6 +100,29 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         }
     )
     private(set) var outbox: Outbox?
+    /// The trip pass, kept in its own Keychain accounts under its own epoch, in the same vault the
+    /// member session defaults to. `lazy` for the reason `session` is: it is built on the main
+    /// actor, the first time something asks.
+    private(set) lazy var guestCredentials = GuestCredentialStore(
+        credentials: DeviceCredentials.keychain()
+    )
+    /// Guest mode: redeem, confirm, receipts and leave. A pass becoming this device's — redeemed
+    /// or restored — composes the guest queue for it.
+    private(set) lazy var guestSession: GuestSessionStore = {
+        let guest = GuestSessionStore(
+            credentials: self.guestCredentials,
+            licence: OutboxAccountStore.guestLive(),
+            displayName: UIDevice.current.name
+        )
+        guest.onActivated = { [weak self] in self?.guestModeActivated() }
+        return guest
+    }()
+    /// The trip pass's queue, apart from the member one: its own directory, background session
+    /// and credentials. Composed ONCE per process and never dropped: a background session's
+    /// identifier may be held by one session per process, and a second one under the same
+    /// identifier would leave the first one's answers undelivered. After a leave or an ended
+    /// pass it is inert — its provider has no grant to send under, and what it holds stays held.
+    private(set) var guestOutbox: Outbox?
     /// Built from the outbox's own preference store rather than a second one over the same suite:
     /// the drain acts on the object it was given, and a switch it never hears about is a switch
     /// that only takes effect on the next launch.
@@ -155,6 +181,17 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // notification that launched this process is delivered to the delegate set here.
         attachTransferNotifications(to: outbox)
         if let outbox { Task { @MainActor in await outbox.adopt() } }
+        // The guest queue is composed here too, at launch and synchronously, for the reason the
+        // member one is: its session has to exist before the system can deliver a guest chunk.
+        // The guest licence is the synchronous sign of a standing pass (published on redeem and
+        // restore, withdrawn on leave and on an ended pass); the Keychain read is not synchronous.
+        if OutboxAccountStore.guestLive()?.currentLicence() != nil {
+            composeGuestOutbox()
+        }
+        // The pass is read back and put to the door; a restored pass composes the queue if the
+        // licence above did not.
+        let guestSession = guestSession
+        Task { @MainActor in await guestSession.restore() }
         // New work starts only while the app is active (decision 9): a wake finishes what the
         // system already holds and sends a finished capture's memo, nothing more. The UIApplication
         // notifications rather than the delegate methods, which a scene-based app is not sent.
@@ -166,6 +203,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 // The Settings app may have changed a preference while the app was away; the
                 // one activation path reads it back before it opens scheduling and drains.
                 MainActor.assumeIsolated {
+                    self.guestOutbox?.appBecameActive()
                     _ = SettingsBundleSync.activate(
                         settings: AppSettings.shared,
                         uploads: self.uploadSettings,
@@ -179,6 +217,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
+                    self.guestOutbox?.appEnteredBackground()
                     // The outbox closes, and the pane's size row is written as the cache stands
                     // when the app leaves the front.
                     SettingsBundleSync.enteredBackground(
@@ -234,6 +273,23 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // the system at once.
         if UploadSpike.isSpikeSession(identifier) {
             receiveSpike(identifier, completionHandler: completionHandler)
+            return
+        }
+        // A guest chunk's wake is the guest queue's to answer: the member outbox knows nothing of
+        // that job, and draining it would release the system's handler with the guest answer
+        // still undelivered. With no guest queue composed there is nothing to deliver to.
+        if identifier == OutboxSession.guestIdentifier {
+            // The system relaunched this process for a guest chunk: the queue has work with the
+            // system whatever the licence says, so its session is made now to take the answer.
+            composeGuestOutbox()
+            guard let guestOutbox,
+                let wake = OutboxBackgroundCompletion.shared.beginWake(
+                    for: identifier, handler: completionHandler)
+            else {
+                completionHandler()
+                return
+            }
+            Task { @MainActor in await self.startGuestOutbox(holding: wake) }
             return
         }
         let wake = OutboxBackgroundCompletion.shared.beginWake(
@@ -304,6 +360,71 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 
+    /// GUEST HOOK — the one place the guest queue's authority comes from: the guest store, on the
+    /// guest epoch. Never the member session's grant.
+    private func guestOutboxCredentials() -> any OutboxCredentialsProviding {
+        GuestOutboxCredentials(store: guestCredentials)
+    }
+
+    /// Composes the guest queue once, attaches what the last run left (sending nothing), and
+    /// starts watching it for captures the door turned away.
+    @discardableResult
+    private func composeGuestOutbox() -> Outbox? {
+        if let guestOutbox { return guestOutbox }
+        guard let composed = try? Outbox.guestLive(credentials: guestOutboxCredentials()) else {
+            return nil
+        }
+        guestOutbox = composed
+        Task { @MainActor in await composed.adopt() }
+        watchGuestQueue(composed)
+        return composed
+    }
+
+    /// A pass became this device's. The queue exists from here on, and — when someone is in front
+    /// of the app — it opens and drains now: the launch's activation has already gone by, and a
+    /// capture shared to the trip must not wait for the next one.
+    private func guestModeActivated() {
+        guard let guestOutbox = composeGuestOutbox() else { return }
+        if UIApplication.shared.applicationState == .active {
+            guestOutbox.appBecameActive()
+        }
+    }
+
+    /// The guest queue has no refusal channel: a capture the door turned away lands HELD for
+    /// credentials, and that is all it says. Every change is handed to the guest session, which
+    /// asks the door again under the guest epoch when a hold is new — so the refusal reaches the
+    /// guest rule fenced on the epoch that issued the asking, and never the member session.
+    private func watchGuestQueue(_ outbox: Outbox) {
+        let jobs = withObservationTracking {
+            outbox.jobs
+        } onChange: { [weak self] in
+            Task { @MainActor in self?.watchGuestQueue(outbox) }
+        }
+        let guestSession = guestSession
+        Task { @MainActor in await guestSession.guestQueueChanged(jobs) }
+    }
+
+    /// The guest half of a wake, holding the system's handlers until the guest queue is quiescent.
+    private func startGuestOutbox(holding wake: WakeWork) async {
+        guard let guestOutbox else {
+            wake.leave()
+            return
+        }
+        await guestOutbox.wake(holding: wake) { await self.startGuestOutbox() }
+    }
+
+    /// What `startOutbox` does for the member, for the pass: attach first, then read the pass back
+    /// if this process has not yet, and send only with a grant. Restoring only the credential, not
+    /// the session: the door is asked whether the pass stands by the launch's own restore.
+    private func startGuestOutbox() async {
+        await guestOutbox?.adopt()
+        if guestCredentials.current == nil {
+            try? await guestCredentials.restore()
+        }
+        guard guestCredentials.grant() != nil else { return }
+        await guestOutbox?.start()
+    }
+
     /// `startOutbox`, holding the system's handlers until the outbox is quiescent.
     private func startOutbox(holding wake: WakeWork) async {
         guard let outbox else {
@@ -355,6 +476,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         let run = BackgroundRun()
         // Entered BEFORE the work starts, so a session's handler held meanwhile waits for it too.
         let wake = OutboxBackgroundCompletion.shared.enterWake()
+        // The guest queue drains in the same refresh, under its own wake, when it is composed.
+        let guestWake = guestOutbox.map { _ in OutboxBackgroundCompletion.shared.enterWake() }
         // Set BEFORE the work starts. The system may expire a task the moment it hands it over,
         // and whichever of the two arrives first, the system is told exactly once — never twice,
         // and never not at all, which is what gets an app's background time taken away.
@@ -364,7 +487,9 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         }
         run.attach(
             Task { @MainActor in
-                await self.startOutbox(holding: wake)
+                async let member: Void = self.startOutbox(holding: wake)
+                if let guestWake { await self.startGuestOutbox(holding: guestWake) }
+                await member
                 if run.claimCompletion() {
                     task.setTaskCompleted(success: !Task.isCancelled)
                 }

@@ -17,9 +17,10 @@ struct ShareRootView: View {
     @State private var failed = 0
     @State private var note = ""
     @State private var visibility: ShareVisibility?
-    /// Who the app last said is signed in. The extension has no session and no token of its own —
-    /// see `OutboxAccountStore`.
-    @State private var account: AccountBinding?
+    /// Who the app last said a share goes to — the member at home, or a guest's trip pass — and
+    /// which queue that is. The extension has no session and no token of its own: both are licence
+    /// bindings the app published (see `OutboxAccountStore`, `ShareRoute`).
+    @State private var route: ShareRoute?
     @State private var isReading = true
     @State private var isPosting = false
     @State private var problem: String?
@@ -29,10 +30,11 @@ struct ShareRootView: View {
         .appending(path: "share-\(UUID().uuidString)")
 
     private var canPost: Bool {
-        account != nil
-            && ShareComposition.canPost(
-                note: note, items: items, failed: failed, isBusy: isReading || isPosting
-            )
+        guard let route else { return false }
+        return ShareComposition.canPost(
+            for: route.kind, note: note, items: items, failed: failed,
+            isBusy: isReading || isPosting
+        )
     }
 
     var body: some View {
@@ -43,7 +45,7 @@ struct ShareRootView: View {
                         ProgressView()
                         Text("Reading what you shared…")
                     }
-                } else if account == nil {
+                } else if route == nil {
                     Text(Self.signInFirst).foregroundStyle(.secondary)
                 }
                 // Outside the item list on purpose: when NOTHING could be copied there are no
@@ -71,14 +73,28 @@ struct ShareRootView: View {
                     TextField("Say something about this", text: $note, axis: .vertical)
                         .lineLimit(3...6)
                 }
-                Section("Visibility") {
-                    Picker("Visibility", selection: $visibility) {
-                        Text("Account default").tag(ShareVisibility?.none)
-                        Text(ShareVisibility.private.label).tag(ShareVisibility?.some(.private))
-                        Text(ShareVisibility.protected.label).tag(ShareVisibility?.some(.protected))
-                        Text(ShareVisibility.public.label).tag(ShareVisibility?.some(.public))
+                // A guest upload has no visibility: the trip decides who sees it. The licence
+                // carries no trip label, so the line names none rather than guessing one.
+                if route?.kind == .guest {
+                    Section("Trip") {
+                        Text(Self.addingToTrip).foregroundStyle(.secondary)
+                        // Post stays off for words alone; the sheet says why rather than refusing
+                        // in silence.
+                        if !isReading, !items.contains(where: \.isFile) {
+                            Text(Self.tripTakesFiles).foregroundStyle(.orange)
+                        }
                     }
-                    .pickerStyle(.segmented)
+                } else {
+                    Section("Visibility") {
+                        Picker("Visibility", selection: $visibility) {
+                            Text("Account default").tag(ShareVisibility?.none)
+                            Text(ShareVisibility.private.label).tag(ShareVisibility?.some(.private))
+                            Text(ShareVisibility.protected.label)
+                                .tag(ShareVisibility?.some(.protected))
+                            Text(ShareVisibility.public.label).tag(ShareVisibility?.some(.public))
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
             }
             .navigationTitle("Share to memos")
@@ -100,7 +116,7 @@ struct ShareRootView: View {
     }
 
     private func read() async {
-        account = OutboxAccountStore.live()?.current()
+        route = ShareRoute.live()
         try? FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         let loaded = await SharedItemLoader.load(providers, into: staging)
         items = loaded.items
@@ -109,9 +125,14 @@ struct ShareRootView: View {
     }
 
     private func post() async {
+        guard let opened = route else {
+            problem = Self.signInFirst
+            return
+        }
+        let kind = opened.kind
         // No fallback container here, deliberately: the app is the only process that drains, so a
         // capture written anywhere but the app group is a capture nobody will ever send.
-        guard let root = OutboxRepository.appGroupRoot() else {
+        guard let root = ShareRoute.appGroupRoot(for: kind) else {
             problem = "This device cannot reach the memos queue. Open the app and try again."
             return
         }
@@ -120,19 +141,20 @@ struct ShareRootView: View {
         // Read AT THE MOMENT OF USE, never trusted from when the sheet opened: this sheet can sit
         // on screen for hours, and a sign-out or an account switch in the app underneath it must
         // not be posted through. The value read here is the one the job is stamped with, and the
-        // one the sheet was opened with is what it is checked against.
-        let licence = OutboxAccountStore.live()?.current()
+        // one the sheet was opened with is what it is checked against. The queue is the one the
+        // sheet was opened for: a pass that ended, or one that began, under the sheet reads as no
+        // licence for it, so a trip capture is never posted home nor a home capture to the trip.
         do {
             let repository = try OutboxRepository(root: root)
             let outcome = try await ShareIngest.commit(
                 items: items,
                 note: note,
-                visibility: visibility,
+                visibility: kind == .guest ? nil : visibility,
                 // Handed as a READ rather than as a value: the commit awaits the capture reads
                 // before it writes anything, and what stamps the job has to be the licence as it
                 // stands then.
-                licence: { OutboxAccountStore.live()?.currentLicence() },
-                expecting: account,
+                licence: { ShareRoute.liveLicence(for: kind) },
+                expecting: opened.licence.binding,
                 into: repository
             )
             switch outcome {
@@ -141,22 +163,29 @@ struct ShareRootView: View {
                 // upload sessions and hands the files to the capture's own background session;
                 // the identity in the app group names an account and never carries a token, so
                 // until the capture grant supplies one this starts nothing and the app sends it.
-                let opening = OutboxAccountStore.live()?.currentLicence()
-                _ = await ShareTransfer.live(
-                    jobID: job, credential: nil, root: root, repository: repository,
-                    stillCurrent: { _ in OutboxAccountStore.live()?.currentLicence() == opening }
-                )
+                // Member queue only: its session and licence are the member's, and a guest capture
+                // must never be sent under them — the guest outbox in the app sends it.
+                if kind == .member {
+                    let opening = OutboxAccountStore.live()?.currentLicence()
+                    _ = await ShareTransfer.live(
+                        jobID: job, credential: nil, root: root, repository: repository,
+                        stillCurrent: { _ in
+                            OutboxAccountStore.live()?.currentLicence() == opening
+                        }
+                    )
+                }
                 // MEMNG-538 spike (kill date 2026-11-03): returns at once unless the debug switch
-                // is on. The capture above is already queued either way.
-                await UploadSpikeShare.live(jobID: job, root: root)
+                // is on. The capture above is already queued either way. Member queue only: the
+                // spike measures the home lane, and the guest queue is not its subject.
+                if kind == .member {
+                    await UploadSpikeShare.live(jobID: job, root: root)
+                }
                 discardStaging()
                 finish()
-            case .notSignedIn:
-                account = nil
-                problem = Self.signInFirst
-            case .accountChanged:
-                account = licence
-                problem = "The account signed in to memos changed. Check this and post again."
+            case .notSignedIn, .accountChanged:
+                let now = ShareRoute.live()
+                route = now
+                problem = Self.refusal(openedFor: kind, now: now)
             case .nothingToPost:
                 problem = "There is nothing here to keep."
             }
@@ -172,6 +201,24 @@ struct ShareRootView: View {
     }
 
     static let signInFirst = "Sign in to memos in the app first, then share again."
+    static let addingToTrip = "Adding to the trip"
+    static let tripTakesFiles = "A trip takes photos and videos. Share one to add it."
+
+    /// What to say when the licence the sheet was opened for no longer stands — read from what
+    /// the files say now, so the sheet shows where a second Post would go.
+    private static func refusal(openedFor kind: CredentialKind, now: ShareRoute?) -> String {
+        guard let now else {
+            return kind == .guest
+                ? "The trip pass on this phone has ended. Nothing was added."
+                : signInFirst
+        }
+        if now.kind != kind {
+            return now.kind == .guest
+                ? "This phone now shares to a trip. Check this and post again."
+                : "The trip pass on this phone has ended. Check this and post again to memos."
+        }
+        return "The account signed in to memos changed. Check this and post again."
+    }
 
     private static func title(for item: SharedItem) -> String {
         switch item {

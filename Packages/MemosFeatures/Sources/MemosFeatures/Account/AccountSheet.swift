@@ -16,6 +16,8 @@ import SwiftUI
 /// outstanding when the sheet goes answers on the Timeline instead (`accountSheet`).
 struct AccountSheet: View {
     @Environment(SessionStore.self) private var session
+    // Optional: guest mode is composed by the app; without it the sheet offers no trip pass.
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
     @Environment(\.dismiss) private var dismiss
 
     let signOut: SignOutConversation
@@ -43,6 +45,25 @@ struct AccountSheet: View {
                     card { defaults }
                 } header: {
                     SectionHeading(title: "Defaults")
+                }
+                // A household member can be a guest on somebody else's trip too: the pass is kept
+                // apart from the account above (its own credential, its own queue), and this is
+                // where it is joined, looked at and left.
+                if let guest {
+                    Section {
+                        card {
+                            NavigationLink {
+                                TripPassView(guest: guest)
+                            } label: {
+                                Label(
+                                    TripPassPresentation.entryTitle(for: guest.state),
+                                    systemImage: "qrcode.viewfinder"
+                                )
+                            }
+                        }
+                    } header: {
+                        SectionHeading(title: "Trip")
+                    }
                 }
                 Section {
                     card { SignOutSection(conversation: signOut, session: session) }
@@ -199,6 +220,7 @@ extension View {
 
 private struct AccountSheetPresentation: ViewModifier {
     @Environment(SessionStore.self) private var session
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
     @Binding var isPresented: Bool
     let signOut: SignOutConversation
     let avatar: Image?
@@ -209,6 +231,7 @@ private struct AccountSheetPresentation: ViewModifier {
             .sheet(isPresented: $isPresented) {
                 AccountSheet(signOut: signOut, avatar: avatar)
                     .environment(session)
+                    .environment(guest)
             }
     }
 }

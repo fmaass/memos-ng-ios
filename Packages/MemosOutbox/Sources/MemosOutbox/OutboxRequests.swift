@@ -16,15 +16,32 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The upload create. A guest create also carries the original's SHA-256 (`sha256`), which is
+    /// what lets the door answer "already received" instead of opening a session for bytes the
+    /// pass already holds; the member body is exactly what it always was.
     public static func startUpload(
         baseURL: URL,
         token: String,
-        file: OutboxFile
+        file: OutboxFile,
+        kind: CredentialKind = .member,
+        sha256: String? = nil
     ) throws -> URLRequest {
-        var request = URLRequest(url: baseURL.appending(path: "api/uploads"))
+        var request = URLRequest(url: uploadsURL(baseURL: baseURL, kind: kind))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if kind == .guest {
+            request.httpBody = try GuestWire.encode(
+                GuestWire.UploadStart(
+                    filename: file.filename,
+                    mime: file.mime,
+                    size: file.byteSize,
+                    lastModified: file.lastModified.map(OutboxEncoding.epochMilliseconds),
+                    sha256: sha256
+                )
+            )
+            return request
+        }
         request.httpBody = try OutboxWire.encode(
             OutboxWire.UploadStart(
                 filename: file.filename,
@@ -42,11 +59,17 @@ public enum OutboxRequests {
         baseURL: URL,
         token: String,
         uploadUID: String,
-        offset: Int64
+        offset: Int64,
+        kind: CredentialKind = .member
     ) -> URLRequest {
-        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID))
+        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID, kind: kind))
         request.httpMethod = "PATCH"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        // The guest door declares its append body as `application/offset+octet-stream` (its own
+        // web client's type); the member server declares plain octets. Each gets its own document's.
+        request.setValue(
+            kind == .guest ? "application/offset+octet-stream" : "application/octet-stream",
+            forHTTPHeaderField: "Content-Type"
+        )
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue(String(offset), forHTTPHeaderField: "Upload-Offset")
         return request
@@ -78,8 +101,10 @@ public enum OutboxRequests {
 
     /// The offset HEAD: the server's own count of what it holds, which is the only number the
     /// outbox resumes from.
-    public static func offset(baseURL: URL, token: String, uploadUID: String) -> URLRequest {
-        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID))
+    public static func offset(
+        baseURL: URL, token: String, uploadUID: String, kind: CredentialKind = .member
+    ) -> URLRequest {
+        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID, kind: kind))
         request.httpMethod = "HEAD"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
@@ -174,7 +199,33 @@ public enum OutboxRequests {
     /// The header the offset HEAD answers with, read case-insensitively because header names are.
     public static let offsetHeader = "Upload-Offset"
 
-    static func uploadURL(baseURL: URL, uploadUID: String) -> URL {
-        baseURL.appending(path: "api/uploads").appending(path: uploadUID)
+    /// The guest door's guest-scoped completion: the received uploads become one batch, under the
+    /// caption when there is one. The door derives its idempotency from the device and the uid
+    /// list, so the same list sent again answers the batch the first one made.
+    public static func guestComplete(
+        baseURL: URL, token: String, uploadUIDs: [String], caption: String?
+    ) throws -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: "api/guest/memos"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try GuestWire.encode(
+            GuestWire.Complete(uploadUIDs: uploadUIDs, caption: caption)
+        )
+        return request
+    }
+
+    /// Where uploads live for this credential: the member server's `api/uploads`, or the guest
+    /// door's `api/guest/uploads`. Written once, so no request can pair one kind's token with the
+    /// other kind's route.
+    static func uploadsURL(baseURL: URL, kind: CredentialKind) -> URL {
+        switch kind {
+        case .member: baseURL.appending(path: "api/uploads")
+        case .guest: baseURL.appending(path: "api/guest/uploads")
+        }
+    }
+
+    static func uploadURL(baseURL: URL, uploadUID: String, kind: CredentialKind = .member) -> URL {
+        uploadsURL(baseURL: baseURL, kind: kind).appending(path: uploadUID)
     }
 }

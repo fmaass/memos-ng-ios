@@ -52,12 +52,37 @@ public enum OutboxPlanner {
         // Before the backoff: a file the server has said it will not take is refused while it is
         // still only staged, so it never costs a `POST /api/uploads` that can only end in a 413.
         if oversizedFile(in: job, limit: credentials.uploadLimit) != nil { return .hold(.tooLarge) }
+        // The guest door takes no empty file (its create requires a size of at least one byte),
+        // so that create could only be refused, and refused the same way every time it was sent.
+        // Held before it costs a request, like the file over the limit above.
+        if credentials.kind == .guest, emptyGuestFile(in: job) != nil {
+            return .hold(.serverRefused)
+        }
         if now < job.nextAttemptAt { return .wait(until: job.nextAttemptAt) }
 
-        if let pending = job.files.first(where: { $0.uploadUID == nil }) {
+        // A file the guest door already held is done without a session: it is never started
+        // again, and nothing of it is sent.
+        if let pending = job.files.first(where: {
+            $0.uploadUID == nil && $0.alreadyReceived != true
+        }) {
             return .startUpload(fileID: pending.id)
         }
         for file in job.files where !file.isComplete {
+            if credentials.kind == .guest {
+                // Every guest body, fresh or the tail of a resumed upload, is held to the door's
+                // PATCH ceiling whatever slice the manifest carries.
+                guard
+                    let body = GuestPatchPlan.body(
+                        atOffset: file.bytesConfirmed,
+                        byteSize: file.byteSize,
+                        limit: Int64(file.chunkSize)
+                    )
+                else { continue }
+                return .uploadChunk(
+                    fileID: file.id, offset: body.lowerBound,
+                    length: Int(body.upperBound - body.lowerBound)
+                )
+            }
             guard
                 let length = ChunkMath.chunkLength(
                     atOffset: file.bytesConfirmed,
@@ -82,6 +107,12 @@ public enum OutboxPlanner {
         job.files.first { $0.uploadUID == nil && isOverLimit($0, limit: limit) }
     }
 
+    /// The first file of a guest `job` the door would refuse for being empty: no session yet, not
+    /// already received, and no bytes.
+    public static func emptyGuestFile(in job: UploadJob) -> OutboxFile? {
+        job.files.first { $0.uploadUID == nil && $0.alreadyReceived != true && $0.byteSize < 1 }
+    }
+
     /// Whether `file` is larger than `limit`, whatever session it holds: the one size rule, which
     /// the planners apply to a staged file and the engine to every new session it asks for.
     static func isOverLimit(_ file: OutboxFile, limit: Int64?) -> Bool {
@@ -101,6 +132,11 @@ public enum OutboxPlanner {
     public static func holdMessage(
         for reason: HoldReason, of job: UploadJob, credentials: OutboxCredentials
     ) -> String? {
+        if reason == .serverRefused, credentials.kind == .guest,
+            let file = emptyGuestFile(in: job)
+        {
+            return "\(file.filename) is empty, and the trip does not accept an empty file."
+        }
         guard reason == .tooLarge, let limit = credentials.uploadLimit,
             let file = oversizedFile(in: job, limit: limit)
         else { return nil }
@@ -153,6 +189,22 @@ extension UploadJob {
             file.uploadUID = session.uploadUID
             file.chunkSize = session.chunkSize > 0 ? session.chunkSize : file.chunkSize
             file.bytesConfirmed = Swift.min(Swift.max(session.bytesReceived, 0), file.byteSize)
+        }
+        .with {
+            $0.state = .uploading
+            $0.waitReason = nil
+        }
+    }
+
+    /// The guest door already holds this file's exact bytes. It needs no session and is named in
+    /// no completion; the job carries on with its other files.
+    public func receivedAlready(fileID: UUID) -> UploadJob {
+        updating(fileID) { file in
+            file.alreadyReceived = true
+            file.uploadUID = nil
+            file.bytesConfirmed = file.byteSize
+            file.attemptCount = nil
+            file.nextAttemptAt = nil
         }
         .with {
             $0.state = .uploading

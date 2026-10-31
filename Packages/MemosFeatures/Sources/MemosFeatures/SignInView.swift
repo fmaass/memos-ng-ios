@@ -13,6 +13,10 @@ import SwiftUI
 /// tinkerer's path, and because a fallback that exists is one that can be tested.
 public struct SignInView: View {
     @Environment(SessionStore.self) private var session
+    // Optional: the app composes guest mode; a preview or a test host has none, and then the
+    // screen simply offers no trip pass.
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
+    @State private var joiningTrip = false
     @State private var serverAddress = "memos.discomarder.live"
     @State private var token = ""
     @State private var showAdvanced = false
@@ -55,6 +59,9 @@ public struct SignInView: View {
                         }
                     }
                 }
+                if let guest {
+                    tripPassEntry(guest)
+                }
                 Button("Advanced") { showAdvanced = true }
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -72,6 +79,26 @@ public struct SignInView: View {
             ) {
                 await session.signIn(serverAddress: serverAddress, token: token)
             }
+        }
+        .sheet(isPresented: $joiningTrip) {
+            if let guest {
+                TripPassSheet(guest: guest)
+            }
+        }
+    }
+
+    /// A guest has no household account: the pass is their way in, so it sits on this screen. A
+    /// pass link opened from outside that the door refused says so here as well.
+    @ViewBuilder
+    private func tripPassEntry(_ guest: GuestSessionStore) -> some View {
+        Button(
+            TripPassPresentation.entryTitle(for: guest.state), systemImage: "qrcode.viewfinder"
+        ) {
+            joiningTrip = true
+        }
+        .font(.subheadline.weight(.semibold))
+        if !joiningTrip, let notice = TripPassPresentation.notice(for: guest.state) {
+            NoticeCard(text: notice, tone: .error)
         }
     }
 

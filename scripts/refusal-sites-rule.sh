@@ -338,8 +338,14 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # copies from Photos and sends nothing).
 # 51: the share sessions' witness in MemosOutboxTests (MEMNG-945) holds the captures a share
 # session's registry, wake and start lane are judged against; it presents no credential of the
-# app's, so it takes the default predicate.
-pin "'OutboxRepository(' constructions" 51 \
+# app's, so it takes the default predicate. 52: the guest engine witness in MemosOutboxTests
+# (MEMNG-1011) drives the real outbox on the guest door's chunk lane, fed `StaticCredentials`'
+# predicate. 53: `Outbox.guestLive` composes the trip pass's own queue (MEMNG-1011), fed the GIVEN
+# guest provider's predicate. 54: the guest-composed outbox witness in MemosOutboxTests
+# (MEMNG-1011) drives it on the door's routes, fed `StaticCredentials`' predicate. 55: the
+# guest-capture-needs-a-file witness in MemosOutboxTests (MEMNG-1011) enqueues straight into a
+# repository with no credential predicate — the refusal it proves is decided before any send.
+pin "'OutboxRepository(' constructions" 55 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

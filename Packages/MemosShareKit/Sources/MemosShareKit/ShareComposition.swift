@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 
 /// What a share becomes as words, and when it may be posted at all.
 ///
@@ -37,7 +38,11 @@ public enum ShareComposition {
     /// A share may be posted when it has files or words, and never while one of its items could
     /// not be read: posting now would silently leave a photo behind, which is the failure someone
     /// only discovers weeks later.
+    ///
+    /// A trip takes photos and videos and nothing else: a share for a guest's pass with no file in
+    /// it has nothing the door can receive, and its words alone would be dropped on the way.
     public static func canPost(
+        for kind: CredentialKind,
         note: String,
         items: [SharedItem],
         failed: Int,
@@ -45,6 +50,7 @@ public enum ShareComposition {
     ) -> Bool {
         guard failed == 0, !isBusy else { return false }
         if items.contains(where: \.isFile) { return true }
+        guard kind != .guest else { return false }
         return !content(note: note, items: items).isEmpty
     }
 

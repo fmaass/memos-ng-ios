@@ -27,7 +27,7 @@ public final class OutboxBackgroundCompletion {
 
     /// The identifiers of the sessions this outbox owns. A wake for any other is not ours.
     public static let sessionIdentifiers: Set<String> = [
-        OutboxSession.identifier, OutboxUploadSession.identifier,
+        OutboxSession.identifier, OutboxUploadSession.identifier, OutboxSession.guestIdentifier,
     ]
 
     private struct Held {
@@ -164,11 +164,17 @@ public actor BackgroundChunkScheduler: OutboxChunkScheduling {
     private let session: URLSession
     private let delegate: OutboxSessionDelegate
 
-    public init(appGroup: String = OutboxDefaults.appGroup) {
-        let delegate = OutboxSessionDelegate()
+    /// - Parameter identifier: which background session this is. The member outbox's by default;
+    ///   the guest outbox passes its own, so the two queues never share a session.
+    public init(
+        appGroup: String = OutboxDefaults.appGroup,
+        identifier: String = OutboxSession.identifier
+    ) {
+        let delegate = OutboxSessionDelegate(identifier: identifier)
         self.delegate = delegate
         self.session = URLSession(
-            configuration: OutboxSession.backgroundConfiguration(appGroup: appGroup),
+            configuration: OutboxSession.backgroundConfiguration(
+                appGroup: appGroup, identifier: identifier),
             delegate: delegate,
             delegateQueue: nil
         )
@@ -284,9 +290,17 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     private let pending = PendingHandlerWork()
     /// Where "finished" is reported; nil is the process-wide box the app delegate stores into.
     private let completion: OutboxBackgroundCompletion?
+    /// The session this delegate reports for. The handler the system stored is keyed by it, so a
+    /// guest session reporting under the member's name would leave its own handler to the fallback
+    /// and release the member's early.
+    let identifier: String
 
-    public init(completion: OutboxBackgroundCompletion? = nil) {
+    public init(
+        completion: OutboxBackgroundCompletion? = nil,
+        identifier: String = OutboxSession.identifier
+    ) {
         self.completion = completion
+        self.identifier = identifier
         super.init()
     }
 
@@ -422,9 +436,10 @@ public final class OutboxSessionDelegate: NSObject, URLSessionDataDelegate, @unc
     /// server's byte count banked nowhere.
     public func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         let completion = completion
+        let identifier = identifier
         pending.onDrained {
             Task { @MainActor in
-                (completion ?? .shared).sessionFinished(for: OutboxSession.identifier)
+                (completion ?? .shared).sessionFinished(for: identifier)
             }
         }
     }

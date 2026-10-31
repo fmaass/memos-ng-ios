@@ -21,20 +21,25 @@ public struct OutboxCredentials: Sendable, Equatable {
     /// then nothing is refused for its size: the queue sends as it always has and the server's 413
     /// stays the backstop. Not part of what makes credentials current; `epoch` alone is that.
     public var uploadLimit: Int64?
+    /// Which credential this is. It picks the wire dialect — paths, bodies, which refusals end the
+    /// credential — and it is part of the binding a capture is matched against, so a guest
+    /// credential can never be presented for a member capture or the other way round.
+    public var kind: CredentialKind
 
     public init(
         serverBaseURL: URL, ownerSubject: String, token: String, epoch: Int = 0,
-        uploadLimit: Int64? = nil
+        uploadLimit: Int64? = nil, kind: CredentialKind = .member
     ) {
         self.serverBaseURL = serverBaseURL
         self.ownerSubject = ownerSubject
         self.token = token
         self.epoch = epoch
         self.uploadLimit = uploadLimit
+        self.kind = kind
     }
 
     public var binding: AccountBinding {
-        AccountBinding(serverBaseURL: serverBaseURL, ownerSubject: ownerSubject)
+        AccountBinding(serverBaseURL: serverBaseURL, ownerSubject: ownerSubject, kind: kind)
     }
 }
 

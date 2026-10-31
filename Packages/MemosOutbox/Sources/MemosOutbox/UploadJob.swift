@@ -9,14 +9,42 @@ import Foundation
 public struct AccountBinding: Codable, Sendable, Equatable {
     public var serverBaseURL: URL
     public var ownerSubject: String
+    /// Whose credential the capture travels under. Optional and last, so every manifest written
+    /// before guests existed decodes unchanged and reads as `.member`; never written for a member,
+    /// so a member capture's manifest stays byte-identical. An older build that reads a guest
+    /// capture ignores this key, but the guest door's server never equals the member's, so that
+    /// build holds the capture as another account's rather than posting it home.
+    public var kind: CredentialKind?
 
-    public init(serverBaseURL: URL, ownerSubject: String) {
+    public init(serverBaseURL: URL, ownerSubject: String, kind: CredentialKind? = nil) {
         self.serverBaseURL = serverBaseURL
         self.ownerSubject = ownerSubject
+        self.kind = kind == .member ? nil : kind
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case serverBaseURL
+        case ownerSubject
+        case kind
+    }
+
+    /// A spelled-out `member` decodes as the absent key every member manifest has, so two bindings
+    /// for the same member account are equal however the key was written.
+    public init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            serverBaseURL: try fields.decode(URL.self, forKey: .serverBaseURL),
+            ownerSubject: try fields.decode(String.self, forKey: .ownerSubject),
+            kind: try fields.decodeIfPresent(CredentialKind.self, forKey: .kind)
+        )
+    }
+
+    /// The kind, with an absent one read as what every older manifest was.
+    public var credentialKind: CredentialKind { kind ?? .member }
 
     public func matches(_ credentials: OutboxCredentials) -> Bool {
         serverBaseURL == credentials.serverBaseURL && ownerSubject == credentials.ownerSubject
+            && credentialKind == credentials.kind
     }
 }
 
@@ -198,6 +226,10 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// ONE offset HEAD, and a second disagreement in a row starts a fresh session instead of
     /// asking again. Optional and last, so an older manifest decodes.
     public var conflictResync: Bool?
+    /// Set when the guest door answered the create with "already received": the pass holds these
+    /// exact bytes, so nothing is PATCHed and the file is named in no completion. Never set on the
+    /// member lane. Optional and last, so an older manifest decodes.
+    public var alreadyReceived: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -215,7 +247,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         nextAttemptAt: Date? = nil,
         attemptCount: Int? = nil,
         freshSessions: Int? = nil,
-        conflictResync: Bool? = nil
+        conflictResync: Bool? = nil,
+        alreadyReceived: Bool? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -233,9 +266,12 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.attemptCount = attemptCount
         self.freshSessions = freshSessions
         self.conflictResync = conflictResync
+        self.alreadyReceived = alreadyReceived
     }
 
-    public var isComplete: Bool { uploadUID != nil && bytesConfirmed >= byteSize }
+    public var isComplete: Bool {
+        alreadyReceived == true || (uploadUID != nil && bytesConfirmed >= byteSize)
+    }
 }
 
 /// A capture waiting for the server: the note, the originals, and everything needed to finish the

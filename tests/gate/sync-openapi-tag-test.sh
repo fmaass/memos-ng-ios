@@ -9,7 +9,9 @@
 # sees stop working, so each one is planted here — an untagged commit, a tag of another major, two
 # release tags on one commit — and a same-major tag is accepted as the positive control, with what
 # it recorded read back. Every refusal must happen before anything is fetched, so each refused run
-# also has to leave the destination empty.
+# also has to leave the destination empty. A same-major release that predates the guest document
+# (openapi-guest.json) is refused the same way, and the accepted run must have vendored that
+# document byte for byte and named it in OPENAPI_SOURCE's files= list.
 #
 # Nothing here writes into the repository: both repositories land in a temporary tree, removed on
 # exit. The real script runs by its absolute path with the working directory inside the throwaway
@@ -54,8 +56,11 @@ fail() { # $1 message, [$2 exit code to report]
 src="$tmp/memos-ng"
 mkdir -p "$src/fixtures/auto-memo-date" || { echo "FAIL: cannot build $src"; exit 1; }
 g init -q "$src" || { echo "FAIL: cannot init $src"; exit 1; }
-commit() { # $1 a marker that makes this commit's openapi.json its own; prints the full SHA
+commit() { # $1 a marker that makes this commit's documents its own; prints the full SHA
   printf '{"openapi":"3.1.0","marker":"%s"}\n' "$1" > "$src/openapi.json"
+  # The guest document is vendored verbatim, so its bytes are deliberately not canonical JSON (no
+  # trailing newline, odd spacing): a script that re-serialised it would fail the cmp below.
+  printf '{ "openapi" : "3.1.0",  "guest-marker":"%s"}' "$1" > "$src/openapi-guest.json"
   printf '{"cases":[]}\n' > "$src/fixtures/markdown-parity.json"
   printf '# schema\n' > "$src/fixtures/markdown-parity.schema.md"
   printf '{"captures":[]}\n' > "$src/fixtures/auto-memo-date.json"
@@ -74,6 +79,11 @@ g -C "$src" tag v2.0.1 "$two_tags" || exit 1
 g -C "$src" tag -a -m "second" v2.0.2 "$two_tags" || exit 1
 same_major="$(commit same-major)" || exit 1
 g -C "$src" tag -a -m "Release 2.1.0" v2.1.0 "$same_major" || exit 1
+# A release of the right major from before the guest document existed (memos-ng v2.9.0 and older).
+commit pre-guest >/dev/null || exit 1
+g -C "$src" rm -q openapi-guest.json >/dev/null && g -C "$src" commit -q -m "pre-guest" >/dev/null || exit 1
+pre_guest="$(g -C "$src" rev-parse HEAD)" || exit 1
+g -C "$src" tag -a -m "Release 2.0.9" v2.0.9 "$pre_guest" || exit 1
 
 # --- a throwaway iOS tree -------------------------------------------------------------------------
 # A git repository (the script finds its root with rev-parse) holding a project.yml that declares
@@ -99,6 +109,7 @@ YML
 }
 
 api_rel="Packages/MemosAPI/Sources/MemosAPI/openapi.json"
+guest_rel="Packages/MemosAPI/Sources/MemosAPI/Fixtures/openapi-guest.json"
 provenance_rel="Packages/MemosAPI/OPENAPI_SOURCE"
 release_rel="Packages/MemosAPI/Sources/MemosAPI/VendoredRelease.swift"
 
@@ -126,7 +137,7 @@ refused() { # $1 label, $2 tree, $3 sha, $4.. substrings the refusal must name
   done
   # A refusal after a fetch would have left the tree half re-vendored.
   local leftover
-  for leftover in "$api_rel" "$provenance_rel" "$release_rel"; do
+  for leftover in "$api_rel" "$guest_rel" "$provenance_rel" "$release_rel"; do
     if [ -e "$tree/$leftover" ]; then
       fail "$label: refused, but $leftover was written first"
       return
@@ -140,6 +151,7 @@ refused "an untagged commit (its only tag, release-2, is not v*)" "$t" "$untagge
 refused "a tag of another major (v1.9.0 for app 2.0.0)" "$t" "$other_major" "v1.9.0" "2.0.0" "major 1" "major 2"
 refused "a tag whose major only starts like the app's (v20.0.0 for app 2.0.0)" "$t" "$look_alike" "v20.0.0" "major 20" "major 2"
 refused "two release tags on one commit" "$t" "$two_tags" "v2.0.1" "v2.0.2"
+refused "a release without openapi-guest.json (v2.0.9)" "$t" "$pre_guest" "openapi-guest.json" "v2.0.9"
 
 # The same tag against a project.yml that cannot say which major the app is: two distinct values.
 t_split="$(new_tree split 2.0.0)" || exit 1
@@ -177,11 +189,15 @@ else
     || { miss "accepted: VendoredRelease.swift does not hold apiMajor = 2"; ok=0; }
   grep -qF '"marker":"same-major"' "$t_ok/$api_rel" 2>/dev/null \
     || { miss "accepted: openapi.json is not the tagged commit's"; ok=0; }
+  cmp -s <(g -C "$src" show "$same_major:openapi-guest.json") "$t_ok/$guest_rel" \
+    || { miss "accepted: $guest_rel is not byte-identical to the tagged commit's openapi-guest.json"; ok=0; }
+  grep '^files=' "$prov" 2>/dev/null | tr ' =' '\n\n' | grep -qx 'Sources/MemosAPI/Fixtures/openapi-guest.json' \
+    || { miss "accepted: OPENAPI_SOURCE files= does not name the guest document"; ok=0; }
   if [ "$ok" -ne 1 ]; then
     fail "a same-major tag (v2.1.0 for app 2.0.0): exit 0, but the record is wrong (above)"
   else
     pass_seen=1
-    echo "ok   a same-major tag (v2.1.0 for app 2.0.0) -> exit 0, tag= and VendoredRelease.swift recorded"
+    echo "ok   a same-major tag (v2.1.0 for app 2.0.0) -> exit 0, tag=, VendoredRelease.swift and the verbatim guest document recorded"
   fi
 fi
 

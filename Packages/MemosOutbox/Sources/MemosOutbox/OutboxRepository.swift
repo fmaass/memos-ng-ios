@@ -8,6 +8,9 @@ public enum OutboxStorageError: Error, Equatable {
     /// The root could not be leased, so nothing was written. Not a disk failure and not a lost
     /// capture: the queue is held by another process for an instant, and the caller may try again.
     case queueBusy(OutboxLockFailure)
+    /// A trip pass's capture with no file in it. The guest door takes photos and videos only, so
+    /// such a capture would complete as sent with nothing received: its words would be lost.
+    case guestCaptureWithoutFiles
 }
 
 extension OutboxStorageError: LocalizedError {
@@ -18,6 +21,7 @@ extension OutboxStorageError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .queueBusy: "The memos queue on this device is busy. Try posting again in a moment."
+        case .guestCaptureWithoutFiles: "A trip takes photos and videos. Share one to add it."
         default: nil
         }
     }
@@ -273,6 +277,13 @@ public actor OutboxRepository {
     public static func appGroupRoot(appGroup: String = OutboxDefaults.appGroup) -> URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
             .appending(path: "outbox")
+    }
+
+    /// The guest outbox's directory in the same container: a sibling, never inside the member
+    /// one, so neither queue's sweep can reach the other's files.
+    public static func guestAppGroupRoot(appGroup: String = OutboxDefaults.appGroup) -> URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+            .appending(path: "guest-outbox")
     }
 
     // Derived from `root`, which never changes, so they are reachable from the initialiser and
@@ -720,6 +731,12 @@ public actor OutboxRepository {
         staging: [StagingFile] = [],
         under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
+        // The guest door takes files only, and a guest job with none would be completed as sent
+        // with nothing received. Refused here, the one place every capture is written, before
+        // anything is leased or copied.
+        if binding.credentialKind == .guest, sources.isEmpty {
+            throw OutboxStorageError.guestCaptureWithoutFiles
+        }
         let lease: OutboxLease
         switch lock.acquire(.shared) {
         case .leased(let held):

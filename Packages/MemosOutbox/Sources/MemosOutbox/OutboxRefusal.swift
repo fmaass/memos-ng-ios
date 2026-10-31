@@ -27,16 +27,27 @@ public struct OutboxRefusal: Sendable, Equatable {
     /// disposition reads it: it replaces the curve, exactly as it does on the whole lane.
     public let retryAfter: TimeInterval?
 
-    public init(statusCode: Int, issuedUnder: Int?, what: String, retryAfter: TimeInterval? = nil) {
+    /// Whose credential earned it. The guest door also refuses an ended pass by its own status,
+    /// and that ends the guest credential exactly as a rejected token does — on the guest lane
+    /// only: the member server's statuses keep the meaning they always had.
+    public let kind: CredentialKind
+
+    public init(
+        statusCode: Int, issuedUnder: Int?, what: String, retryAfter: TimeInterval? = nil,
+        kind: CredentialKind = .member
+    ) {
         self.statusCode = statusCode
         self.issuedUnder = issuedUnder
         self.what = what
         self.retryAfter = retryAfter
+        self.kind = kind
     }
 
     /// Whether the refusal is about the credential rather than the request — the one status an
     /// offset HEAD holds on; anything else it meets is spaced out like an unanswered one.
-    public var concernsCredential: Bool { statusCode == 401 }
+    public var concernsCredential: Bool {
+        statusCode == 401 || (kind == .guest && statusCode == 410)
+    }
 
     /// Whether this refusal is decided by the body this edit is frozen on, and so says the same
     /// thing about every transmission of that key. A 401 or 403 is answered before the key is
@@ -62,10 +73,13 @@ public struct OutboxRefusal: Sendable, Equatable {
     ///   picks between them under the isolation that performs it — see `OutboxPersisting`.
     public func disposition(assumingCurrent: Bool) -> Disposition {
         switch statusCode {
-        case 401 where !assumingCurrent:
+        case _ where concernsCredential && !assumingCurrent:
             return .backOff(supersededMessage, retryAfter: nil)
-        case 401:
-            return .hold(.signInRequired, "Sign in again to send this memo.")
+        case _ where concernsCredential:
+            return .hold(
+                .signInRequired,
+                kind == .guest ? "This trip pass has ended." : "Sign in again to send this memo."
+            )
         case 413:
             return .hold(.tooLarge, "The server will not accept a file this large.")
         case 408, 429, 500...599:

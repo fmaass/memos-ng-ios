@@ -9,6 +9,12 @@
 # commit is recorded in OPENAPI_SOURCE. Vendoring them independently is how a client drifts from
 # its server without anyone noticing.
 #
+# The guest door's `openapi-guest.json` is vendored from the same commit, VERBATIM, but it is not
+# the generator's input: it lands in Fixtures/, which the MemosAPI target excludes, so no guest
+# client is generated from it. The guest lane is the hand-rolled `GuestWire` mirror family in
+# MemosOutbox, licensed by that package's dependency rule (OutboxWire.swift's header), and this
+# document is what its contract test in MemosOutboxTests pins those mirrors against.
+#
 # The auto-memo-date binaries are vendored by listing the directory AT THE COMMIT rather than from
 # a list written here: a fixture added upstream that this script did not know about would
 # otherwise be silently absent, and the sha256 test would never miss it — it only checks the files
@@ -86,12 +92,22 @@ app_major=$((10#${BASH_REMATCH[1]})) || die "cannot read the major of '$marketin
 api_dest="$repo_root/Packages/MemosAPI/Sources/MemosAPI/openapi.json"
 schema_doc_dest="$repo_root/docs/markdown-parity.schema.md"
 fixture_dest="$repo_root/Packages/MemosAPI/Sources/MemosAPI/Fixtures/markdown-parity.json"
+guest_dest="$repo_root/Packages/MemosAPI/Sources/MemosAPI/Fixtures/openapi-guest.json"
 capture_dest="$repo_root/Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date.json"
 capture_dir="$repo_root/Packages/MemosAPI/Sources/MemosAPI/Fixtures/auto-memo-date"
 provenance="$repo_root/Packages/MemosAPI/OPENAPI_SOURCE"
 release_dest="$repo_root/Packages/MemosAPI/Sources/MemosAPI/VendoredRelease.swift"
 mkdir -p "$(dirname "$api_dest")" "$(dirname "$fixture_dest")" "$(dirname "$schema_doc_dest")" \
   "$capture_dir" || die "cannot create the destination directories"
+
+# Every fixed path is looked up at the commit before anything is written, so a release that predates
+# one of them (openapi-guest.json first shipped in v2.10.0) is refused with the tree untouched rather
+# than left half re-vendored by a fetch that fails midway.
+for path in openapi.json openapi-guest.json fixtures/markdown-parity.json \
+  fixtures/markdown-parity.schema.md fixtures/auto-memo-date.json; do
+  git -C "$src" cat-file -e "$sha:$path" 2>/dev/null \
+    || die "$path is not in $sha ($tag) — that release cannot be vendored whole"
+done
 
 fetch() {
   local path="$1" dest="$2"
@@ -103,6 +119,7 @@ fetch() {
 
 echo "syncing from $src at $sha"
 fetch openapi.json "$api_dest"
+fetch openapi-guest.json "$guest_dest"
 fetch fixtures/markdown-parity.json "$fixture_dest"
 fetch fixtures/markdown-parity.schema.md "$schema_doc_dest"
 fetch fixtures/auto-memo-date.json "$capture_dest"
@@ -131,7 +148,7 @@ EOF
   echo "tag=$tag"
   echo "subject=$(git -C "$src" log -1 --pretty=%s "$sha")"
   echo "committed=$(git -C "$src" log -1 --pretty=%cI "$sha")"
-  echo "files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md Sources/MemosAPI/Fixtures/auto-memo-date.json$vendored_binaries"
+  echo "files=Sources/MemosAPI/openapi.json Sources/MemosAPI/Fixtures/openapi-guest.json Sources/MemosAPI/Fixtures/markdown-parity.json docs/markdown-parity.schema.md Sources/MemosAPI/Fixtures/auto-memo-date.json$vendored_binaries"
 } > "$provenance" || die "cannot write $provenance" 1
 
 echo "recorded $provenance:"

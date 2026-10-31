@@ -141,8 +141,14 @@ public enum OutboxSession {
     /// and changing it would strand every task in flight.
     public static let identifier = "live.discomarder.memosng.outbox"
 
+    /// The guest outbox's own session. A trip pass is a different credential with its own queue,
+    /// so its chunks go out on a session of their own: sharing the member one would hand a guest
+    /// chunk's answer to the member engine, which knows nothing of that job.
+    public static let guestIdentifier = "live.discomarder.memosng.guest-outbox"
+
     public static func backgroundConfiguration(
-        appGroup: String = OutboxDefaults.appGroup
+        appGroup: String = OutboxDefaults.appGroup,
+        identifier: String = OutboxSession.identifier
     ) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
         // The container the app group shares, so a chunk file and the session that uploads it are

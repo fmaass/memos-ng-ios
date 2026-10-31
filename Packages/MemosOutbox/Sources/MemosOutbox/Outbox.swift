@@ -282,6 +282,63 @@ public final class Outbox {
         )
     }
 
+    /// The guest outbox: a trip pass's captures, in a queue of their own.
+    ///
+    /// Its own directory, its own background session and its own provider, so a member engine
+    /// never sees a guest job and the two credentials' epochs never meet. The whole lane is left
+    /// out: the guest door has no whole-upload route, so every capture goes in chunks, each held
+    /// to the door's ceiling by the planner. The completion is the door's batch, never a memo.
+    public static func guestLive(
+        appGroup: String = OutboxDefaults.appGroup,
+        credentials: any OutboxCredentialsProviding
+    ) throws -> Outbox {
+        let root =
+            OutboxRepository.guestAppGroupRoot(appGroup: appGroup)
+            ?? URL.applicationSupportDirectory.appending(path: "guest-outbox")
+        let repository = try OutboxRepository(
+            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) }
+        )
+        // Created HERE, synchronously, for the reason `live` creates its own: a finished guest
+        // chunk is delivered only to a session in the process that already carries its identifier.
+        let scheduler = BackgroundChunkScheduler(
+            appGroup: appGroup, identifier: OutboxSession.guestIdentifier
+        )
+        return guestComposed(
+            repository: repository,
+            credentials: credentials,
+            http: URLSessionHTTPPerformer(),
+            chunks: scheduler,
+            attachChunks: { handler in await scheduler.attach(handler) },
+            network: NetworkPathMonitor(),
+            preferences: UploadPreferences.live(appGroup: appGroup)
+        )
+    }
+
+    /// What `guestLive` composes, over whichever sessions it is handed. No whole lane, and the
+    /// door's completion: the guest routes are the only ones this outbox can reach.
+    public static func guestComposed(
+        repository: OutboxRepository,
+        credentials: any OutboxCredentialsProviding,
+        http: any OutboxHTTPPerforming,
+        chunks: any OutboxChunkScheduling,
+        attachChunks: @escaping @Sendable (any OutboxChunkHandling) async -> Void,
+        network: any NetworkPathProviding,
+        preferences: UploadPreferences
+    ) -> Outbox {
+        Outbox(
+            repository: repository,
+            credentials: credentials,
+            http: http,
+            scheduler: chunks,
+            completion: GuestCompletionEndpoint(http: http),
+            network: network,
+            preferences: preferences,
+            attachScheduler: attachChunks,
+            schedulingGate: SchedulingGate(isOpen: false),
+            uploads: nil
+        )
+    }
+
     /// Attaches to every share session the extension registered, reconciles them, and retires the
     /// ones nothing needs — so a capture they carried is the drain's again. Asked on every wake
     /// and every return to the front: the system's wake for a finished share session is not

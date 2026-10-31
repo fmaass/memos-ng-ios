@@ -146,6 +146,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private var resolvedOrder: [UUID] = []
     static let resolvedMemoLimit = 64
 
+    /// Awaited between a guest create's digest and the re-read that decides whether it still goes.
+    /// Nil in the app; a test holds the create there to change the row underneath it.
+    private var digestTaken: (@Sendable () async -> Void)?
+
+    func holdAfterDigest(_ hook: @escaping @Sendable () async -> Void) {
+        digestTaken = hook
+    }
+
     private func noteResolved(_ jobID: UUID, as uid: String) {
         if resolvedMemos.updateValue(uid, forKey: jobID) == nil { resolvedOrder.append(jobID) }
         while resolvedOrder.count > Self.resolvedMemoLimit {
@@ -685,10 +693,23 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         credentials: OutboxCredentials
     ) async -> UploadJob? {
         guard let file = job.file(fileID) else { return nil }
+        // Only the guest door is told the digest: it is how that door recognises bytes the pass
+        // already holds. The member create stays exactly what it was.
+        var sha256: String?
+        if credentials.kind == .guest {
+            // Hashed OFF this actor: a long video read here would stall every other answer the
+            // engine is owed. The await is a window, so the row is read again before anything is
+            // sent — a capture taken back, held or finished meanwhile is not this create's to
+            // start, and a create sent for it would open an upload nothing will ever finish.
+            sha256 = await Self.digest(of: repository.mediaURL(job: job, file: file))
+            await digestTaken?()
+            guard await repository.job(job.id) == job else { return nil }
+        }
         let request: URLRequest
         do {
             request = try OutboxRequests.startUpload(
-                baseURL: credentials.serverBaseURL, token: credentials.token, file: file
+                baseURL: credentials.serverBaseURL, token: credentials.token, file: file,
+                kind: credentials.kind, sha256: sha256
             )
         } catch {
             // Fenced like every other write here, and the one site no test can drive: the only
@@ -711,13 +732,23 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             )
             return nil
         }
-        guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
+        let start: GuestStart?
+        if response.isSuccess {
+            start =
+                credentials.kind == .guest
+                ? GuestWire.decode(GuestWire.UploadAnswer.self, from: response.body)?.start
+                : OutboxWire.decodeSession(response.body).map(GuestStart.session)
+        } else {
+            start = nil
+        }
+        guard let start else {
             // No verdict here. `save` below hops into `OutboxRepository`, a different actor, and a
             // renewal landing in that hop is exactly what this fence is about — so both candidate
             // outcomes travel and the CHOICE is made where the bytes are written.
             let refused = OutboxRefusal(
                 statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload",
-                retryAfter: WholeOutcome.seconds(inRetryAfter: response.header("Retry-After"))
+                retryAfter: WholeOutcome.seconds(inRetryAfter: response.header("Retry-After")),
+                kind: credentials.kind
             )
             await save(
                 job.applying(refused.disposition(assumingCurrent: true), at: clock()),
@@ -727,7 +758,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             )
             return nil
         }
-        let next = job.startingUpload(fileID: fileID, session: session)
+        let next: UploadJob
+        switch start {
+        case .alreadyReceived:
+            next = job.receivedAlready(fileID: fileID)
+        case .session(let session):
+            next = job.startingUpload(fileID: fileID, session: session)
+        }
         // The server has handed out a session. Carrying on with it while the manifest still knows
         // nothing about it is how a chunk gets sent against a uid a relaunch cannot resume.
         //
@@ -765,7 +802,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             baseURL: credentials.serverBaseURL,
             token: credentials.token,
             uploadUID: uploadUID,
-            offset: offset
+            offset: offset,
+            kind: credentials.kind
         )
         let identity = OutboxTaskIdentity(
             jobID: job.id, fileID: fileID, offset: offset, attempt: file.uploadAttempt
@@ -811,7 +849,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             return .unanswered
         }
         let request = OutboxRequests.offset(
-            baseURL: credentials.serverBaseURL, token: credentials.token, uploadUID: uploadUID
+            baseURL: credentials.serverBaseURL, token: credentials.token, uploadUID: uploadUID,
+            kind: credentials.kind
         )
         let sending = authority(under: credentials, for: .work)
         let response: OutboxHTTPResponse
@@ -831,6 +870,18 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             let raw = response.header(OutboxRequests.offsetHeader),
             let offset = Int64(raw)
         else { return .unanswered }
+        if credentials.kind == .guest {
+            // The door claiming more bytes than this file has is not a resume point: that upload is
+            // not this file, and clamping its count would mark the file sent. It holds instead.
+            do {
+                _ = try GuestPatchPlan.resumeOffset(reported: offset, byteSize: file.byteSize)
+            } catch {
+                let message = "The trip reported more of this file than it has."
+                return .resynced(
+                    Self.holding(job, for: .serverRefused, error: message), confirmed: nil
+                )
+            }
+        }
         let advanced = job.advancing(fileID: fileID, bytesConfirmed: offset)
         return .resynced(advanced, confirmed: advanced.file(fileID)?.bytesConfirmed)
     }
@@ -840,11 +891,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// Asked exactly here, in the pass that writes the create's outcome down: the answer and the
     /// bytes it describes are both in hand, and the job has not yet been saved — so no later
     /// response can rename a picture that this one already named.
-    private func named(_ job: UploadJob, as answer: [ResolvedAttachment]) -> UploadJob {
+    ///
+    /// The digests are read off this actor; the caller's write is fenced on the row it read, so a
+    /// capture that moved while they were read is not written back by this answer.
+    private func named(_ job: UploadJob, as answer: [ResolvedAttachment]) async -> UploadJob {
         let originals = job.files.filter { $0.stagedForEdit != true }
         var digests: [UUID: String] = [:]
         for file in originals {
-            if let digest = Self.digest(of: repository.mediaURL(job: job, file: file)) {
+            if let digest = await Self.digest(of: repository.mediaURL(job: job, file: file)) {
                 digests[file.id] = digest
             }
         }
@@ -861,7 +915,11 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// memory whole. A copy this device cannot open, or cannot finish reading, has NO digest —
     /// a hash of the bytes that did arrive is a different file's identity — and identity then
     /// falls back to the order the answer came in, which is the honest state of that knowledge.
-    private static func digest(of url: URL) -> String? {
+    ///
+    /// `@concurrent`: it runs on the global executor, never on the engine's, so hashing a 300 MB
+    /// video leaves the actor free to take the answers that arrive meanwhile.
+    @concurrent
+    static func digest(of url: URL) async -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = SHA256()
@@ -900,7 +958,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // a person has since taken back is no longer this answer's to destroy.
             if creating.pendingEdit != nil {
                 return await save(
-                    named(creating, as: attachments).awaitingPatch(
+                    await named(creating, as: attachments).awaitingPatch(
                         uid: uid,
                         editKey: creating.editKey ?? creating.idempotencyKey.uuidString
                     ),
@@ -1210,7 +1268,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // away. The snapshot at the top of this method is still what `resync` sends under; it
             // is simply no longer what any decision is read from.
             let refusal = OutboxRefusal(
-                statusCode: code, issuedUnder: result.epoch, what: "chunk"
+                statusCode: code, issuedUnder: result.epoch, what: "chunk",
+                kind: job.binding.credentialKind
             )
             refused = refusal
             next = job.applying(refusal.disposition(assumingCurrent: true), at: clock())
@@ -1985,7 +2044,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
             // Sent under the credential held now, so its refusal holds under a known epoch.
             let refused = OutboxRefusal(
-                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload"
+                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload",
+                kind: credentials.kind
             )
             let disposed = await save(
                 job.applying(refused.disposition(assumingCurrent: true), at: clock()),
@@ -2211,7 +2271,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             )
         case .refused(let statusCode):
             change = .refused(
-                OutboxRefusal(statusCode: statusCode, issuedUnder: identity.epoch, what: "upload")
+                OutboxRefusal(
+                    statusCode: statusCode, issuedUnder: identity.epoch, what: "upload",
+                    kind: job.binding.credentialKind
+                )
             )
         case .unreadable:
             guard let asked = await askWhereItStands(job, fileID: identity.fileID) else { return }
@@ -2347,7 +2410,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             return .unreachable
         }
         let refusal = OutboxRefusal(
-            statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload"
+            statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload",
+            kind: credentials.kind
         )
         return refusal.concernsCredential ? .refused(refusal) : .answered(response)
     }

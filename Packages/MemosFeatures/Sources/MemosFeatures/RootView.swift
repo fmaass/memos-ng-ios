@@ -8,6 +8,8 @@ public struct RootView: View {
     // Optional for the same reason the outbox is on the timeline: a preview or a test host has no
     // settings store, and a missing environment value must not be a crash on the root view.
     @Environment(AppSettings.self) private var settings: AppSettings?
+    // Optional too: guest mode is composed by the app, and every screen works without it.
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
 
     public init() {}
 
@@ -19,7 +21,13 @@ public struct RootView: View {
             case .unreachable(let message):
                 UnreachableView(message: message)
             case .signedOut, .signingIn:
-                SignInView()
+                // Somebody who is only a guest on this phone lands on their trip, not on a sign-in
+                // they have no account for; leaving the trip brings the sign-in back.
+                if let guest, guest.state.isActive {
+                    NavigationStack { GuestModeView(guest: guest) }
+                } else {
+                    SignInView()
+                }
             }
         }
         .tint(DesignTokens.accent)
@@ -36,15 +44,18 @@ public struct RootView: View {
         // custom scheme — the server is on internal-only DNS, so Apple's CDN can never fetch the
         // domain association and the universal link is permanently inert. The https lane is kept
         // for a future where a public association exists; it needs nothing here to begin working.
+        //
+        // A trip pass link is the one exception, decided by `RootURLRoute` before the inbox is
+        // asked: it goes to guest mode, and every other URL reaches the inbox as before.
         .onOpenURL { url in
-            NativeLoginCallbackInbox.shared.deliver(url)
+            open(url)
         }
         // `onOpenURL` covers a universal link on most paths, but a browsing activity is how one
         // arrives when the system continues it into a launch, and a callback that reached the
         // app and was dropped on the doorstep is the failure this whole flow is about.
         .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
             guard let url = activity.webpageURL else { return }
-            NativeLoginCallbackInbox.shared.deliver(url)
+            open(url)
         }
         .task {
             guard session.state.user == nil else { return }
@@ -64,6 +75,16 @@ public struct RootView: View {
             }
             #endif
         }
+    }
+
+    /// A pass link with no guest store to take it (a preview, a test host) falls through to the
+    /// inbox, which refuses it — exactly what it did before guest mode existed.
+    private func open(_ url: URL) {
+        if case .tripPass(let secret) = RootURLRoute.route(url), let guest {
+            Task { await guest.redeem(secret: secret) }
+            return
+        }
+        NativeLoginCallbackInbox.shared.deliver(url)
     }
 }
 

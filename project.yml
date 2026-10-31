@@ -226,7 +226,7 @@ targets:
         # written and up to your own server as the phone's own encoder wrote it, and nothing is
         # kept anywhere else. The microphone is asked for only when a VIDEO is being recorded —
         # taking photos never touches it.
-        INFOPLIST_KEY_NSCameraUsageDescription: Memos uses the camera to take a photo or a video for the memo you are writing. It goes to your own memos server exactly as the camera recorded it.
+        INFOPLIST_KEY_NSCameraUsageDescription: Memos uses the camera to take a photo or a video for the memo you are writing, which goes to your own memos server exactly as the camera recorded it, and to read the QR code of a trip pass.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: Memos uses the microphone to record the sound of a video you take for a memo. Photos never use it.
         # The system share sheet is handed the downloaded file with no activity excluded
         # (`MediaSaveFlow.swift`, `ShareSheet`), so it offers "Save Image" and "Save Video", and
@@ -389,6 +389,11 @@ targets:
       # this resource is for: the vendored document is read out of the bundle at run time and
       # asserted against — from ONE memos-ng commit, same as the parity fixture.
       - path: Packages/MemosAPI/Sources/MemosAPI/openapi.json
+        buildPhase: resources
+      # The guest door's document, from the same commit: the GuestWire mirrors carry the same
+      # licence on the same condition, and GuestContractTests pins them against it. It sits in
+      # Fixtures/, which the MemosAPI target excludes, so no client is generated from it.
+      - path: Packages/MemosAPI/Sources/MemosAPI/Fixtures/openapi-guest.json
         buildPhase: resources
       # The Auto memo date and the capture order are ONE rule set for every client, and this is
       # where the rule set lives: the artefact vendored from the same memos-ng commit as the

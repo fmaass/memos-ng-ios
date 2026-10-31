@@ -35,6 +35,7 @@ public struct TimelineView: View {
     @Environment(AppDock.self) private var dock: AppDock?
     /// Where this tab's store is put for the viewer's Info sheet (MEMNG-970); nil without the tabs.
     @Environment(TimelineAccess.self) private var timelineAccess: TimelineAccess?
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
     @State private var timeline: TimelineStore?
     /// A memo read from the server because a jump named one this list has never loaded. It is what
     /// the detail screen opens WITH — the loaded list is left alone, so nothing is inserted into a
@@ -532,7 +533,11 @@ public struct TimelineView: View {
                                 } label: {
                                     Label("Edit", systemImage: "pencil")
                                 }
-                                visibilityMenu(for: memo, in: timeline)
+                                // While a trip pass stands no visibility is offered
+                                // (`TripPassPresentation`).
+                                if TripPassPresentation.showsVisibility(guest?.state) {
+                                    visibilityMenu(for: memo, in: timeline)
+                                }
                             }
                         }
                         .task {

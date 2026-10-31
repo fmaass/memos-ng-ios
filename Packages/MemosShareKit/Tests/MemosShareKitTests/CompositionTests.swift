@@ -1,4 +1,5 @@
 import Foundation
+import MemosOutbox
 import MemosShareKit
 import Testing
 
@@ -34,9 +35,21 @@ struct CompositionTests {
         let file = SharedFile(
             url: URL(fileURLWithPath: "/tmp/x.heic"), filename: "x.heic", mime: "image/heic"
         )
-        #expect(ShareComposition.canPost(note: "", items: [.file(file)], failed: 0, isBusy: false))
-        #expect(ShareComposition.canPost(note: "a memo", items: [], failed: 0, isBusy: false))
-        #expect(!ShareComposition.canPost(note: "   ", items: [], failed: 0, isBusy: false))
+        #expect(
+            ShareComposition.canPost(
+                for: .member, note: "", items: [.file(file)], failed: 0, isBusy: false
+            )
+        )
+        #expect(
+            ShareComposition.canPost(
+                for: .member, note: "a memo", items: [], failed: 0, isBusy: false
+            )
+        )
+        #expect(
+            !ShareComposition.canPost(
+                for: .member, note: "   ", items: [], failed: 0, isBusy: false
+            )
+        )
     }
 
     @Test("an item that could not be read blocks the post and is said out loud")
@@ -46,7 +59,7 @@ struct CompositionTests {
         )
         #expect(
             !ShareComposition.canPost(
-                note: "a memo", items: [.file(file)], failed: 1, isBusy: false
+                for: .member, note: "a memo", items: [.file(file)], failed: 1, isBusy: false
             )
         )
         #expect(
@@ -63,16 +76,96 @@ struct CompositionTests {
             ShareComposition.summary(items: [], failed: 2)
                 == "2 of 2 could not be read. Share them again."
         )
-        #expect(!ShareComposition.canPost(note: "", items: [], failed: 2, isBusy: false))
         #expect(
-            !ShareComposition.canPost(note: "a note", items: [], failed: 2, isBusy: false),
+            !ShareComposition.canPost(for: .member, note: "", items: [], failed: 2, isBusy: false)
+        )
+        #expect(
+            !ShareComposition.canPost(
+                for: .member, note: "a note", items: [], failed: 2, isBusy: false
+            ),
             "words of one's own do not make up for the photo that did not arrive"
+        )
+    }
+
+    /// One share, as the sheet would hold it, and whether Post should be offered for it.
+    struct PostCase: Sendable, CustomTestStringConvertible {
+        let kind: CredentialKind
+        let note: String
+        let items: [SharedItem]
+        var failed = 0
+        var isBusy = false
+        let postable: Bool
+        let testDescription: String
+    }
+
+    static let photo = SharedItem.file(
+        SharedFile(
+            url: URL(fileURLWithPath: "/tmp/x.heic"), filename: "x.heic", mime: "image/heic"
+        )
+    )
+    static let article = SharedItem.link(URL(string: "https://example.invalid/a")!)
+
+    // Mutation that turns it red: drop the guest clause in `canPost`, so a guest share with words
+    // and no file is postable again.
+    @Test(
+        "a trip takes files: a guest share posts with a photo, never with words alone",
+        arguments: [
+            PostCase(
+                kind: .guest, note: "", items: [photo], postable: true,
+                testDescription: "guest, a photo"),
+            PostCase(
+                kind: .guest, note: "at the lake", items: [photo], postable: true,
+                testDescription: "guest, a photo and a note"),
+            PostCase(
+                kind: .guest, note: "", items: [.text("a caption")], postable: false,
+                testDescription: "guest, shared text only"),
+            PostCase(
+                kind: .guest, note: "", items: [article], postable: false,
+                testDescription: "guest, a link only"),
+            PostCase(
+                kind: .guest, note: "only words", items: [], postable: false,
+                testDescription: "guest, a typed note only"),
+            PostCase(
+                kind: .guest, note: "", items: [], postable: false,
+                testDescription: "guest, nothing"),
+            PostCase(
+                kind: .guest, note: "", items: [photo], failed: 1, postable: false,
+                testDescription: "guest, a photo and one that failed"),
+            PostCase(
+                kind: .guest, note: "", items: [photo], isBusy: true, postable: false,
+                testDescription: "guest, a photo while busy"),
+            PostCase(
+                kind: .member, note: "", items: [.text("a caption")], postable: true,
+                testDescription: "member, shared text only"),
+            PostCase(
+                kind: .member, note: "", items: [article], postable: true,
+                testDescription: "member, a link only"),
+            PostCase(
+                kind: .member, note: "", items: [photo], postable: true,
+                testDescription: "member, a photo"),
+            PostCase(
+                kind: .member, note: "a memo", items: [photo], failed: 1, postable: false,
+                testDescription: "member, one that failed"),
+            PostCase(
+                kind: .member, note: "a memo", items: [], isBusy: true, postable: false,
+                testDescription: "member, while busy"),
+        ])
+    func postableByRoute(_ share: PostCase) {
+        #expect(
+            ShareComposition.canPost(
+                for: share.kind, note: share.note, items: share.items, failed: share.failed,
+                isBusy: share.isBusy
+            ) == share.postable
         )
     }
 
     @Test("nothing is posted while the share is still being read")
     func refusesWhileBusy() {
-        #expect(!ShareComposition.canPost(note: "a memo", items: [], failed: 0, isBusy: true))
+        #expect(
+            !ShareComposition.canPost(
+                for: .member, note: "a memo", items: [], failed: 0, isBusy: true
+            )
+        )
     }
 
     @Test("the summary counts files, and says nothing about words")

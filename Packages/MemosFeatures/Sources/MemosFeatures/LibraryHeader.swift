@@ -202,8 +202,16 @@ struct MediaFilterRows: View {
 /// By's does, and opening it shows Any, Public and Just us with a checkmark on the current one.
 struct LibraryVisibilityMenu: View {
     @Binding var visibility: MediaVisibilityFilter
+    // While a trip pass stands no visibility is offered (`TripPassPresentation`).
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
 
     var body: some View {
+        if TripPassPresentation.showsVisibility(guest?.state) {
+            menu
+        }
+    }
+
+    private var menu: some View {
         Menu {
             Picker("Visibility", selection: $visibility) {
                 ForEach(MediaVisibilityFilter.allCases) { choice in

@@ -27,6 +27,10 @@ let package = Package(
         // default arguments Core inlines when it builds one (`Input.Headers.init(accept:)`) are
         // defined in that module, so Core has to link it or the symbols are simply missing.
         .package(url: "https://github.com/apple/swift-openapi-runtime", from: "1.12.0"),
+        // The guest door's requests are built here as `HTTPRequest`s over a `ClientTransport`
+        // (`GuestDoorClient`) until a generated guest client replaces that seam, so Core links the
+        // module those types live in. Same requirement as MemosAPI's, so the pin does not move.
+        .package(url: "https://github.com/apple/swift-http-types", from: "1.6.0"),
     ],
     targets: [
         .target(
@@ -35,6 +39,7 @@ let package = Package(
                 .product(name: "MemosAPI", package: "MemosAPI"),
                 .product(name: "MemosOutbox", package: "MemosOutbox"),
                 .product(name: "OpenAPIRuntime", package: "swift-openapi-runtime"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

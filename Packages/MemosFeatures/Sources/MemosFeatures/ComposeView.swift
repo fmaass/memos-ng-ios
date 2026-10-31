@@ -877,8 +877,16 @@ struct VisibilityMenu: View {
     var spelling: ComposeMetaRow.Spelling = .spelledOut
     /// Whether "Default" is a choice. Not on an edit: a memo that exists already has an audience.
     var offersDefault = true
+    // While a trip pass stands the pill is not offered at all (`TripPassPresentation`).
+    @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
 
     var body: some View {
+        if TripPassPresentation.showsVisibility(guest?.state) {
+            menu
+        }
+    }
+
+    private var menu: some View {
         Menu {
             Picker("Visibility", selection: $selection) {
                 // The MENU always spells it out: a row you are choosing between has to say what

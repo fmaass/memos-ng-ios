@@ -94,6 +94,8 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
         var identity: OutboxTaskIdentity
         var file: URL
         var offsetHeader: String?
+        /// Where the chunk was addressed, so a lane's routes can be asserted on the chunk itself.
+        var url: URL?
     }
 
     private let lock = NSLock()
@@ -199,7 +201,8 @@ final class ScriptedScheduler: OutboxChunkScheduling, @unchecked Sendable {
                 Scheduled(
                     identity: identity,
                     file: file,
-                    offsetHeader: request.value(forHTTPHeaderField: "Upload-Offset")
+                    offsetHeader: request.value(forHTTPHeaderField: "Upload-Offset"),
+                    url: request.url
                 )
             )
         }

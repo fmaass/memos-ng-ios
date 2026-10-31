@@ -38,13 +38,15 @@ public struct PublishedLicence: Sendable, Equatable, Codable {
         case serverBaseURL
         case ownerSubject
         case incarnation
+        case kind
     }
 
     public init(from decoder: any Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
         binding = AccountBinding(
             serverBaseURL: try fields.decode(URL.self, forKey: .serverBaseURL),
-            ownerSubject: try fields.decode(String.self, forKey: .ownerSubject)
+            ownerSubject: try fields.decode(String.self, forKey: .ownerSubject),
+            kind: try fields.decodeIfPresent(CredentialKind.self, forKey: .kind)
         )
         incarnation = try fields.decodeIfPresent(UUID.self, forKey: .incarnation)
     }
@@ -54,6 +56,7 @@ public struct PublishedLicence: Sendable, Equatable, Codable {
         try fields.encode(binding.serverBaseURL, forKey: .serverBaseURL)
         try fields.encode(binding.ownerSubject, forKey: .ownerSubject)
         try fields.encodeIfPresent(incarnation, forKey: .incarnation)
+        try fields.encodeIfPresent(binding.kind, forKey: .kind)
     }
 }
 
@@ -95,6 +98,14 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     /// means the entitlement is missing, and an extension in that state cannot enqueue at all.
     public static func live(appGroup: String = OutboxDefaults.appGroup) -> OutboxAccountStore? {
         OutboxRepository.appGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
+    }
+
+    /// The guest licence: the same file, in the guest outbox's directory, so a share enqueues a
+    /// guest capture only into the queue that drains as the guest.
+    public static func guestLive(
+        appGroup: String = OutboxDefaults.appGroup
+    ) -> OutboxAccountStore? {
+        OutboxRepository.guestAppGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
     }
 
     /// What the app last said about who is signed in, or nil when it has said nothing or has
