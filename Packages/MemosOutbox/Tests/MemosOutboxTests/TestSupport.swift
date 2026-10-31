@@ -854,6 +854,17 @@ final class SwitchableCredentials: OutboxCredentialsProviding, @unchecked Sendab
     func stillCurrent(epoch: Int) -> Bool {
         lock.withLock { self.epoch == epoch }
     }
+
+    /// What `set` holds now, for the session `credentials` came from only — the way the app's
+    /// session answers it, so a test can let the limit land between a drain's acquisition and
+    /// its first request.
+    func currentUploadLimit(for credentials: OutboxCredentials) async -> Int64? {
+        lock.withLock {
+            guard epoch == credentials.epoch, let current, current.binding == credentials.binding
+            else { return nil }
+            return current.uploadLimit
+        }
+    }
 }
 
 struct StaticCredentials: OutboxCredentialsProviding {

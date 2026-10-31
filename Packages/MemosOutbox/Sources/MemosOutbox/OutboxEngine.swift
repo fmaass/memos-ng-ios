@@ -559,14 +559,20 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 current = handedBack
                 continue
             }
+            // A file with no session yet gets a fresh one from this step, so its size is planned
+            // against the limit the session knows now rather than the one this pass acquired.
+            var planning = credentials
+            if current.files.contains(where: { $0.uploadUID == nil }) {
+                planning = await withCurrentLimit(credentials)
+            }
             switch OutboxPlanner.nextAction(
-                for: current, credentials: credentials, now: clock()
+                for: current, credentials: planning, now: clock()
             ) {
             case .hold(let reason):
                 await hold(
                     current, reason: reason,
                     error: OutboxPlanner.holdMessage(
-                        for: reason, of: current, credentials: credentials))
+                        for: reason, of: current, credentials: planning))
                 return
             case .wait:
                 return
@@ -1980,6 +1986,16 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
     }
 
+    /// `credentials` carrying the upload limit their session knows NOW (MEMNG-1054), or the one
+    /// they were acquired with when it knows none. Only the limit moves: the token, the binding
+    /// and the epoch every send is fenced on stay the acquisition's.
+    private func withCurrentLimit(_ credentials: OutboxCredentials) async -> OutboxCredentials {
+        var checked = credentials
+        checked.uploadLimit =
+            await self.credentials.currentUploadLimit(for: credentials) ?? credentials.uploadLimit
+        return checked
+    }
+
     /// The upload session for one file, or nil where the POST did not produce one — having written
     /// whatever that outcome calls for, fenced on `job`, or nothing for a closed gate. Where the
     /// fence refuses that write the row carries neither the outcome nor a task for this file, and
@@ -2002,8 +2018,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         // A new session is a new acceptance of the file's size. A lost session's replacement and a
         // policy successor ask for one without passing the planners again, and the planners pass
         // a file that names a session, so the size is asked here too. Resuming a session the
-        // server already opened never comes this way.
-        if let limit = credentials.uploadLimit, OutboxPlanner.isOverLimit(file, limit: limit) {
+        // server already opened never comes this way. The limit is the one known now: limits
+        // that landed after this pass acquired its credentials are the ones the server applies.
+        let checked = await withCurrentLimit(credentials)
+        if let limit = checked.uploadLimit, OutboxPlanner.isOverLimit(file, limit: limit) {
             let message = OutboxPlanner.tooLargeMessage(file, over: limit)
             if await !hold(job, reason: .tooLarge, error: message) { requestDrain() }
             return nil

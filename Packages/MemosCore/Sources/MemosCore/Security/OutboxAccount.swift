@@ -71,4 +71,12 @@ public struct DeviceOutboxCredentials: OutboxCredentialsProviding {
     public func stillCurrent(epoch: Int) -> Bool {
         self.epoch() == epoch
     }
+
+    /// The limit the session holds now, asked of the same grant the drain acquired from and
+    /// judged by the epoch that grant carries: a limit read after the session was replaced
+    /// belongs to someone else's server and answers nothing about these credentials.
+    public func currentUploadLimit(for credentials: OutboxCredentials) async -> Int64? {
+        guard let grant = await grant(), grant.epoch == credentials.epoch else { return nil }
+        return grant.uploadLimit
+    }
 }

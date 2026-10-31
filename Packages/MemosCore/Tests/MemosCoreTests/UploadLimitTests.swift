@@ -48,9 +48,10 @@ struct UploadLimitTests {
 
     /// Enqueues one file of `size` bytes on a real outbox over `session`, drains it, and answers
     /// what left at the HTTP seam and the capture as it stands afterwards.
-    private static func send(size: Int, under session: SessionStore) async throws -> (
-        [URLRequest], UploadJob?
-    ) {
+    private static func send(
+        size: Int, under session: SessionStore,
+        onProbe: (@Sendable () async -> Void)? = nil
+    ) async throws -> ([URLRequest], UploadJob?) {
         let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -60,7 +61,7 @@ struct UploadLimitTests {
         let repository = try OutboxRepository(
             root: root.appending(path: "outbox"),
             stillCurrent: { credentials.stillCurrent(epoch: $0) })
-        let http = RecordingHTTP()
+        let http = RecordingHTTP(onProbe: onProbe)
         let outbox = Outbox(
             repository: repository, credentials: credentials, http: http,
             scheduler: IdleChunks(), completion: MemoCompletionEndpoint(http: http),
@@ -162,6 +163,44 @@ struct UploadLimitTests {
         #expect(session.uploadLimits == nil)
         #expect(session.credentialGrant()?.uploadLimit == nil)
     }
+
+    @Test("limits that arrive mid-drain hold the oversized file before its POST (MEMNG-1054)")
+    func limitsLandingMidDrainHold() async throws {
+        let session = Self.session(limitsAsked: LimitsCounter())
+        await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token")
+        #expect(session.uploadLimits == nil, "precondition: the drain acquires before the limits")
+
+        // The health probe follows the acquisition and precedes every upload: the limits land
+        // there, through the session's own read, as `loadUploadLimits` does in the app.
+        let (requests, job) = try await Self.send(size: Self.oversized, under: session) {
+            await session.loadUploadLimits()
+        }
+
+        #expect(session.uploadLimits?.maxBytes == Self.limit, "control: the limits landed")
+        #expect(Self.uploadsStarted(requests) == 0, "the drain's snapshot let the file start")
+        #expect(job?.state == .held)
+        #expect(job?.holdReason == .tooLarge)
+    }
+
+    @Test("the limit is answered for the grant's own session, and nothing for a replaced one")
+    func currentLimitIsEpochFenced() async throws {
+        let session = Self.session(limitsAsked: LimitsCounter())
+        let provider = Self.provider(for: session)
+        await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token")
+        let first = try #require(await provider.currentCredentials())
+        #expect(first.uploadLimit == nil, "precondition: acquired before the limits")
+
+        await session.loadUploadLimits()
+        #expect(await provider.currentUploadLimit(for: first) == Self.limit)
+
+        await session.signOutWithoutRevoking()
+        await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token")
+        await session.loadUploadLimits()
+        let second = try #require(await provider.currentCredentials())
+        #expect(second.epoch != first.epoch, "precondition: the session was replaced")
+        #expect(await provider.currentUploadLimit(for: second) == Self.limit, "control")
+        #expect(await provider.currentUploadLimit(for: first) == nil)
+    }
 }
 
 /// How many times the limits were asked for, written from the transport's executor.
@@ -179,6 +218,12 @@ private final class LimitsCounter: @unchecked Sendable {
 private final class RecordingHTTP: OutboxHTTPPerforming, @unchecked Sendable {
     private let lock = NSLock()
     private var sent: [URLRequest] = []
+    /// Run once a probe has arrived, before it is answered.
+    private let onProbe: (@Sendable () async -> Void)?
+
+    init(onProbe: (@Sendable () async -> Void)? = nil) {
+        self.onProbe = onProbe
+    }
 
     var requests: [URLRequest] { lock.withLock { sent } }
 
@@ -187,6 +232,7 @@ private final class RecordingHTTP: OutboxHTTPPerforming, @unchecked Sendable {
     {
         lock.withLock { sent.append(request) }
         if request.url?.path().hasSuffix("/health") == true {
+            await onProbe?()
             return OutboxHTTPResponse(statusCode: 200, body: Data("{}".utf8))
         }
         return OutboxHTTPResponse(statusCode: 503)

@@ -4688,3 +4688,81 @@ struct UploadLimitFreshSessionTests {
         #expect(saved.files[0].uploadUID == "u1")
     }
 }
+
+/// The limit is asked where a fresh session is opened, not where the drain took its credentials
+/// (MEMNG-1054). `SessionStore.loadUploadLimits` can land while a drain is inside one of its
+/// awaits; the health probe is the one every pass makes before its first upload, so the limits
+/// arrive there: after the acquisition, before any `POST /api/uploads`.
+@Suite("Engine: a limit that lands mid-drain is the one a fresh session is checked against")
+struct UploadLimitMidDrainTests {
+    private static let picture = [
+        WholeRig.Media(name: "picture.heic", bytes: 1000, mime: "image/heic")
+    ]
+
+    /// The limits arrive on the probe. Chained, because the rig's own hook records every send.
+    private static func limitArrivesOnProbe(
+        _ http: ScriptedHTTP, _ provider: SwitchableCredentials, limit: Int64
+    ) {
+        let recording = http.beforeSend
+        http.beforeSend = { request in
+            recording?(request)
+            guard request.httpMethod == "GET", request.url?.path() == "/health" else { return }
+            var limited = Fixture.credentials()
+            limited.uploadLimit = limit
+            provider.set(limited)
+        }
+    }
+
+    @Test("whole lane, one byte over: no POST for the file, and the capture is held too large")
+    func wholeLaneOverIsHeld() async throws {
+        let rig = try await WholeRig.make(media: Self.picture)
+        defer { rig.cleanUp() }
+        Self.limitArrivesOnProbe(rig.http, rig.credentials, limit: 999)
+        await rig.engine.drain()
+        // Positive control: the probe ran, so the limit landed inside this drain. A hand-off that
+        // places nothing asks for another pass, which probes again; only the first one matters.
+        #expect(rig.http.requests(method: "GET").first?.url?.path() == "/health")
+        #expect(rig.uploadPosts == 0)
+        #expect(rig.http.requests(method: "POST").isEmpty)
+        let saved = try await rig.reload()
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .tooLarge)
+        #expect(saved.lastError == OutboxPlanner.tooLargeMessage(rig.picture, over: 999))
+    }
+
+    @Test("whole lane, at the limit: the late limit refuses nothing and the file is sent")
+    func wholeLaneAtTheLimitSends() async throws {
+        let rig = try await WholeRig.make(media: Self.picture)
+        defer { rig.cleanUp() }
+        Self.limitArrivesOnProbe(rig.http, rig.credentials, limit: 1000)
+        await rig.engine.drain()
+        #expect(rig.uploadPosts == 1)
+        let saved = try await rig.reload()
+        #expect(saved.holdReason != .tooLarge)
+        #expect(saved.files[0].uploadUID == "u1")
+    }
+
+    @Test("chunk lane, one byte over: no POST for the file, and the capture is held too large")
+    func chunkLaneOverIsHeld() async throws {
+        let http = ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("POST", "/api/uploads"):
+                return ScriptedHTTP.session(uid: "u1", chunkSize: 5 * 1024 * 1024, received: 0)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        let harness = try await Harness.make(bytes: 1000, http: http)
+        defer { harness.cleanUp() }
+        Self.limitArrivesOnProbe(http, harness.credentials, limit: 999)
+        await harness.engine.drain()
+        #expect(http.requests(method: "GET").first?.url?.path() == "/health")
+        #expect(http.requests(method: "POST").isEmpty)
+        let saved = try #require(await harness.reload())
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .tooLarge)
+        #expect(saved.lastError == OutboxPlanner.tooLargeMessage(harness.file, over: 999))
+    }
+}

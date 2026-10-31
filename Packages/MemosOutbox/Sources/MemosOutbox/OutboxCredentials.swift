@@ -77,6 +77,26 @@ public protocol OutboxCredentialsProviding: Sendable {
     /// SYNCHRONOUS for the same reason, and it matters more here: the caller asks it with the
     /// bytes about to go to disk and nothing awaited in between.
     func stillCurrent(epoch: Int) -> Bool
+
+    /// The upload limit the session `credentials` were acquired under knows NOW, or nil when it
+    /// knows none or that session has ended.
+    ///
+    /// Asked where a fresh upload session is opened, because a drain outlives its acquisition:
+    /// `GET /api/uploads/limits` can answer inside one of the drain's awaits, and a limit read
+    /// from the snapshot would then let a file now known to be too large be sent anyway. Only the
+    /// limit is taken from the answer — the drain goes on sending under the credential it
+    /// acquired, whose epoch is what fences every request.
+    ///
+    /// Defaulted, unlike `isCurrent`: a provider that does not answer it falls back to what it
+    /// granted at acquisition, which is exactly the behaviour before this was asked, and the
+    /// server's 413 stays the backstop. Nothing is sent that a fence would have stopped.
+    func currentUploadLimit(for credentials: OutboxCredentials) async -> Int64?
+}
+
+extension OutboxCredentialsProviding {
+    public func currentUploadLimit(for credentials: OutboxCredentials) async -> Int64? {
+        credentials.uploadLimit
+    }
 }
 
 /// The authority a send is made under, asked at the LAST instant before it goes out.
