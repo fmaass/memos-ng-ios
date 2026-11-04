@@ -233,9 +233,22 @@ public actor OutboxRepository {
     /// sweep's reach for the same reason (`prepare`).
     public nonisolated let withdrawals: OutboxWithdrawals
 
-    public init(root: URL, stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true }) throws {
+    /// Whether a member row an older build began in chunks is moved onto the whole lane where it is
+    /// read (MEMNG-546, `UploadJob.retiringChunkLane`).
+    ///
+    /// Asked for, never assumed: only the member queue an engine drains has lost its chunk lane.
+    /// The guest queue still sends in chunks, and the share extension's repository reads rows the
+    /// app's own repository moves.
+    private let retiresChunkLane: Bool
+
+    public init(
+        root: URL,
+        stillCurrent: @escaping @Sendable (Int) -> Bool = { _ in true },
+        retiresChunkLane: Bool = false
+    ) throws {
         self.root = root
         self.stillCurrent = stillCurrent
+        self.retiresChunkLane = retiresChunkLane
         self.lock = OutboxLock(url: root.appending(path: ".lock"))
         self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
         try prepare()
@@ -252,6 +265,7 @@ public actor OutboxRepository {
     ) throws {
         self.root = root
         self.stillCurrent = stillCurrent
+        self.retiresChunkLane = false
         self.lock = OutboxLock(url: root.appending(path: ".lock"), flock: flock)
         self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
         try prepare()
@@ -583,11 +597,33 @@ public actor OutboxRepository {
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        let job: UploadJob
         do {
-            return .decoded(try decoder.decode(UploadJob.self, from: data))
+            job = try decoder.decode(UploadJob.self, from: data)
         } catch {
             return .undecodable(Self.explain(error))
         }
+        return .decoded(retiringChunkLane(job))
+    }
+
+    /// The row as the whole lane carries it, written down the first time it is read.
+    ///
+    /// Every read passes here — the queue's listing and the one-row lookup a background wake and
+    /// every fenced write ask — so no reader ever sees the row on the chunk lane, and a fenced
+    /// write compares against the moved row whether or not it reached the disk yet. A row the
+    /// editor is still bringing files into is moved for this read only: the share extension
+    /// appends to it from another process, and a write here could land between its read and its
+    /// write. Its next write after the last file carries the move down. The chunk slices the older
+    /// build cut for the row go with the move: nothing will send them.
+    private func retiringChunkLane(_ job: UploadJob) -> UploadJob {
+        // A guest row is never moved, whichever repository reads it: the guest door has no
+        // whole-upload route.
+        guard retiresChunkLane, job.binding.credentialKind == .member,
+            let moved = job.retiringChunkLane()
+        else { return job }
+        guard !job.stillArriving, let written = try? persist(moved) else { return moved }
+        removeChunks(forJob: job.id)
+        return written
     }
 
     /// Sets a manifest nobody can decode aside, byte for byte, and returns the entry that says so.

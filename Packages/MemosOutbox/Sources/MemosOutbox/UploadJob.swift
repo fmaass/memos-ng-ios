@@ -490,6 +490,33 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// were all begun on the chunk lane.
     public var lane: UploadTransport { transport ?? .chunk }
 
+    /// This capture moved onto the whole lane, or nil when nothing in it was begun in chunks.
+    ///
+    /// The member queue has no chunk lane any more (MEMNG-546), so a row an older build began on it
+    /// is written onto the whole lane where it is first read. A row says it was begun in chunks by
+    /// naming that lane, or by naming none while a file already holds a session — the rule the
+    /// first hand-off has always claimed by (`OutboxEngine.claimsWhole`). A row with no field and
+    /// no session is NOT moved here: it has nothing to restart, its first hand-off claims it, and
+    /// the share extension reads that missing field as "nobody has claimed this capture yet".
+    ///
+    /// Every file the server has not finished starts again from its first byte: its session is
+    /// forgotten (one the server still holds expires on its own) and nothing it confirmed is
+    /// carried over, because the whole lane sends a file in one task, never from an offset a chunk
+    /// left. A file the server holds whole stays done — it is never sent twice.
+    public func retiringChunkLane() -> UploadJob? {
+        let begunInChunks =
+            transport == .chunk || (transport == nil && files.contains { $0.uploadUID != nil })
+        guard begunInChunks else { return nil }
+        return with { job in
+            job.transport = .whole
+            for index in job.files.indices where !job.files[index].isComplete {
+                job.files[index].uploadUID = nil
+                job.files[index].bytesConfirmed = 0
+                job.files[index].conflictResync = nil
+            }
+        }
+    }
+
     public var totalBytes: Int64 { files.reduce(0) { $0 + $1.byteSize } }
 
     public var confirmedBytes: Int64 {

@@ -435,8 +435,6 @@ struct OutboxCompositionTests {
             repository: harness.repository,
             credentials: harness.credentials,
             http: harness.http,
-            chunks: harness.scheduler,
-            attachChunks: { _ in },
             uploads: BackgroundUploadScheduler(session: session),
             network: harness.network,
             preferences: UploadPreferences(
@@ -458,7 +456,6 @@ struct OutboxCompositionTests {
         #expect(saved.transport == .whole)
         #expect(uploadStarts().count == 1)
         #expect(session.createdTasks.count == 1)
-        #expect(harness.scheduler.uploads.isEmpty, "the capture took the chunk lane")
 
         // Backgrounded: the gate closes at once, so a drain starts nothing new.
         outbox.appEnteredBackground()
@@ -480,8 +477,6 @@ struct WithdrawalRecordTests {
             repository: harness.repository,
             credentials: harness.credentials,
             http: harness.http,
-            chunks: harness.scheduler,
-            attachChunks: { _ in },
             uploads: BackgroundUploadScheduler(session: session, launch: launch),
             network: harness.network,
             preferences: UploadPreferences(
@@ -544,7 +539,6 @@ struct WithdrawalRecordTests {
         await outbox(harness, session: session, launch: UUID()).adopt()
 
         #expect(Set(session.cancelledIdentifiers) == [7, 8, 9])
-        #expect(harness.scheduler.everyTaskCancellations == 1, "the chunk lane's too")
         #expect(harness.repository.withdrawals.pending() == nil, "a cancel issued is not owed")
     }
 
@@ -605,9 +599,8 @@ struct WithdrawalRecordTests {
         await facade.finishWithdrawal()
 
         #expect(session.cancelledIdentifiers == [7], "the withdrawn account's upload still sends")
-        #expect(harness.scheduler.everyTaskCancellations == 1, "the chunk lane's too")
         await facade.finishWithdrawal()
-        #expect(harness.scheduler.everyTaskCancellations == 1, "a cancel issued is not owed")
+        #expect(session.cancelledIdentifiers == [7], "a cancel issued is not owed")
     }
 
     @Test("an older launch's record and a refused one are both cancelled, and the old one goes")
@@ -642,7 +635,6 @@ struct WithdrawalRecordTests {
         await facade.finishWithdrawal()
 
         #expect(Set(session.cancelledIdentifiers) == [7, 8])
-        #expect(harness.scheduler.everyTaskCancellations == 2, "the chunk lane's, for each")
         #expect(
             harness.repository.withdrawals.pending() == nil,
             "the older record would cancel this launch's valid uploads at the next launch"
@@ -763,8 +755,6 @@ struct WakePilotChecklistTests {
             repository: harness.repository,
             credentials: harness.credentials,
             http: harness.http,
-            chunks: harness.scheduler,
-            attachChunks: { _ in },
             uploads: BackgroundUploadScheduler(
                 session: session, delegate: delegate, launch: launch,
                 now: { barrier.now }, pause: { barrier.advance(11) }

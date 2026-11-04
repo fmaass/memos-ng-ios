@@ -348,7 +348,10 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # 56-57: the video-over-mobile-data witnesses in MemosOutboxTests (MEMNG-960) — the rig that drives
 # the real outbox on mobile data, fed `StaticCredentials`' predicate, and the same root reopened as
 # a relaunch to prove the per-capture mark is on the manifest, fed the same predicate.
-pin "'OutboxRepository(' constructions" 57 \
+# 58-60: the chunk-lane retirement witnesses in MemosOutboxTests (MEMNG-546) — a plain and a
+# retiring repository over one root, and the whole-lane rig's root reopened as retiring; none
+# drains, so none takes a credential predicate.
+pin "'OutboxRepository(' constructions" 60 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

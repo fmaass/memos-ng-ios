@@ -1587,35 +1587,6 @@ struct WholeLaneEngineTests {
         #expect(rig.session.createdTasks.isEmpty)
     }
 
-    @Test("a row begun on the chunk lane still completes there beside an upload scheduler")
-    func chunkRowCompletes() async throws {
-        let rig = try await WholeRig.make(prepare: { job in
-            var started = job
-            started.files[0].uploadUID = "c1"
-            return started
-        })
-        defer { rig.cleanUp() }
-        await rig.engine.drain()
-        let first = try #require(rig.chunks.uploads.first)
-        await rig.engine.handle(
-            ChunkResult(
-                identity: first.identity, statusCode: 200,
-                body: ScriptedHTTP.session(uid: "c1", chunkSize: 1, received: 1000).body
-            )
-        )
-        let second = try #require(rig.chunks.uploads.last)
-        #expect(second.identity.fileID == rig.video.id)
-        await rig.engine.handle(
-            ChunkResult(
-                identity: second.identity, statusCode: 200,
-                body: ScriptedHTTP.session(uid: "u1", chunkSize: 1, received: 3000).body
-            )
-        )
-        #expect(rig.completion.idempotencyKeys.count == 1)
-        #expect(await rig.repository.job(rig.job.id) == nil)
-        #expect(rig.session.createdTasks.isEmpty)
-    }
-
     @Test("a wake schedules nothing new: it only finishes a completed transfer's memo create")
     func wakeOnlyCreates() async throws {
         let rig = try await WholeRig.make()
@@ -4220,37 +4191,6 @@ struct WholeJobDeadlineTimerTests {
     /// MEMNG-955 review B1: the transient class retries in seconds on EVERY lane. A chunk-lane row
     /// (an older capture, a text memo, an owed edit) whose create got a 5xx is woken by the timer
     /// alone — the test advances the sleeper and never drains.
-    @Test("a chunk-lane create backing off is sent again at its deadline, with no test drain")
-    func chunkLaneCreateBackoffArmsTheTimer() async throws {
-        let sleeper = ControlledSleeper()
-        let rig = try await WholeRig.make(
-            completion: [.retry("502"), .created(uid: "m1")],
-            prepare: {
-                var chunk = Self.allUploaded($0)
-                chunk.transport = .chunk
-                return chunk
-            },
-            sleeper: sleeper
-        )
-        defer { rig.cleanUp() }
-        await rig.engine.drain()
-        try await settled(rig.engine)
-        #expect(rig.completion.idempotencyKeys.count == 1)
-        let backingOff = try await rig.reload()
-        #expect(backingOff.lane == .chunk)
-        #expect(backingOff.waitReason == .retrying)
-        let deadline = backingOff.nextAttemptAt
-        #expect(deadline > rig.clock.now && deadline <= rig.clock.now.addingTimeInterval(5))
-
-        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
-        sleeper.advance(to: rig.clock.now)
-        let sent = try await rig.eventually { rig.completion.idempotencyKeys.count == 2 }
-        #expect(sent, "a chunk-lane create's deadline armed no timer")
-        try await settled(rig.engine)
-        #expect(Set(rig.completion.idempotencyKeys).count == 1, "the same key went again")
-        #expect(await rig.repository.job(rig.job.id) == nil)
-    }
-
     @Test("a create backing off is sent again at its own deadline, with no drain from the test")
     func createBackoffArmsTheTimer() async throws {
         let sleeper = ControlledSleeper()
@@ -4445,32 +4385,6 @@ struct WholeJobDeadlineTimerTests {
         #expect(armed)
         try await settled(rig.engine)
         #expect(sleeper.history == [start.addingTimeInterval(90)])
-    }
-
-    /// Inverted by MEMNG-955 (review B1): a chunk-lane row's transient retry is due in seconds and
-    /// nothing else wakes it, so its own deadline arms the one timer — here the earlier of the two.
-    @Test("a chunk-lane capture's future deadline arms the timer too, earliest first")
-    func chunkJobArmsItsDeadline() async throws {
-        let sleeper = ControlledSleeper()
-        let rig = try await WholeRig.make(
-            prepare: { job in
-                var chunked = job
-                chunked.transport = .chunk
-                chunked.state = .waiting
-                chunked.attemptCount = 1
-                chunked.nextAttemptAt = job.capturedAt.addingTimeInterval(60)
-                return chunked
-            },
-            sleeper: sleeper
-        )
-        defer { rig.cleanUp() }
-        let start = rig.clock.now
-        try await queueSibling(in: rig, fileDue: start.addingTimeInterval(90))
-        try await rig.engine.reconcile()
-        let armed = try await rig.eventually { sleeper.armed == [start.addingTimeInterval(60)] }
-        #expect(armed)
-        try await settled(rig.engine)
-        #expect(sleeper.history == [start.addingTimeInterval(60)])
     }
 }
 

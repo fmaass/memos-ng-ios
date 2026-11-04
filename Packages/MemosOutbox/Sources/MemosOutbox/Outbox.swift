@@ -213,19 +213,21 @@ public final class Outbox {
         // The predicate the repository decides a refusal under, threaded from the one provider
         // this outbox drains as. Defaulting it here would leave every hold decided as if nothing
         // ever moved, which is the fence's whole subject (`OutboxPersisting`).
+        // The member queue has no chunk lane: a row an older build began in chunks moves onto the
+        // whole lane where it is first read (MEMNG-546).
         let repository = try OutboxRepository(
-            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) }
+            root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) },
+            retiresChunkLane: true
         )
         // Both sessions are created HERE, synchronously, while the app is still launching: the
         // system delivers a finished task's answer to whichever session in the process carries its
-        // identifier, and one that finds none is not delivered at all.
-        let scheduler = BackgroundChunkScheduler(appGroup: appGroup)
+        // identifier, and one that finds none is not delivered at all. The old chunk session is
+        // created for that reason alone — to take what an older build left on it and cancel it.
+        let retired = RetiredChunkSession(appGroup: appGroup)
         return composed(
             repository: repository,
             credentials: credentials,
             http: URLSessionHTTPPerformer(),
-            chunks: scheduler,
-            attachChunks: { handler in await scheduler.attach(handler) },
             uploads: BackgroundUploadScheduler(appGroup: appGroup),
             network: NetworkPathMonitor(),
             preferences: UploadPreferences.live(appGroup: appGroup),
@@ -237,7 +239,8 @@ public final class Outbox {
                         delegate: ShareSessionEvents(finished: shareEventsFinished),
                         delegateQueue: nil))
             },
-            photos: Self.livePhotos
+            photos: Self.livePhotos,
+            retiredChunks: retired
         )
     }
 
@@ -250,31 +253,32 @@ public final class Outbox {
     /// What `live` composes, over whichever sessions it is handed — so a test composes the same
     /// outbox over scripted ones.
     ///
-    /// The whole lane is not optional here: this is the composition that puts new captures on it.
-    /// The scheduling gate starts CLOSED, because a process is launched before it is active — and
-    /// may never become active, when the system launched it only to deliver an answer — and new
-    /// work waits for `appBecameActive`.
+    /// The whole lane is not optional here: it is the only lane a member capture goes on. No chunk
+    /// scheduler is composed (MEMNG-546): the engine's chunk seat holds the retired session, whose
+    /// leftover tasks the adoption cancels once, before any drain. The scheduling gate starts
+    /// CLOSED, because a process is launched before it is active — and may never become active,
+    /// when the system launched it only to deliver an answer — and new work waits for
+    /// `appBecameActive`.
     public static func composed(
         repository: OutboxRepository,
         credentials: any OutboxCredentialsProviding,
         http: any OutboxHTTPPerforming,
-        chunks: any OutboxChunkScheduling,
-        attachChunks: @escaping @Sendable (any OutboxChunkHandling) async -> Void,
         uploads: any OutboxUploadScheduling,
         network: any NetworkPathProviding,
         preferences: UploadPreferences,
         shareSessions: ShareSessions? = nil,
-        photos: (any PhotoLibrarySource)? = nil
+        photos: (any PhotoLibrarySource)? = nil,
+        retiredChunks: RetiredChunkSession = .none
     ) -> Outbox {
         Outbox(
             repository: repository,
             credentials: credentials,
             http: http,
-            scheduler: chunks,
+            scheduler: retiredChunks,
             completion: MemoCompletionEndpoint(http: http),
             network: network,
             preferences: preferences,
-            attachScheduler: attachChunks,
+            attachScheduler: { _ in await retiredChunks.retire() },
             schedulingGate: SchedulingGate(isOpen: false),
             uploads: uploads,
             shareSessions: shareSessions,

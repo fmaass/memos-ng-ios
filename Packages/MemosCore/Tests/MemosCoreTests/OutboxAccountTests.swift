@@ -395,8 +395,8 @@ struct FailedReplacementStopsUploadsTests {
             }.currentCredentials()
         )
 
-        // A's uploads are out on both lanes: a whole-file task minted under A's grant, and a chunk
-        // handed over and still listed in flight.
+        // A's upload is out on the whole lane, the member queue's only one (MEMNG-546): a
+        // whole-file task minted under A's grant.
         let launch = UUID()
         let uploads = ListedUploads(
             WholeTaskListing(
@@ -407,8 +407,6 @@ struct FailedReplacementStopsUploadsTests {
                 ).taskDescription
             )
         )
-        let chunk = OutboxTaskIdentity(jobID: UUID(), fileID: UUID(), offset: 0, attempt: 0)
-        let chunks = ActiveChunks(handedOver: chunk)
         let preferences = "pilot-16-\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: preferences) }
         let credentials = DeviceOutboxCredentials(epoch: { session.epoch.current }) {
@@ -420,8 +418,6 @@ struct FailedReplacementStopsUploadsTests {
             ),
             credentials: credentials,
             http: RefusingHTTP(),
-            chunks: chunks,
-            attachChunks: { _ in },
             uploads: BackgroundUploadScheduler(session: uploads, launch: launch),
             network: WifiPath(),
             preferences: UploadPreferences(defaults: UserDefaults(suiteName: preferences)!)
@@ -431,13 +427,8 @@ struct FailedReplacementStopsUploadsTests {
         await session.signIn(serverAddress: signInServer, token: "pat-b")
         #expect(session.state.user == nil, "the premise: the failure left nobody signed in")
 
-        // Each lane says when its cancel has landed; seeing one says nothing about the other.
         try await bounded("the whole-file task's cancel") { await uploads.untilCancelled() }
-        try await bounded("the chunks' cancel") { await chunks.untilSwept() }
         #expect(uploads.cancelled == [7], "the outgoing account's whole-file upload still sends")
-        #expect(chunks.swept == [chunk], "the outgoing account's chunk still sends")
-        #expect(await chunks.inFlight().isEmpty, "a chunk is still in flight")
-        #expect(chunks.sweeps == 1)
     }
 }
 
@@ -483,58 +474,6 @@ private final class ListedUploads: UploadTaskSession, @unchecked Sendable {
     func cancel(taskIdentifier: Int) async {
         let due = lock.withLock {
             cancels.append(taskIdentifier)
-            defer { waiters = [] }
-            return waiters
-        }
-        for waiter in due { waiter.resume() }
-    }
-}
-
-/// A chunk session with one chunk handed over: it lists it in flight until a cancel reaches it,
-/// and records which of its cancels did.
-private final class ActiveChunks: OutboxChunkScheduling, @unchecked Sendable {
-    private let lock = NSLock()
-    private var active: [OutboxTaskIdentity]
-    private var sweptChunks: [OutboxTaskIdentity] = []
-    private var sweepCount = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(handedOver chunk: OutboxTaskIdentity) { active = [chunk] }
-
-    /// The chunks the sweeping cancel found in flight and stopped.
-    var swept: [OutboxTaskIdentity] { lock.withLock { sweptChunks } }
-    var sweeps: Int { lock.withLock { sweepCount } }
-
-    /// Returns once a sweeping cancel has run to its end.
-    func untilSwept() async {
-        await withCheckedContinuation { continuation in
-            let now = lock.withLock {
-                guard sweepCount == 0 else { return true }
-                waiters.append(continuation)
-                return false
-            }
-            if now { continuation.resume() }
-        }
-    }
-
-    func inFlight() async -> [OutboxTaskIdentity] { lock.withLock { active } }
-
-    func upload(
-        _ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity,
-        under authority: SendAuthority, issuedUnder epoch: Int
-    ) async {
-        lock.withLock { active.append(identity) }
-    }
-
-    func cancel(_ identities: [OutboxTaskIdentity]) async {
-        lock.withLock { active.removeAll { identities.contains($0) } }
-    }
-
-    func cancelEveryTask() async {
-        let due = lock.withLock {
-            sweptChunks += active
-            active = []
-            sweepCount += 1
             defer { waiters = [] }
             return waiters
         }

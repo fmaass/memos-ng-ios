@@ -552,7 +552,17 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // A file still needs its bytes, or the backoff has not run out. The planner below
                 // uploads or waits, whichever it is, and a later pass re-enters here.
             }
-            if uploads != nil, current.lane == .whole || Self.claimsWhole(current) {
+            if uploads != nil {
+                // An engine that carries the whole lane sends every row on it: the member queue
+                // has no chunk lane (MEMNG-546). Only the guest engine, which has no whole lane,
+                // plans the chunk steps below. A row an older build began in chunks is moved
+                // where the member repository reads it; one that reached here unmoved is moved
+                // now, through the fenced write, because the whole lane's own writes refuse a row
+                // that is not on it — handed over unmoved it would be planned again for ever.
+                if current.lane != .whole, let moved = current.retiringChunkLane() {
+                    guard let saved = await save(moved, matching: current) else { return }
+                    current = saved
+                }
                 // A create that resolved with an edit owed comes back to the edit branch above.
                 let handedBack = await advanceWhole(current, credentials: credentials)
                 guard let handedBack else { return }
@@ -1212,6 +1222,12 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         // Before the chunk is dropped and before anything is written, so the job is left exactly
         // as the cancel wrote it.
         guard job.cancelledAt == nil else { return }
+        // A row on the whole lane is no chunk's to move: a chunk an older build sent for a row
+        // that has since been moved onto the whole lane (MEMNG-546) can name the very offset and
+        // attempt the moved file now carries — zero, and the term it kept — and banking its count
+        // would mark bytes the whole lane has not sent as confirmed. Before anything is dropped
+        // or written, so the moved row is left exactly as the move wrote it.
+        guard job.lane == .chunk else { return }
         // An answer from a superseded attempt — a task a reconcile cancelled, or a duplicate that
         // outlived the one whose answer already landed. The job has moved on, and applying this
         // would rewind the cursor and re-send bytes the server already holds.

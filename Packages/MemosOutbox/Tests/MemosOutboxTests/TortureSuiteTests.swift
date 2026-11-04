@@ -137,18 +137,22 @@ struct TortureSuiteTests {
         let rig = try await WholeRig.make(attached: false)
         defer { rig.cleanUp() }
         let box = AttemptHandlerBox()
-        let outbox = Outbox.composed(
+        // What `composed` builds, with the engine handed out at adoption: the member composition
+        // has no chunk scheduler to attach one through (MEMNG-546).
+        let outbox = Outbox(
             repository: rig.repository,
             credentials: rig.credentials,
             http: rig.http,
-            chunks: rig.chunks,
-            attachChunks: { box.value = $0 },
+            scheduler: rig.chunks,
+            completion: MemoCompletionEndpoint(http: rig.http),
+            network: rig.network,
+            preferences: rig.preferences,
+            attachScheduler: { box.value = $0 },
+            schedulingGate: SchedulingGate(isOpen: false),
             uploads: BackgroundUploadScheduler(
                 session: rig.session, delegate: rig.delegate, launch: rig.launch,
                 pause: {}
-            ),
-            network: rig.network,
-            preferences: rig.preferences
+            )
         )
         await outbox.appBecameActive().value
         let engine = try #require(box.value as? OutboxEngine)
