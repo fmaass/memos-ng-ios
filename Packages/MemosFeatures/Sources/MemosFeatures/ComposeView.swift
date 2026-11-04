@@ -90,8 +90,8 @@ public struct ComposeDelete {
 ///
 /// Visibility offers "server default" as the unmarked choice on a NEW memo: the account already
 /// has an answer for who sees things, and a compose screen that demands the decision every time
-/// teaches people to stop reading it — unless a trip is pinned, when a new memo starts on "Just
-/// us" instead (`ComposeVisibilityPick`). An EDIT opens on the memo's own audience, with no
+/// teaches people to stop reading it — a pinned trip included, which offers its tag and never an
+/// audience (`ComposeVisibilityPick`). An EDIT opens on the memo's own audience, with no
 /// "Default", and moves it only under `VisibilityChange`'s rule: narrowing goes with the Save,
 /// widening asks once first (MEMNG-969).
 ///

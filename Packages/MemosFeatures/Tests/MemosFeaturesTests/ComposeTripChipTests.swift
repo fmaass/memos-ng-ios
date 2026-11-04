@@ -385,8 +385,8 @@ nonisolated private final class PublicMemoServer: ClientTransport, @unchecked Se
     }
 }
 
-/// A trip post is for the two of us, so while a trip is pinned a NEW memo starts on "Just us" —
-/// and only starts there: the pill stays the person's, and the ✕ takes back only what the pin
+/// A pinned trip offers its tag and never an audience: a NEW memo starts on the account default,
+/// trip or not, and the pill stays the person's — the ✕ takes the tag off and leaves what they
 /// chose. Asserted where it matters, in the body the real outbox puts on the wire.
 @MainActor
 @Suite("Composer trip visibility")
@@ -463,18 +463,38 @@ struct ComposeTripVisibilityTests {
         }
     }
 
-    @Test("with a trip pinned and the pill untouched, the new memo goes out as Just us")
-    func pinnedPostIsProtected() async throws {
+    /// The trip chip offers the tag, never the audience (owner, 2026-10-31): the pill opens on
+    /// the account default and the post carries that default, the trip's tag still on it.
+    @Test("with a trip pinned and the pill untouched, the new memo goes out on the account default")
+    func pinnedPostIsTheAccountDefault() async throws {
         let http = RecordingHTTP()
         let log = PostLog()
         let queue = try signedInOutbox(over: http, at: root)
         let (pill, pressed) = await post(pinnedTrip: trip, into: queue, log: log)
         #expect(pressed, "the sheet could not be typed into or posted: nothing below proves much")
         #expect(log.enqueued == [true], "the outbox did not take the capture")
-        #expect(pill == "Visibility: \(MemoVisibility.protected.label)", "the pill did not say so")
+        #expect(pill == nil, "the pinned trip put an audience on the pill instead of the default")
+        #expect(log.sent.map(\.visibility) == [nil], "the sheet stated a visibility of its own")
         let body = try await createBody(http)
         #expect(body["content"] as? String == "Lisbon at dusk\n#portugal2026")
-        #expect(body["visibility"] as? String == "PROTECTED")
+        #expect(body["visibility"] as? String == "PUBLIC")
+    }
+
+    @Test("a trip offered with the account default Public composes a post stating no visibility")
+    func offeredTripComposesNoVisibility() async throws {
+        let fresh = ComposeView.Mode.create(restoring: nil)
+        let pick = ComposeVisibilityPick(mode: fresh, offered: trip)
+        let chip = ComposeTripChip(mode: fresh, offered: trip)
+        let submission = ComposeSubmission(
+            content: chip.submittedContent("Lisbon at dusk", at: .now), visibility: pick.selection)
+        #expect(submission.visibility == nil, "the offered trip chose an audience")
+        let (outcome, body) = try await postSubmission(
+            submission, accountDefault: composed(.public))
+        #expect(outcome == .saved)
+        #expect(
+            body["content"] as? String == "Lisbon at dusk\n#portugal2026",
+            "the trip's tag was not offered")
+        #expect(body["visibility"] as? String == "PUBLIC")
     }
 
     @Test("with no trip pinned, the new memo states the account default it was composed under")
@@ -548,11 +568,19 @@ struct ComposeTripVisibilityTests {
     private func postFresh(
         _ visibility: MemoVisibility?, accountDefault: ComposedAccountDefault?
     ) async throws -> (outcome: MemosFeatures.TimelineView.PostOutcome, body: [String: Any]) {
+        try await postSubmission(
+            ComposeSubmission(content: "Lisbon at dusk", visibility: visibility),
+            accountDefault: accountDefault)
+    }
+
+    /// `submission` as a fresh capture through `TimelineView.post`, into the real outbox.
+    private func postSubmission(
+        _ submission: ComposeSubmission, accountDefault: ComposedAccountDefault?
+    ) async throws -> (outcome: MemosFeatures.TimelineView.PostOutcome, body: [String: Any]) {
         let http = RecordingHTTP()
         let queue = try signedInOutbox(over: http, at: root.appending(path: UUID().uuidString))
         let outcome = await TimelineView.post(
-            ComposeSubmission(content: "Lisbon at dusk", visibility: visibility),
-            restoring: nil, accountDefault: accountDefault,
+            submission, restoring: nil, accountDefault: accountDefault,
             resubmit: { _, _ in .accepted },
             enqueue: { await TimelineView.enqueue($0, into: queue, accountDefault: $1) })
         return (outcome, try await createBody(http))
@@ -618,8 +646,8 @@ struct ComposeTripVisibilityTests {
 
     // MARK: - Who chose it
 
-    @Test("a pinned trip suggests Just us to a fresh capture, and to nothing else")
-    func onlyAFreshCaptureIsPreselected() {
+    @Test("a pinned trip suggests no audience to a fresh capture, an edit or a restored one")
+    func noCaptureIsPreselected() {
         let fresh = ComposeView.Mode.create(restoring: nil)
         let edit = ComposeView.Mode.edit(
             uid: "m1", content: "x", createdAt: Date(timeIntervalSince1970: 0), attachments: [],
@@ -631,9 +659,10 @@ struct ComposeTripVisibilityTests {
                     capturedAt: Date(timeIntervalSince1970: 0), pictures: []))
         }
 
+        // A fresh capture opens on the account default: the trip offers its tag, not its audience.
         let pinned = ComposeVisibilityPick(mode: fresh, offered: trip)
-        #expect(pinned.selection == .protected)
-        #expect(pinned.isSuggested)
+        #expect(pinned.selection == nil)
+        #expect(!pinned.isSuggested)
         #expect(ComposeVisibilityPick(mode: fresh, offered: nil).selection == nil)
         // An edit opens on the memo's own audience, never on the trip's suggestion.
         let editing = ComposeVisibilityPick(mode: edit, offered: trip)

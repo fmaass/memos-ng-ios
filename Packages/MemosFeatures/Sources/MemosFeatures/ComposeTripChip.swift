@@ -121,16 +121,17 @@ struct ComposeTripChip: Equatable {
 
 /// The visibility one compose sheet posts with, and whether the offer or the person put it there.
 ///
-/// A trip post is for the two of us and never for the digest, so a NEW memo opened while a trip
-/// is offered starts on "Just us" (protected) instead of the account default. The account default
-/// itself stays what it is: most posts are not trip posts. That start is the offer's SUGGESTION and
-/// it is kept apart from a CHOICE — the chip's ✕ takes an untouched suggestion back to the account
-/// default along with the tag, but once the person has set the pill, to anything, "Default"
-/// included, it is theirs and nothing the chip does overrides it.
+/// The trip chip offers the TAG, never the audience. Who sees a memo is the account default or
+/// the person's own pick, so a NEW memo opens on the account default whether a trip is offered or
+/// not, and "Just us" stays one choice on the pill (owner, 2026-10-31: a trip that ran for a week
+/// had opened every new memo on Just us while the account default was Public). A pick is kept
+/// apart from a SUGGESTION, which the chip no longer makes: once the person has set the pill, to
+/// anything, "Default" included, it is theirs and nothing the chip does overrides it, and the ✕
+/// only ever takes back a suggestion nobody touched.
 ///
-/// Only a fresh capture is preselected. An edit states no visibility at all — who sees a memo is
-/// changed on purpose, never as a side effect of a trip — and a restored capture keeps the one it
-/// was stopped with, which was decided when it was first written.
+/// An edit opens on the memo's own audience — who sees a memo is changed on purpose, never as a
+/// side effect of a trip — and a restored capture keeps the one it was stopped with, which was
+/// decided when it was first written.
 struct ComposeVisibilityPick: Equatable {
     /// What the post states, or nil for the account default.
     private(set) var selection: MemoVisibility?
@@ -142,10 +143,8 @@ struct ComposeVisibilityPick: Equatable {
         case .create(.some(let restored)):
             selection = restored.visibility
         case .create(.none):
-            if offered != nil {
-                selection = .protected
-                isSuggested = true
-            }
+            // The account default, trip offered or not: the chip offers its tag, not an audience.
+            selection = nil
         case .edit(_, _, _, _, let visibility):
             // The memo's own audience, never "Default": a memo that exists already has one.
             selection = visibility
