@@ -5,8 +5,13 @@ import SwiftUI
 ///
 /// It is the first screen anyone sees, and it used to be a settings form — a server field, then a
 /// button, then a disclosure triangle, all weighted the same. It is a door now: the mark, the
-/// name, and ONE button. The server address and the token path are still there, below, at the size
-/// their rarity deserves.
+/// name, the server's address, and ONE button. The token path is still there, below, at the size
+/// its rarity deserves.
+///
+/// The address starts empty for a stranger's install (MEMNG-1127): nothing compiled in names a
+/// server. It is prefilled from the account the session holds, else from the server this device
+/// last signed in to (`SessionStore.suggestedServerAddress`) — an editable convenience, never a
+/// trust anchor: nothing is authorised because the field already held an address.
 ///
 /// The native flow is the door most people should walk through — one tap, the family sign-on they
 /// already have, no copied secrets. The token form stays because it is the reviewer's and
@@ -17,9 +22,10 @@ public struct SignInView: View {
     // screen simply offers no trip pass.
     @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
     @State private var joiningTrip = false
-    @State private var serverAddress = "memos.discomarder.live"
+    @State private var serverAddress = ""
     @State private var token = ""
     @State private var showAdvanced = false
+    @State private var showLicenses = false
     /// One per screen, not one per tap: it holds the flow that a cancelled sign-in has to be
     /// retried through, and the browser view it owns while that sign-in is on screen.
     @State private var presenter = SafariLoginPresenter()
@@ -36,6 +42,7 @@ public struct SignInView: View {
                 brand
                 Spacer(minLength: 0)
                 VStack(spacing: DesignTokens.Space.regular) {
+                    serverField
                     primaryButton
                     // Still true, and true for a different reason than it used to be: the
                     // browser view is Safari's, out of process. The app cannot read the page it
@@ -62,15 +69,20 @@ public struct SignInView: View {
                 if let guest {
                     tripPassEntry(guest)
                 }
-                Button("Advanced") { showAdvanced = true }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.bottom, DesignTokens.Space.snug)
+                footer
             }
             .padding(.horizontal, DesignTokens.Space.section)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .tint(DesignTokens.accent)
+        // Only into an empty field: a screen that comes back while somebody is typing keeps what
+        // they typed.
+        .onAppear {
+            if serverAddress.isEmpty { serverAddress = session.suggestedServerAddress }
+        }
+        .sheet(isPresented: $showLicenses) {
+            LicensesSheet(packages: OpenSourceLicenses.bundled)
+        }
         .sheet(isPresented: $showAdvanced) {
             AdvancedSignInSheet(
                 serverAddress: $serverAddress,
@@ -107,6 +119,37 @@ public struct SignInView: View {
     private func openSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+
+    private var serverField: some View {
+        TextField("memos.example.com", text: $serverAddress)
+            .textContentType(.URL)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .keyboardType(.URL)
+            .multilineTextAlignment(.center)
+            .padding(.vertical, DesignTokens.Space.snug)
+            .padding(.horizontal, DesignTokens.Space.regular)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: .rect(cornerRadius: DesignTokens.Radius.tile)
+            )
+            .accessibilityLabel("Server address")
+            .disabled(isSigningIn)
+    }
+
+    /// The small print, on the screen App Review sees before any account exists: the token path,
+    /// the privacy policy and the packages the app is built with. There is no settings screen to
+    /// carry the last two (the chrome trim, 2026-10-10).
+    private var footer: some View {
+        HStack(spacing: DesignTokens.Space.roomy) {
+            Button("Advanced") { showAdvanced = true }
+            Link("Privacy policy", destination: PublicLinks.privacyPolicy)
+            Button("Licenses") { showLicenses = true }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .padding(.bottom, DesignTokens.Space.snug)
     }
 
     private var brand: some View {
