@@ -86,7 +86,11 @@ public final class TripGuestStore {
     public var isWriting: Bool { write != nil }
 
     /// The picture behind a contribution, read for its thumbnail, or nil until it is.
-    public func picture(for uid: String) -> MemoAttachment? { pictures[uid] }
+    public func picture(for uid: String) -> MemoAttachment? { pictures[uid]?.attachment }
+
+    /// The name that picture's file was uploaded under, read with it; nil until it is, and nil
+    /// when the server has none.
+    public func filename(for uid: String) -> String? { pictures[uid]?.filename ?? nil }
 
     enum Write: Hashable, Sendable {
         case issue(TripPassDraft)
@@ -110,7 +114,7 @@ public final class TripGuestStore {
     private var heldIssued: (pass: IssuedTripPass, generation: Int, session: Int)?
     /// Moved by every `dismissIssued`: an issue that was out across one holds nothing.
     private var dismissals = 0
-    private var pictures: [String: MemoAttachment] = [:]
+    private var pictures: [String: (attachment: MemoAttachment, filename: String?)] = [:]
     private var picturesAsked: Set<String> = []
     private var write: (operation: Write, token: Int, task: Task<Landed, any Error>)?
     private var reads: [Read: (token: Int, generation: Int, epoch: Int, task: Task<Void, Never>)] =
@@ -168,15 +172,15 @@ public final class TripGuestStore {
         }
     }
 
-    /// Reads the record of picture `uid` for its thumbnail, once per identity. A failure leaves
-    /// the row without one; only a refused credential is reported.
+    /// Reads the record of picture `uid` for its thumbnail and its row's file name, once per
+    /// identity. A failure leaves the row without either; only a refused credential is reported.
     public func loadPicture(_ uid: String, using handle: SessionHandle, baseURL: URL) async {
         guard pictures[uid] == nil, !picturesAsked.contains(uid), sessionStillCurrent(handle)
         else { return }
         picturesAsked.insert(uid)
         let issued = generation
         do {
-            let picture = try await TripMemberStore.attachment(
+            let picture = try await TripMemberStore.record(
                 handle.client, uid: uid, baseURL: baseURL)
             guard issued == generation, sessionStillCurrent(handle) else { return }
             pictures[uid] = picture

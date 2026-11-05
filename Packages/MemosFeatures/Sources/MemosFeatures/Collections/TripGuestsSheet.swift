@@ -244,7 +244,9 @@ struct InviteGuestsForm: View {
     }
 }
 
-/// The Guest Uploads inbox: every picture the trip's passes brought, to hide, show again or remove.
+/// The Guest Uploads inbox: every picture the trip's passes brought, to look at, hide, show again or
+/// remove. A guest's picture is in the trip the moment it lands, as Just us; there is nothing to
+/// accept, only what to take away again, and the footer says so (MEMNG-1159).
 struct GuestUploadsInbox: View {
     let store: TripGuestStore
     let access: () -> CollectionsAccess?
@@ -254,6 +256,9 @@ struct GuestUploadsInbox: View {
     @State private var editMode: EditMode = .inactive
     @State private var said: String?
     @State private var askingRemove = false
+    /// What the Remove question is about: the Select set, or the one row whose swipe or menu asked.
+    @State private var removing: Set<String> = []
+    @State private var viewing: MediaViewerSelection?
 
     var body: some View {
         List(selection: $chosen) {
@@ -261,21 +266,18 @@ struct GuestUploadsInbox: View {
                 Text(said).foregroundStyle(.secondary)
             }
             if let rows = store.contributions {
-                if rows.isEmpty { Text("No guest has added a photo yet.") }
-                ForEach(rows) { row in
-                    HStack {
-                        thumbnail(row)
-                        VStack(alignment: .leading) {
-                            Text(row.contributorName ?? "A guest")
-                            Text(row.createdAt, style: .relative)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            if row.hidden {
-                                Text("Hidden").font(.footnote).foregroundStyle(.secondary)
+                Section {
+                    if rows.isEmpty { Text("No guest has added a photo yet.") }
+                    ForEach(rows) { row in
+                        line(row)
+                            .tag(row.attachmentUid)
+                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                                swipeButtons(row)
                             }
-                        }
+                            .contextMenu { menuButtons(row) }
                     }
-                    .tag(row.attachmentUid)
+                } footer: {
+                    Text(TripGuestsText.inboxFooter)
                 }
             }
         }
@@ -301,10 +303,10 @@ struct GuestUploadsInbox: View {
                             }
                         }
                         Divider()
-                        Button("Hide", systemImage: "eye.slash") { moderate(.hide) }
-                        Button("Show Again", systemImage: "eye") { moderate(.unhide) }
+                        Button("Hide", systemImage: "eye.slash") { moderate(.hide, chosen) }
+                        Button("Show Again", systemImage: "eye") { moderate(.unhide, chosen) }
                         Button("Remove", systemImage: "trash", role: .destructive) {
-                            askingRemove = true
+                            askRemove(chosen)
                         }
                     }
                     .disabled(store.isWriting)
@@ -312,11 +314,87 @@ struct GuestUploadsInbox: View {
             }
         }
         .confirmationDialog(
-            TripGuestsText.removeQuestion(chosen.count), isPresented: $askingRemove,
+            TripGuestsText.removeQuestion(removing.count), isPresented: $askingRemove,
             titleVisibility: .visible
         ) {
-            Button("Remove", role: .destructive) { moderate(.remove) }
+            Button("Remove", role: .destructive) { moderate(.remove, removing) }
         }
+        .fullScreenCover(item: $viewing) { selection in
+            MediaViewerView(selection: selection, source: .fixed(selection.pages))
+        }
+    }
+
+    /// A row: its thumbnail, the file's name, who brought what, when it was taken and when it came.
+    /// Outside Select a tap opens it big; in Select a tap chooses it, as the list's selection does.
+    @ViewBuilder
+    private func line(_ row: TripContribution) -> some View {
+        let facts = GuestUploadRow(
+            row, picture: store.picture(for: row.attachmentUid),
+            filename: store.filename(for: row.attachmentUid))
+        let times = TripGuestsText.timeLines(facts, now: Date())
+        let content = HStack {
+            thumbnail(row)
+            VStack(alignment: .leading) {
+                if let name = facts.filename {
+                    Text(name).lineLimit(1).truncationMode(.middle)
+                }
+                Text(facts.byline)
+                    .font(facts.filename == nil ? .body : .subheadline)
+                Text(times.primary).font(.footnote).foregroundStyle(.secondary)
+                if let uploaded = times.secondary {
+                    Text(uploaded).font(.footnote).foregroundStyle(.secondary)
+                }
+                if facts.hidden {
+                    Text("Hidden").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
+        if editMode.isEditing {
+            content
+        } else {
+            Button {
+                open(row.attachmentUid)
+            } label: {
+                content.contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// Remove outermost, as a list's delete is. No destructive role on the swipe: a destructive
+    /// swipe action slides its row away at once, before the question has been answered.
+    @ViewBuilder
+    private func swipeButtons(_ row: TripContribution) -> some View {
+        ForEach(Array(GuestUploadsModeration.rowActions(hidden: row.hidden).reversed()), id: \.self)
+        {
+            action in
+            button(action, for: row, role: nil)
+                .tint(action == .remove ? Color.red : Color.gray)
+        }
+    }
+
+    @ViewBuilder
+    private func menuButtons(_ row: TripContribution) -> some View {
+        ForEach(GuestUploadsModeration.rowActions(hidden: row.hidden), id: \.self) { action in
+            button(action, for: row, role: action == .remove ? .destructive : nil)
+        }
+    }
+
+    private func button(_ action: TripModeration, for row: TripContribution, role: ButtonRole?)
+        -> some View
+    {
+        Button(
+            GuestUploadsModeration.title(action),
+            systemImage: GuestUploadsModeration.symbol(action),
+            role: role
+        ) {
+            if action == .remove {
+                askRemove([row.attachmentUid])
+            } else {
+                moderate(action, [row.attachmentUid])
+            }
+        }
+        .disabled(store.isWriting)
     }
 
     @ViewBuilder
@@ -344,20 +422,133 @@ struct GuestUploadsInbox: View {
         await store.loadContributions(using: access.handle)
     }
 
-    private func moderate(_ action: TripModeration) {
-        guard let access = access(), !chosen.isEmpty else { return }
-        let picked = chosen
+    private func open(_ uid: String) {
+        viewing = GuestUploadsViewer.viewer(
+            for: store.contributions ?? [], pictures: { store.picture(for: $0) },
+            startingAt: uid)
+    }
+
+    private func askRemove(_ uids: Set<String>) {
+        guard !uids.isEmpty else { return }
+        removing = uids
+        askingRemove = true
+    }
+
+    /// The one moderation the Select menu, a row's swipe and a row's context menu all reach.
+    private func moderate(_ action: TripModeration, _ uids: Set<String>) {
+        guard let access = access(), !uids.isEmpty else { return }
         Task {
-            do {
-                let outcome = try await store.moderate(action, picked, using: access.handle)
-                said = TripGuestsText.moderationNote(outcome)
-                chosen = []
-                if outcome.applied > 0 { onModerated() }
-            } catch {
-                said = (error as? TripGuestStore.Failure)?.errorDescription
-                // A batch can fail after some of its calls were applied.
-                onModerated()
-            }
+            let landed = await GuestUploadsModeration.run(
+                action, uids, store: store, handle: access.handle)
+            said = landed.note
+            if landed.succeeded { chosen.subtract(uids) }
+            if landed.changed { onModerated() }
+        }
+    }
+}
+
+/// One row of the Guest Uploads inbox as facts a test can read: the file's own name, when it was
+/// taken, what it is and who brought it. The name, the capture time and the kind come from the
+/// picture's record — the read the thumbnail already makes — so a row whose record has not arrived
+/// says only who brought it and when, and never makes a name up.
+struct GuestUploadRow: Equatable {
+    let uid: String
+    let contributor: String
+    let uploadedAt: Date
+    let hidden: Bool
+    /// The name the file was uploaded under; nil until the record is read, or when it has none.
+    let filename: String?
+    /// Photo or video; nil until the record is read, and for a file that is neither.
+    let kind: MediaKind?
+    /// When the picture was taken, as the file says. The server's own fallback after that is the
+    /// memo's date, which nothing the inbox reads carries, so a picture without one shows its
+    /// upload time alone.
+    let takenAt: Date?
+
+    init(_ row: TripContribution, picture: MemoAttachment?, filename: String?) {
+        uid = row.attachmentUid
+        contributor = row.contributorName ?? "A guest"
+        uploadedAt = row.createdAt
+        hidden = row.hidden
+        self.filename = picture == nil ? nil : filename.flatMap { $0.isEmpty ? nil : $0 }
+        kind = picture.flatMap { file -> MediaKind? in
+            file.isVideo ? .video : file.mime.hasPrefix("image/") ? .image : nil
+        }
+        takenAt = picture?.captureInstant
+    }
+
+    /// "Video · Anna", or the contributor alone while the kind is not known.
+    var byline: String {
+        switch kind {
+        case .video: "Video · \(contributor)"
+        case .image: "Photo · \(contributor)"
+        case nil: contributor
+        }
+    }
+}
+
+/// Where a tap on an inbox row goes: the app's viewer, opened on that picture and paging through the
+/// inbox's pictures whose records are read, in the inbox's order. Derived tiers only — the pages
+/// are `MediaViewerPresentation`'s, which never take the original — and no page offers Delete: a
+/// guest's picture leaves through Remove, which the pass's route answers, not the file's.
+enum GuestUploadsViewer {
+    static func viewer(
+        for rows: [TripContribution], pictures: (String) -> MemoAttachment?, startingAt uid: String
+    ) -> MediaViewerSelection? {
+        MediaViewerPresentation.viewer(
+            for: rows.compactMap { pictures($0.attachmentUid) }, startingAt: uid,
+            deletability: .memo(mine: false))
+    }
+}
+
+/// What a moderation from the inbox does, whichever control asked: the Select menu with its chosen
+/// set, or one row's swipe or context menu with that row alone. One path, so a row cannot moderate
+/// any differently from a batch; the store refuses a second write while one is out.
+enum GuestUploadsModeration {
+    struct Landed: Equatable {
+        /// What the inbox says afterwards, or nil for nothing.
+        var note: String?
+        /// Whether the trip's grid has to read again.
+        var changed: Bool
+        /// Whether the call answered at all; a failed one keeps the selection for another try.
+        var succeeded: Bool = true
+    }
+
+    /// A row's own actions, swipe and context menu alike: Hide, or Show Again on a hidden row, and
+    /// Remove.
+    static func rowActions(hidden: Bool) -> [TripModeration] {
+        [hidden ? .unhide : .hide, .remove]
+    }
+
+    static func title(_ action: TripModeration) -> String {
+        switch action {
+        case .hide: "Hide"
+        case .unhide: "Show Again"
+        case .remove: "Remove"
+        }
+    }
+
+    static func symbol(_ action: TripModeration) -> String {
+        switch action {
+        case .hide: "eye.slash"
+        case .unhide: "eye"
+        case .remove: "trash"
+        }
+    }
+
+    static func run(
+        _ action: TripModeration, _ uids: Set<String>, store: TripGuestStore,
+        handle: SessionHandle
+    ) async -> Landed {
+        do {
+            let outcome = try await store.moderate(action, uids, using: handle)
+            return Landed(
+                note: TripGuestsText.moderationNote(outcome), changed: outcome.applied > 0)
+        } catch {
+            // A batch can fail after some of its calls were applied.
+            return Landed(
+                note: (error as? TripGuestStore.Failure)?.errorDescription, changed: true,
+                succeeded: false)
         }
     }
 }
@@ -401,6 +592,21 @@ enum TripGuestsText {
         case 1: "End this pass? The 1 device using it can no longer add photos."
         default: "End this pass? The \(devices) devices using it can no longer add photos."
         }
+    }
+
+    /// The sentence under the inbox's rows: what a guest's picture is, and what is left to do.
+    static let inboxFooter =
+        "Guest pictures appear in the trip right away as Just us. "
+        + "Hide or remove the ones you do not want."
+
+    /// When a row's picture was taken, then when it came; without a capture time, when it came.
+    static func timeLines(_ row: GuestUploadRow, now: Date) -> (primary: String, secondary: String?)
+    {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        let uploaded = "Uploaded \(formatter.localizedString(for: row.uploadedAt, relativeTo: now))"
+        guard let taken = row.takenAt else { return (uploaded, nil) }
+        return ("Taken \(taken.formatted(date: .abbreviated, time: .shortened))", uploaded)
     }
 
     static func removeQuestion(_ count: Int) -> String {

@@ -413,6 +413,58 @@ struct TripGuestStoreTests {
             !TripPassDraft(label: String(repeating: "x", count: 256), expiresAt: later)
                 .isSendable(at: now))
     }
+
+    nonisolated static let metaOp = "attachment_meta_api_attachments__uid__get"
+
+    /// The record a row's thumbnail read answers with: `filename` is nullable on the route.
+    nonisolated static func record(_ uid: String, mime: String, filename: String?, capture: String?)
+        -> (HTTPResponse, HTTPBody?)
+    {
+        let name = filename.map { "\"\($0)\"" } ?? "null"
+        let taken = capture.map { "\"\($0)\"" } ?? "null"
+        return Stub.json(
+            """
+            {"uid":"\(uid)","mime":"\(mime)","size":1024,"sha256":null,"status":"ready",\
+            "width":1000,"height":800,"duration":null,"blurhash":null,"captured_at":null,\
+            "capture_instant":\(taken),"capture_civil":null,"capture_source":null,"mine":true,\
+            "hasPrint":false,"hasLegacyPrint":false,"hasPoster":false,"renditions":[],\
+            "filename":\(name),"latitude":null,"longitude":null,"locationSource":null,\
+            "addedBy":null,"camera":null,"webReady":true,\
+            "downloadUrl":"/api/attachments/\(uid)/original",\
+            "printUrl":"/api/attachments/\(uid)/print",\
+            "thumbnailUrl":"/api/attachments/\(uid)/thumb?sig=1",\
+            "previewUrl":"/api/attachments/\(uid)/mobile?sig=1",\
+            "webUrl":"/api/attachments/\(uid)/web?sig=1",\
+            "posterUrl":"/api/attachments/\(uid)/poster?sig=1"}
+            """)
+    }
+
+    @Test("a row's picture read keeps the file's own name, none when the server has none")
+    func thePictureReadKeepsTheFilename() async throws {
+        let client = Stub.client { request, _, operation in
+            guard operation == Self.metaOp else { return Stub.empty(.notFound) }
+            if request.path?.contains("/a1") ?? false {
+                return Self.record(
+                    "a1", mime: "video/quicktime", filename: "IMG_0412.MOV",
+                    capture: "2026-07-14T18:03:00Z")
+            }
+            return Self.record("a2", mime: "image/jpeg", filename: nil, capture: nil)
+        }
+        let store = TripGuestStore(collectionUid: "t1")
+        #expect(store.filename(for: "a1") == nil)
+        await store.loadPicture("a1", using: client.handle, baseURL: Stub.baseURL)
+        await store.loadPicture("a2", using: client.handle, baseURL: Stub.baseURL)
+        #expect(store.filename(for: "a1") == "IMG_0412.MOV")
+        #expect(store.picture(for: "a1")?.mime == "video/quicktime")
+        #expect(
+            store.picture(for: "a1")?.captureInstant
+                == ISO8601DateFormatter().date(from: "2026-07-14T18:03:00Z"))
+        #expect(store.picture(for: "a2") != nil)
+        #expect(store.filename(for: "a2") == nil)
+        // A name read under one identity is not shown under the next.
+        store.sessionIdentityChanged()
+        #expect(store.filename(for: "a1") == nil)
+    }
 }
 
 /// A session that queues `onLastLook` on the main actor at the first look a store takes after its

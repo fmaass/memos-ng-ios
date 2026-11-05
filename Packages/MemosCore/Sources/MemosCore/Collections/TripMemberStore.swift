@@ -1298,11 +1298,20 @@ public final class TripMemberStore {
     static func attachment(_ client: any APIProtocol, uid: String, baseURL: URL) async throws
         -> MemoAttachment
     {
+        try await record(client, uid: uid, baseURL: baseURL).attachment
+    }
+
+    /// The same record with the name the file was uploaded under, which `MemoAttachment` does not
+    /// carry: it is a Codable shape the timeline snapshot persists, and only the Guest Uploads
+    /// inbox asks for the name (MEMNG-1159). `nil` when the server has none.
+    static func record(_ client: any APIProtocol, uid: String, baseURL: URL) async throws
+        -> (attachment: MemoAttachment, filename: String?)
+    {
         let input = Operations.AttachmentMetaApiAttachmentsUidGet.Input(path: .init(uid: uid))
         switch try await client.attachmentMetaApiAttachmentsUidGet(input) {
         case .ok(let ok):
             let meta = try ok.body.json
-            return MemoAttachment(
+            let attachment = MemoAttachment(
                 uid: meta.uid,
                 mime: meta.mime,
                 status: AttachmentStatus(meta.status),
@@ -1318,6 +1327,7 @@ public final class TripMemberStore {
                 downloadURL: URL(string: meta.downloadUrl, relativeTo: baseURL)?.absoluteURL,
                 tags: meta.tags ?? []
             )
+            return (attachment, meta.filename)
         case .unprocessableContent: throw APIError.server(status: 422)
         case .serviceUnavailable: throw APIError.fromStatus(503)
         case .undocumented(let status, _): throw APIError.fromStatus(status)
