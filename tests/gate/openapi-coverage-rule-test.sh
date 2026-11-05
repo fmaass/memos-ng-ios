@@ -392,7 +392,12 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8", newline="").read()
 open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", "\r\n"))
 PY
-check "the config with CRLF line endings" 0 "$w" "97 operationIds named by filter.operations"
+# The count is the one the rule reads from the real config, so a contract sync that adds operations
+# does not leave this case naming a stale number.
+named="$(bash "$repo_root/scripts/openapi-coverage-rule.sh" "$repo_root" 2>&1 \
+  | sed -n 's/^openapi-coverage: \([0-9][0-9]*\) operationIds named by filter.operations$/\1/p')"
+[ -n "$named" ] || { echo "OPENAPI-COVERAGE-TEST FAIL: the real tree names no filter count"; exit 1; }
+check "the config with CRLF line endings" 0 "$w" "$named operationIds named by filter.operations"
 
 # And the repository this suite ships in, which is the point of the whole exercise. With the copied
 # pair at the top of this file it is also the positive control on every refusal above: the real
