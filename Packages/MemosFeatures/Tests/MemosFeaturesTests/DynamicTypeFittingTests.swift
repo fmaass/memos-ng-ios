@@ -217,6 +217,60 @@ struct DynamicTypeFittingTests {
         }
     }
 
+    // MARK: - the edit sheet's row, and the trash at its end (MEMNG-1031)
+
+    private static var trash: EditTrashButton {
+        EditTrashButton(delete: ComposeDelete(isAsking: false, send: { _ in }))
+    }
+
+    /// The trash is a glyph and nothing more: at the default size it is narrower than the two
+    /// words it replaced, and it still grows with the text — a glyph pinned to one size would
+    /// measure the same at both ends.
+    @Test("the edit sheet's trash is a glyph that grows with the text size")
+    func editTrashIsAGlyph() {
+        let atDefault = LayoutProbe.idealWidth(Self.trash, typeSize: .large)
+        let atLargest = LayoutProbe.idealWidth(Self.trash, typeSize: .accessibility5)
+        let words = LayoutProbe.idealWidth(
+            Text("Delete memo").font(.subheadline.weight(.medium)), typeSize: .large
+        )
+        #expect(atDefault > 0, "the trash measured nothing")
+        #expect(atDefault < words, "the trash is \(atDefault)pt where its words are \(words)pt")
+        #expect(atLargest > atDefault)
+    }
+
+    /// The edit row's version of the meta row's promise. The trash stands beside the pills, once,
+    /// outside the spellings `ViewThatFits` chooses between — so every spelling has to fit next to
+    /// it, and the glyph one has to at the largest text size, or the row runs off the sheet
+    /// instead of quietening down. The short one is held at the default size: the trash costs the
+    /// pills no words there.
+    @Test("the edit row's pills fit beside the trash: glyphs at the largest size, words at default")
+    func editRowFitsWithTheTrashAtAccessibility5() {
+        let budget = Self.composeContentWidth
+        let cases: [(ComposeMetaRow.Spelling, DynamicTypeSize)] = [
+            (.glyph, .accessibility5), (.short, .large),
+        ]
+        for (spelling, typeSize) in cases {
+            for count in [0, 12] {
+                let pills = LayoutProbe.idealWidth(
+                    ComposeEditPills(
+                        spelling: spelling,
+                        stage: .constant(ComposeStage()),
+                        attachmentCount: count,
+                        date: .constant(Self.chosenDate),
+                        visibility: .constant(.protected)
+                    ),
+                    typeSize: typeSize
+                )
+                let trash = LayoutProbe.idealWidth(Self.trash, typeSize: typeSize)
+                let row = pills + DesignTokens.Space.snug + trash
+                #expect(
+                    row <= budget,
+                    "\(spelling) at \(typeSize): pills \(pills)pt + trash \(trash)pt of \(budget)"
+                )
+            }
+        }
+    }
+
     /// Loading a photo must not resize anything. The spinner is drawn ON the glyph rather than
     /// beside it for exactly this reason — beside it, every pill to the right would shift for as
     /// long as the import took.

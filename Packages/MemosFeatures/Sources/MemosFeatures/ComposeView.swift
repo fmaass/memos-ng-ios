@@ -479,30 +479,6 @@ public struct ComposeView: View {
                 metaRow
             } else {
                 editRow
-                    .alert(
-                        widening.title,
-                        isPresented: Binding(
-                            get: { widening.pending != nil },
-                            set: {
-                                if !$0 { _ = widening.answer(widening.pending, confirmed: false) }
-                            }
-                        ),
-                        presenting: widening.pending
-                    ) { pending in
-                        Button("Make \(pending.question.to.label)") {
-                            if let yes = widening.answer(pending, confirmed: true) {
-                                send(visibility: yes.change)
-                            }
-                        }
-                        Button("Cancel", role: .cancel) {
-                            _ = widening.answer(pending, confirmed: false)
-                        }
-                    } message: { pending in
-                        Text(pending.question.sentence)
-                    }
-                if let delete {
-                    deleteRow(delete)
-                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -634,36 +610,63 @@ public struct ComposeView: View {
         }
     }
 
-    /// An edit's two controls: what to add, and when the memo happened.
+    /// An edit's controls: what to add, when the memo happened and who sees it — and, on a memo
+    /// of mine, the trash at the far end of the SAME row (MEMNG-1031, owner 2026-10-28: a delete
+    /// line under the pills looked odd).
     ///
-    /// Two pills rather than the capture row's three, and the same discipline: nothing arrives or
-    /// leaves as the state changes, and `ViewThatFits` drops what each pill SAYS rather than
-    /// reflowing the row, so the last spelling is a promise that it fits at any text size.
+    /// The capture row's discipline: nothing arrives or leaves as the state changes, and
+    /// `ViewThatFits` drops what each pill SAYS rather than reflowing the row, so the last
+    /// spelling is a promise that it fits at any text size.
+    ///
+    /// The trash stands OUTSIDE the spellings, once, at a fixed size. Inside them it would be
+    /// built once per spelling, each copy carrying the delete question; outside, the stack sizes
+    /// it first and offers the pills what is left, so the spelling they take is one that fits
+    /// beside it — `DynamicTypeFittingTests` holds the glyph one to that at the largest size. The
+    /// widening question sits on the pills and the delete question on the trash: two siblings, as
+    /// they were when the delete had a line of its own, rather than two alerts on one view.
     private var editRow: some View {
-        ViewThatFits(in: .horizontal) {
-            editPills(.short)
-            editPills(.glyph)
+        HStack(spacing: DesignTokens.Space.snug) {
+            ViewThatFits(in: .horizontal) {
+                editPills(.short)
+                editPills(.glyph)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .alert(
+                widening.title,
+                isPresented: Binding(
+                    get: { widening.pending != nil },
+                    set: {
+                        if !$0 { _ = widening.answer(widening.pending, confirmed: false) }
+                    }
+                ),
+                presenting: widening.pending
+            ) { pending in
+                Button("Make \(pending.question.to.label)") {
+                    if let yes = widening.answer(pending, confirmed: true) {
+                        send(visibility: yes.change)
+                    }
+                }
+                Button("Cancel", role: .cancel) {
+                    _ = widening.answer(pending, confirmed: false)
+                }
+            } message: { pending in
+                Text(pending.question.sentence)
+            }
+            if let delete {
+                deleteRow(delete)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func editPills(_ spelling: ComposeMetaRow.Spelling) -> some View {
-        HStack(spacing: DesignTokens.Space.snug) {
-            PhotosPickerPill(
-                stage: $stage,
-                count: imports.attachments.count,
-                isImporting: imports.isImporting,
-                spelling: spelling
-            )
-            // Not clearable and never Auto: a memo being edited already has a date, and the
-            // files already on it carry no capture instant this client has ever read. Edit Auto is
-            // its own ticket.
-            MemoDateRow(date: $date, clearable: false, spelling: spelling)
-            VisibilityMenu(
-                selection: $visibilityPick.chosen, accountDefault: nil, spelling: spelling,
-                offersDefault: false
-            )
-        }
+        ComposeEditPills(
+            spelling: spelling,
+            stage: $stage,
+            attachmentCount: imports.attachments.count,
+            isImporting: imports.isImporting,
+            date: $date,
+            visibility: $visibilityPick.chosen
+        )
     }
 
     /// The three things a capture carries besides its words: what is attached, when it happened,
@@ -703,32 +706,22 @@ public struct ComposeView: View {
     /// alert attached to a view with a sheet over it is the classic way to make a presentation
     /// silently never appear.
     private func deleteRow(_ delete: ComposeDelete) -> some View {
-        Button(role: .destructive) {
-            delete.send(.tapped)
-        } label: {
-            Label("Delete memo", systemImage: "trash")
-                .font(.footnote.weight(.medium))
-        }
-        .buttonStyle(.borderless)
-        // The destructive role reddens the WORDS; the glyph beside them is drawn in the inherited
-        // tint, which is this app's green — so the one row that should read as dangerous had a
-        // friendly icon on it.
-        .tint(.red)
-        .alert(
-            "Delete this memo?",
-            isPresented: .init(
-                get: { delete.isAsking },
-                set: { if !$0 { delete.send(.cancelled) } }
-            )
-        ) {
-            Button("Delete", role: .destructive) { delete.send(.confirmed) }
-            Button("Cancel", role: .cancel) { delete.send(.cancelled) }
-        } message: {
-            Text(
-                "It is removed from the server, with anything attached to it."
-                    + " This cannot be undone."
-            )
-        }
+        EditTrashButton(delete: delete)
+            .alert(
+                "Delete this memo?",
+                isPresented: .init(
+                    get: { delete.isAsking },
+                    set: { if !$0 { delete.send(.cancelled) } }
+                )
+            ) {
+                Button("Delete", role: .destructive) { delete.send(.confirmed) }
+                Button("Cancel", role: .cancel) { delete.send(.cancelled) }
+            } message: {
+                Text(
+                    "It is removed from the server, with anything attached to it."
+                        + " This cannot be undone."
+                )
+            }
     }
 
     private func pills(_ verbosity: ComposeMetaRow.Verbosity) -> some View {
@@ -1346,6 +1339,91 @@ struct ComposeMetaPills: View {
                 spelling: verbosity.visibility
             )
         }
+    }
+}
+
+/// An edit's three pills at one spelling — extracted, like `ComposeMetaPills`, so the row's fit is
+/// measured rather than eyeballed.
+struct ComposeEditPills: View {
+    let spelling: ComposeMetaRow.Spelling
+    @Binding var stage: ComposeStage
+    let attachmentCount: Int
+    var isImporting: Bool = false
+    @Binding var date: Date?
+    @Binding var visibility: MemoVisibility?
+
+    var body: some View {
+        HStack(spacing: DesignTokens.Space.snug) {
+            PhotosPickerPill(
+                stage: $stage,
+                count: attachmentCount,
+                isImporting: isImporting,
+                spelling: spelling
+            )
+            // Not clearable and never Auto: a memo being edited already has a date, and the
+            // files already on it carry no capture instant this client has ever read. Edit Auto is
+            // its own ticket.
+            MemoDateRow(date: $date, clearable: false, spelling: spelling)
+            VisibilityMenu(
+                selection: $visibility, accountDefault: nil, spelling: spelling,
+                offersDefault: false
+            )
+        }
+    }
+}
+
+/// The trash at the far end of an edit's pill row: a glyph, no words, and red (MEMNG-1031).
+///
+/// Red has to come from here. The destructive role reddens a TITLE, and with the words gone there
+/// is none; the glyph, and the highlight a borderless button draws when pressed, take the
+/// inherited tint, which is this app's green — so the one control that should read as dangerous
+/// would be the friendliest thing in the row. `EditTrashLook` paints it red at rest and pressed.
+///
+/// The label keeps its title, so VoiceOver still reads "Delete memo"; only the style drops it.
+/// The glyph takes the pills' font and their vertical padding, so the row stays one height.
+struct EditTrashButton: View {
+    let delete: ComposeDelete
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        Button(role: .destructive) {
+            delete.send(.tapped)
+        } label: {
+            Label("Delete memo", systemImage: "trash")
+                .labelStyle(.iconOnly)
+                .font(.subheadline.weight(.medium))
+                .padding(.vertical, DesignTokens.Space.snug)
+                // Fit or quieten, as the pills do: at the accessibility sizes the glyph alone is a
+                // finger's width, and the padding is what would push the glyph row off the sheet.
+                .padding(
+                    .horizontal, typeSize.isAccessibilitySize ? 0 : DesignTokens.Space.tight
+                )
+                .contentShape(.rect)
+        }
+        .buttonStyle(EditTrashStyle())
+        // Sized before the pills are, so they are offered only what is left beside it.
+        .fixedSize()
+    }
+}
+
+struct EditTrashStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        EditTrashLook(label: configuration.label, isPressed: configuration.isPressed)
+    }
+}
+
+/// What the trash looks like, apart from the style that hands it `isPressed`: a test can draw
+/// both states of this, where it cannot build the configuration a style is given.
+struct EditTrashLook<Content: View>: View {
+    let label: Content
+    let isPressed: Bool
+
+    var body: some View {
+        label
+            .foregroundStyle(.red)
+            // Pressed DIMS the red rather than swapping it for the highlight colour, which is the
+            // inherited green.
+            .opacity(isPressed ? 0.4 : 1)
     }
 }
 

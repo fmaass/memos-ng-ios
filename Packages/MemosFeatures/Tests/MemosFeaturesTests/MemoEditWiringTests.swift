@@ -18,6 +18,16 @@ enum ScreenProbe {
         of view: some View,
         size: CGSize = CGSize(width: 393, height: 852)
     ) -> [String] {
+        elements(of: view, size: size).map(\.label)
+    }
+
+    /// The same reading with WHERE each element is, in the window's coordinates — for the
+    /// assertions about a layout that only a laid-out screen can answer, such as two controls
+    /// sharing a row.
+    static func elements(
+        of view: some View,
+        size: CGSize = CGSize(width: 393, height: 852)
+    ) -> [(label: String, frame: CGRect)] {
         let host = UIHostingController(rootView: NavigationStack { view })
         let window = UIWindow(frame: CGRect(origin: .zero, size: size))
         window.rootViewController = host
@@ -29,7 +39,7 @@ enum ScreenProbe {
         RunLoop.current.run(until: Date().addingTimeInterval(0.4))
         host.view.layoutIfNeeded()
 
-        var found: [String] = []
+        var found: [(label: String, frame: CGRect)] = []
         collect(window, into: &found)
         window.isHidden = true
         window.rootViewController = nil
@@ -59,10 +69,10 @@ enum ScreenProbe {
         window.rootViewController = nil
     }
 
-    private static func collect(_ node: Any, into found: inout [String]) {
+    private static func collect(_ node: Any, into found: inout [(label: String, frame: CGRect)]) {
         if let element = node as? NSObject {
             if let label = element.accessibilityLabel, !label.isEmpty {
-                found.append(label)
+                found.append((label, element.accessibilityFrame))
             }
             if let children = element.accessibilityElements {
                 for child in children { collect(child, into: &found) }
@@ -548,6 +558,135 @@ struct MemoDeleteWiringTests {
             "the probe found nothing of the new-memo sheet: \(creating)"
         )
         #expect(!creating.contains("Delete memo"), "a new capture offered to delete itself")
+    }
+
+    // MARK: - the trash, at the end of the pill row (MEMNG-1031)
+
+    private func editSheet(delete: ComposeDelete?) -> ComposeView {
+        ComposeView(
+            mode: .edit(
+                uid: "m1", content: "the boiler man", createdAt: created, attachments: []
+            ),
+            delete: delete
+        ) { _ in .saved }
+    }
+
+    /// The owner's layout, read off a laid-out screen rather than off the body: the trash shares
+    /// the pills' row, sits after all three of them at the row's far edge, and is there once —
+    /// there is no delete line below. Asked at the default size and at the largest, because the
+    /// largest is where a fourth control would push the row onto a second line or off the sheet.
+    @Test("the trash ends the pill row, once, at the default and the largest text size")
+    func theTrashEndsThePillRow() throws {
+        let width: CGFloat = 393
+        for typeSize in [DynamicTypeSize.large, .accessibility5] {
+            let found = ScreenProbe.elements(
+                of: editSheet(delete: ComposeDelete(isAsking: false, send: { _ in }))
+                    .environment(\.dynamicTypeSize, typeSize),
+                size: CGSize(width: width, height: 852)
+            )
+            let trashes = found.filter { $0.label == "Delete memo" }
+            // Once, counted against a sibling rather than against one: the probe reaches this
+            // part of the tree by two routes and lists what it finds once per route
+            // (`onePhotosPillOnTheSheet`), so a second trash shows as twice the date pills.
+            let dates = found.filter { $0.label == "Memo date" }.count
+            #expect(dates > 0, "\(typeSize): the probe saw no pill row: \(found.map(\.label))")
+            #expect(trashes.count == dates, "\(typeSize): \(trashes.count) trashes, \(dates) dates")
+            let trash = try #require(trashes.first, "\(typeSize): \(found.map(\.label))")
+            let photos = try #require(found.first { $0.label == "Add photos or videos" })
+            let date = try #require(found.first { $0.label == "Memo date" })
+            let visibility = try #require(found.first { $0.label.hasPrefix("Visibility:") })
+            // The positive control: a probe that read no geometry would make every comparison
+            // below hold vacuously.
+            #expect(trash.frame.width > 0 && photos.frame.width > 0, "no geometry: \(found)")
+            for pill in [photos, date, visibility] {
+                #expect(
+                    abs(pill.frame.midY - trash.frame.midY) < 2,
+                    "\(typeSize): \(pill.label) y \(pill.frame.midY), trash y \(trash.frame.midY)"
+                )
+                #expect(
+                    pill.frame.maxX <= trash.frame.minX + 0.5,
+                    "\(typeSize): \(pill.label) to \(pill.frame.maxX), trash \(trash.frame.minX)"
+                )
+            }
+            // The right edge is the left one mirrored: the pills start at the row's leading inset.
+            #expect(
+                abs(trash.frame.maxX - (width - photos.frame.minX)) < 2,
+                "\(typeSize): trash to \(trash.frame.maxX), row to \(width - photos.frame.minX)"
+            )
+        }
+    }
+
+    /// A memo that is not mine is edited with no delete handed over, and its row is the pills
+    /// alone — the trash is decided by the argument, not drawn regardless.
+    @Test("an edit sheet handed no delete draws no trash")
+    func noDeleteNoTrash() {
+        let found = ScreenProbe.labels(of: editSheet(delete: nil))
+        #expect(found.contains("Add photos or videos"), "the probe saw no pill row: \(found)")
+        #expect(!found.contains("Delete memo"), "a trash with nothing to delete: \(found)")
+    }
+
+    /// The trash asks the question it always asked: pressing it sends `.tapped`, and only that —
+    /// the alert is raised by the flow answering it, unchanged.
+    @Test("pressing the trash sends the tap that raises the existing question")
+    func pressingTheTrashSendsTapped() async {
+        let sent = Box<[MemoEditFlow.DeleteEvent]>([])
+        let pressed = await PressProbe.withScreen(
+            editSheet(delete: ComposeDelete(isAsking: false, send: { sent.value.append($0) })),
+            height: 852
+        ) { screen in
+            screen.press("Delete memo")
+        }
+        #expect(pressed, "the trash took no press")
+        #expect(sent.value == [.tapped])
+    }
+
+    /// The pixels the trash paints that carry any ink, and how many are red.
+    ///
+    /// Rendered over nothing, so an unpainted pixel is black; ink is any channel lit. Red is
+    /// judged by proportion, because an antialiased edge is the same colour at less coverage.
+    private static func ink(_ view: some View) -> (inked: Int, red: Int)? {
+        guard let grid = PixelGrid.of(view, size: CGSize(width: 64, height: 64)) else {
+            return nil
+        }
+        let inked = grid.joined().filter { max($0.r, $0.g, $0.b) > 40 }
+        let red = inked.filter { Int($0.g) * 2 < Int($0.r) && Int($0.b) * 2 < Int($0.r) }
+        return (inked.count, red.count)
+    }
+
+    /// Red at rest and red pressed, under the app's own green tint and in both appearances. With
+    /// no words left the destructive role reddens nothing, and a borderless button draws its glyph
+    /// and its highlight in the inherited tint — so the trash was green until it carried a look of
+    /// its own. The pressed state is drawn through that look, the one the button's style hands
+    /// `isPressed` to, because a `ButtonStyleConfiguration` cannot be built in a test.
+    @Test("the trash is red at rest and pressed, under the app's green tint")
+    func theTrashIsRed() throws {
+        for scheme in [ColorScheme.light, .dark] {
+            let atRest = try #require(
+                Self.ink(
+                    EditTrashButton(delete: ComposeDelete(isAsking: false, send: { _ in }))
+                        .tint(DesignTokens.accent)
+                        .environment(\.colorScheme, scheme)
+                ),
+                "the trash rendered nothing"
+            )
+            #expect(atRest.inked > 10, "\(scheme): the trash painted \(atRest.inked) pixels")
+            #expect(atRest.red == atRest.inked, "\(scheme) at rest: \(atRest)")
+            for isPressed in [false, true] {
+                let look = try #require(
+                    Self.ink(
+                        EditTrashLook(
+                            label: Image(systemName: "trash").font(.title),
+                            isPressed: isPressed
+                        )
+                        .tint(DesignTokens.accent)
+                        .environment(\.colorScheme, scheme)
+                    ),
+                    "the look rendered nothing"
+                )
+                #expect(look.inked > 10, "\(scheme) pressed \(isPressed): \(look.inked) pixels")
+                #expect(look.red == look.inked, "\(scheme) pressed \(isPressed): \(look)")
+            }
+        }
     }
 
     // MARK: - the claim, and the order two events can arrive in
