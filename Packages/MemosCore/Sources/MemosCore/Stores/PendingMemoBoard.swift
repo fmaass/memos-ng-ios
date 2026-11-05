@@ -84,8 +84,12 @@ public struct PendingMemoBoard: Sendable, Equatable {
             guard let uid = card.resolvedUID else { continue }
             keys[uid] = card.id
             // The count the card last showed: a card kept after its capture left the queue still
-            // holds the job as the queue last listed it, released and counted.
-            if card.job.missingItems > 0 { missing[uid] = card.job.missingItems }
+            // holds the job as the queue last listed it, released and counted. A zero replaces it
+            // only once nothing is still arriving: a re-post that brought the photo back answers
+            // the line (MEMNG-1166), while one still staging has not said yet.
+            guard !card.job.stillArriving else { continue }
+            let count = card.job.missingItems
+            missing[uid] = count > 0 ? count : nil
         }
         // Newest capture first, above the server's own memos.
         cards = next.sorted { $0.date > $1.date }

@@ -183,6 +183,65 @@ struct PendingMemoBoardTests {
         #expect(board.missingItems(for: "m1") == 0)
     }
 
+    @Test("a re-post that brings the missing photo takes the line off the memo (MEMNG-1166)")
+    func repostedPhotoClearsTheMissingLine() {
+        var board = PendingMemoBoard()
+        var capture = job(files: 1)
+        capture.notArrived = 1
+        var other = job("also short", at: 1_750_000_100, files: 1)
+        other.notArrived = 1
+        board.show([capture, other], resolved: [:])
+        // The create resolved while a visibility edit was still owed: the capture stays queued.
+        var resolved = capture
+        resolved.resolvedMemoUID = "m1"
+        board.show([resolved, other], resolved: [other.id: "m2"])
+        #expect(board.missingItems(for: "m1") == 1)
+        // The edit was refused for good, so the capture could go back to the editor.
+        var reopened = resolved
+        reopened.cancelledAt = Date()
+        board.show([reopened], resolved: [:])
+        #expect(board.missingItems(for: "m1") == 1)
+        // Re-posted on the same manifest with the photo restored (`Outbox.resubmit`).
+        var reposted = reopened
+        reposted.cancelledAt = nil
+        reposted.notArrived = nil
+        let photo = OutboxFile(
+            relativePath: "back.heic", filename: "IMG_9.HEIC", mime: "image/heic", byteSize: 100)
+        reposted.files.append(photo)
+        board.show([reposted], resolved: [:])
+        #expect(board.missingItems(for: "m1") == 0)
+        // Only the memo that was re-posted: another memo's line still stands.
+        #expect(board.missingItems(for: "m2") == 1)
+        // The edit applied; the job left the queue and its card settled. The line stays gone.
+        board.show([], resolved: [:])
+        board.settle([reposted.id])
+        #expect(board.missingItems(for: "m1") == 0)
+        #expect(board.missingItems(for: "m2") == 1)
+    }
+
+    @Test("a re-post still staging keeps the line until what arrived is known (MEMNG-1166)")
+    func repostStillStagingKeepsTheCount() {
+        var board = PendingMemoBoard()
+        var capture = job(files: 1)
+        capture.notArrived = 1
+        capture.resolvedMemoUID = "m1"
+        board.show([capture], resolved: [:])
+        #expect(board.missingItems(for: "m1") == 1)
+        // Files are still arriving: its zero means "not known yet", not "everything came".
+        var staging = capture
+        staging.notArrived = nil
+        staging.stagingLaunch = UUID()
+        #expect(staging.missingItems == 0)
+        board.show([staging], resolved: [:])
+        #expect(board.missingItems(for: "m1") == 1)
+        // The last file landed and nothing is owed: now the zero is definite.
+        var landed = staging
+        landed.stagingLaunch = nil
+        landed.notArrived = 0
+        board.show([landed], resolved: [:])
+        #expect(board.missingItems(for: "m1") == 0)
+    }
+
     @MainActor
     @Test("the timeline draws the missing line on the memo once the card has settled")
     func timelineCarriesTheMissingLineOntoTheMemo() async {
