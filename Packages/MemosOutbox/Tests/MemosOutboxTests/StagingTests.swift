@@ -432,6 +432,54 @@ struct StagingTests {
         #expect(await !harness.outbox.append([try source(harness, "c.heic")], to: id))
     }
 
+    // MEMNG-1173: the editor lets a capture go once. A release the disk refused is owed, and the
+    // next drain takes it — or the capture would sit arriving, its create held, until a relaunch.
+
+    @Test("a release the disk refused is taken by the next drain, with no second release asked")
+    func failedReleaseIsRetriedByTheNextDrain() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let id = try #require(
+            await harness.outbox.stage(
+                content: "dunes", visibility: nil, sources: [try source(harness, "a.heic")],
+                arriving: 1))
+        let restore = try Fixture.permissions(
+            0o500, on: harness.root.appending(path: "outbox").appending(path: "jobs"))
+        await harness.outbox.release(id)
+        restore()
+        // Positive control: the release did fail, and the capture is still arriving.
+        #expect(await harness.repository.job(id)?.stagingLaunch != nil)
+
+        await harness.outbox.start()
+
+        let released = try #require(await harness.repository.job(id))
+        #expect(released.stagingLaunch == nil, "the failed release was never taken again")
+        #expect(released.files.map(\.filename) == ["a.heic"])
+        #expect(await !harness.outbox.append([try source(harness, "b.heic")], to: id))
+    }
+
+    @Test("a launch's sweep the disk refused is taken by the next drain of the same launch")
+    func failedLeftoverSweepIsRetriedByTheNextDrain() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        // Left arriving by an editor of a launch that has since died.
+        let job = try await harness.repository.enqueue(
+            content: "beach", visibility: "PRIVATE", capturedAt: Date(),
+            binding: Fixture.binding(), sources: [try source(harness, "a.heic")],
+            stagingLaunch: UUID()
+        )
+        let restore = try Fixture.permissions(
+            0o500, on: harness.root.appending(path: "outbox").appending(path: "jobs"))
+        await harness.outbox.start()
+        restore()
+        #expect(await harness.repository.job(job.id)?.stagingLaunch != nil)
+
+        await harness.outbox.start()
+
+        let released = try #require(await harness.repository.job(job.id))
+        #expect(released.stagingLaunch == nil, "adoption runs once, so its sweep was never retried")
+    }
+
     @Test("a re-post clears what the card said had not arrived")
     func resubmitClearsTheMissingCount() async throws {
         let harness = try harness()

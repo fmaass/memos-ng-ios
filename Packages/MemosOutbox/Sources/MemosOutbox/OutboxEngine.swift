@@ -589,10 +589,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 for: current, credentials: planning, now: clock()
             ) {
             case .hold(let reason):
+                // A too-large hold is decided by `planning`'s limit, which may be the session's
+                // own: it stands only while that session does (MEMNG-1086).
                 await hold(
                     current, reason: reason,
                     error: OutboxPlanner.holdMessage(
-                        for: reason, of: current, credentials: planning))
+                        for: reason, of: current, credentials: planning),
+                    decidedUnder: reason == .tooLarge ? planning.epoch : nil)
                 return
             case .wait:
                 return
@@ -1464,7 +1467,11 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // every refused write below.
                 let error = OutboxPlanner.holdMessage(
                     for: reason, of: current, credentials: credentials)
-                if await !hold(current, reason: reason, error: error) { requestDrain() }
+                // A too-large hold stands only while the session whose limit decided it does.
+                let decider = reason == .tooLarge ? credentials.epoch : nil
+                if await !hold(current, reason: reason, error: error, decidedUnder: decider) {
+                    requestDrain()
+                }
                 return .done
             case .wait:
                 return .done
@@ -1680,14 +1687,19 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         return acquired
     }
 
-    /// A landed signInRequired hold is earned under the grant this engine holds now: one refused
-    /// under a replaced grant lands as a back-off instead, so the latest acquisition is its grant.
-    private func noteSignInHold(_ job: UploadJob) {
+    /// A landed signInRequired hold is earned under the grant its refusal PRESENTED — the epoch
+    /// the write carried, which the repository found still standing when it wrote the hold (one
+    /// refused under a replaced grant lands as a back-off instead). Never the latest acquisition:
+    /// acquisitions finish out of order, so that one can belong to a grant older or newer than
+    /// the refusal's (MEMNG-1183). Only a write whose epoch is unknown — read as current where it
+    /// was written — falls back to the latest acquisition. A held row merely rewritten keeps the
+    /// grant it was first earned under.
+    private func noteSignInHold(_ job: UploadJob, earnedUnder epoch: Int?) {
         guard job.state == .held, job.holdReason == .signInRequired else {
             signInHeldUnder[job.id] = nil
             return
         }
-        if signInHeldUnder[job.id] == nil { signInHeldUnder[job.id] = latestEpoch }
+        if signInHeldUnder[job.id] == nil { signInHeldUnder[job.id] = epoch ?? latestEpoch }
     }
 
     /// Signing in again releases what "Sign in again" held (MEMNG-1035), through "Try again"'s own
@@ -1746,11 +1758,25 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     }
 
     /// Records what a write left and re-arms the timer on it.
-    private func wrote(_ job: UploadJob) {
+    ///
+    /// - Parameter epoch: the grant the write was decided under — the epoch it carried into the
+    ///   repository — or nil where none was named.
+    private func wrote(_ job: UploadJob, earnedUnder epoch: Int?) {
         Self.logReason(of: job)
-        noteSignInHold(job)
+        noteSignInHold(job, earnedUnder: epoch)
+        let before = wakeDeadlines[job.id] ?? []
         noteDeadlines(of: job)
         rearmDeadlineTimer()
+        // A deadline this write set that is already behind the clock (MEMNG-1183). The timer only
+        // arms a future one, and the deadline was computed before the write's hop and kept on disk
+        // in whole seconds, so a write that landed late can leave a back-off due with nothing to
+        // wake it. Only a NEW deadline asks: one the row already carried was already somebody's,
+        // and `.distantPast` is a step's own "due now" that the pass writing it carries on with.
+        let now = clock()
+        let lapsed = (wakeDeadlines[job.id] ?? []).contains {
+            $0 < now && $0 != .distantPast && !before.contains($0)
+        }
+        if lapsed, schedulingGate.isOpen { requestDrain() }
     }
 
     /// Every hold and every wait that lands is logged by the reason's raw value — the string the
@@ -2066,7 +2092,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 presented: .thisLaunch(epoch: credentials.epoch), at: clock()
             )
             lastPersistenceFailure = nil
-            if let written { wrote(written) }
+            if let written { wrote(written, earnedUnder: credentials.epoch) }
             return written
         } catch {
             lastPersistenceFailure = Self.storageMessage(error)
@@ -2112,7 +2138,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         let checked = await withCurrentLimit(credentials)
         if let limit = checked.uploadLimit, OutboxPlanner.isOverLimit(file, limit: limit) {
             let message = OutboxPlanner.tooLargeMessage(file, over: limit)
-            if await !hold(job, reason: .tooLarge, error: message) { requestDrain() }
+            if await !hold(job, reason: .tooLarge, error: message, decidedUnder: checked.epoch) {
+                requestDrain()
+            }
             return nil
         }
         let request: URLRequest
@@ -2393,6 +2421,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
         let launch = uploads?.launch ?? OutboxUploadSession.processLaunch
         let provenance = headPresented ?? identity.provenance(currentLaunch: launch)
+        // The grant a sign-in hold this answer lands is earned under (MEMNG-1183); an earlier
+        // launch's task has none, and its refusal is never held as this grant's.
+        let presentedEpoch: Int?
+        switch provenance {
+        case .thisLaunch(let epoch): presentedEpoch = epoch
+        case .unknown: presentedEpoch = nil
+        }
         // Marked in progress for the write only, and released before the continuation below: a
         // drain that continuation asks for must not meet this answer's own mark.
         handOffsInProgress += 1
@@ -2413,7 +2448,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 at: clock()
             )
             lastPersistenceFailure = nil
-            if let written { wrote(written) }
+            if let written { wrote(written, earnedUnder: presentedEpoch) }
             if written == nil, let now = await repository.job(identity.jobID) {
                 refused = now.state != .creating
             }
@@ -2604,12 +2639,24 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         return true
     }
 
+    /// - Parameter epoch: the grant whose word decided this hold — for a too-large hold, the
+    ///   session whose upload limit refused the file (MEMNG-1086). Asked inside the repository
+    ///   beside the write: where that grant no longer stands the capture is written back exactly
+    ///   as it was, and a pass is asked for so it is planned again under the session that replaced
+    ///   it. Nil for a hold no grant decided.
     /// - Returns: false when the fence refused the write: the row moved and says something else.
     @discardableResult
-    private func hold(_ job: UploadJob, reason: HoldReason, error: String? = nil) async -> Bool {
+    private func hold(
+        _ job: UploadJob, reason: HoldReason, error: String? = nil, decidedUnder epoch: Int? = nil
+    ) async -> Bool {
         guard job.state != .held || job.holdReason != reason else { return true }
         // Its tails go with the write: `OutboxRepository` removes them wherever `.held` lands.
-        return await save(Self.holding(job, for: reason, error: error), matching: job) != nil
+        let written = await save(
+            Self.holding(job, for: reason, error: error), ifStillCurrent: epoch, matching: job,
+            else: job)
+        guard let written else { return false }
+        if written.state != .held { requestDrain() }
+        return true
     }
 
     /// The row `hold` writes, built in one place so `bank` can recognise it as a whole value.
@@ -2685,7 +2732,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 job, ifStillCurrent: epoch, matching: snapshot, else: fallback
             )
             lastPersistenceFailure = nil
-            if let written { wrote(written) }
+            if let written { wrote(written, earnedUnder: epoch) }
             return written
         } catch {
             lastPersistenceFailure = Self.storageMessage(error)

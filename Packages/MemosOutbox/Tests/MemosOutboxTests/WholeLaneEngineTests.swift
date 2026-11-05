@@ -4701,3 +4701,133 @@ struct UploadLimitMidDrainTests {
         #expect(saved.lastError == OutboxPlanner.tooLargeMessage(harness.file, over: 999))
     }
 }
+
+/// A too-large hold is decided under one session's limit and written a hop later (MEMNG-1086). A
+/// sign-in that lands in between ends the session whose limit decided it, so the hold is written
+/// only while that session's epoch still stands — asked inside the repository, beside the write —
+/// and otherwise the capture is left as it was and planned again under the session that replaced
+/// it. Each case holds the hold's own write open and replaces the session there.
+@Suite("Engine: a too-large hold is written only under the session whose limit decided it")
+struct UploadLimitEpochTests {
+    private static func limited(_ limit: Int64) -> OutboxCredentials {
+        var credentials = Fixture.credentials()
+        credentials.uploadLimit = limit
+        return credentials
+    }
+
+    /// The write a too-large decision makes, and only that one.
+    private static func holdingTooLarge(
+        _ repository: OutboxRepository, _ gate: TestGate
+    ) -> any OutboxPersisting {
+        GatedPersistence(repository, gate: gate, holdingWrite: { $0.holdReason == .tooLarge })
+    }
+
+    /// Signed in again, and the new session's limit takes the file.
+    private static func replaceSession(_ provider: SwitchableCredentials) {
+        provider.set(limited(1000))
+        provider.supersede()
+    }
+
+    @Test("chunk lane: replaced between the limit read and the hold write, the capture is not held")
+    func chunkLaneReplacedSessionIsNotHeld() async throws {
+        let http = ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("POST", "/api/uploads"):
+                return ScriptedHTTP.session(uid: "u1", chunkSize: 5 * 1024 * 1024, received: 0)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        let parked = TestGate()
+        let harness = try await Harness.make(
+            bytes: 1000, http: http, credentials: Self.limited(999),
+            persistence: { Self.holdingTooLarge($0, parked) })
+        defer { harness.cleanUp() }
+
+        let drain = Task { await harness.engine.drain() }
+        await parked.waitUntilParked()
+        // Positive control: the decision was taken — its write is what is parked — and nothing
+        // was sent for the file.
+        #expect(http.requests(method: "POST").isEmpty)
+        Self.replaceSession(harness.credentials)
+        await parked.open()
+        await drain.value
+        try await settled(harness.engine)
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.state != .held, "held under the limit of a session that had ended")
+        #expect(saved.holdReason == nil)
+        // Planned again under the session that replaced it, whose limit takes the file.
+        #expect(http.requests(method: "POST").contains { $0.url?.path() == "/api/uploads" })
+    }
+
+    @Test("whole lane: replaced between the limit read and the hold write, the capture is not held")
+    func wholeLaneReplacedSessionIsNotHeld() async throws {
+        let parked = TestGate()
+        let rig = try await WholeRig.make(
+            media: [WholeRig.Media(name: "picture.heic", bytes: 1000, mime: "image/heic")],
+            persistence: { Self.holdingTooLarge($0, parked) })
+        defer { rig.cleanUp() }
+        rig.credentials.set(Self.limited(999))
+
+        let drain = Task { await rig.engine.drain() }
+        await parked.waitUntilParked()
+        #expect(rig.uploadPosts == 0)
+        Self.replaceSession(rig.credentials)
+        await parked.open()
+        await drain.value
+        try await settled(rig.engine)
+
+        let saved = try await rig.reload()
+        #expect(saved.state != .held, "held under the limit of a session that had ended")
+        #expect(saved.holdReason == nil)
+        #expect(rig.uploadPosts == 1, "planned again under the session that replaced it")
+    }
+
+    @Test("a lost session's replacement: replaced before the hold write, the capture is not held")
+    func freshSessionReplacedIsNotHeld() async throws {
+        let parked = TestGate()
+        let rig = try await WholeRig.make(
+            persistence: { Self.holdingTooLarge($0, parked) },
+            prepare: WholeResumeTests.resumable(), headStatus: 404)
+        defer { rig.cleanUp() }
+        rig.credentials.set(Self.limited(999))
+
+        let drain = Task { await rig.engine.drain() }
+        await parked.waitUntilParked()
+        // The HEAD's 404 ran, and the size check refused the fresh session it would open.
+        #expect(rig.http.requests(method: "HEAD").count == 1)
+        #expect(rig.uploadPosts == 0)
+        Self.replaceSession(rig.credentials)
+        await parked.open()
+        await drain.value
+        try await settled(rig.engine)
+
+        let saved = try await rig.reload()
+        #expect(saved.state != .held, "held under the limit of a session that had ended")
+        #expect(saved.holdReason == nil)
+    }
+
+    @Test("control: under the session that decided it, the too-large hold is still written")
+    func sameSessionStillHolds() async throws {
+        let parked = TestGate()
+        let rig = try await WholeRig.make(
+            media: [WholeRig.Media(name: "picture.heic", bytes: 1000, mime: "image/heic")],
+            persistence: { Self.holdingTooLarge($0, parked) })
+        defer { rig.cleanUp() }
+        rig.credentials.set(Self.limited(999))
+
+        let drain = Task { await rig.engine.drain() }
+        await parked.waitUntilParked()
+        await parked.open()
+        await drain.value
+        try await settled(rig.engine)
+
+        let saved = try await rig.reload()
+        #expect(saved.state == .held)
+        #expect(saved.holdReason == .tooLarge)
+        #expect(rig.uploadPosts == 0)
+    }
+}

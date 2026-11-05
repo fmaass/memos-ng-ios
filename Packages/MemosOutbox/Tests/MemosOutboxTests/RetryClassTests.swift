@@ -489,4 +489,107 @@ struct RetryClassEdgeTests {
         #expect(posts.count == 2, "the release was owed, not spent on a list nobody read")
         #expect(await harness.reload() == nil)
     }
+
+    // MARK: - MEMNG-1183: the hold's own epoch, and a deadline the write outran
+
+    @Test("a sign-in hold is told the grant its refusal presented, not the latest acquisition's")
+    func signInHoldKeepsTheRefusalsEpoch() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1 ? OutboxHTTPResponse(statusCode: 401) : Self.created
+        }
+        // Held once the hold is ON DISK, before the engine hears what landed.
+        let landed = TestGate()
+        let harness = try await Harness.make(
+            bytes: 0, http: http,
+            persistence: {
+                GatedPersistence(
+                    $0, gate: landed,
+                    holdingWrite: { $0.state == .held && $0.holdReason == .signInRequired },
+                    afterWrite: true)
+            })
+        defer { harness.cleanUp() }
+        // A capture no pass sends — held for another reason — whose chunk answer acquires a
+        // credential of its own, independently of the drain.
+        let picture = try Fixture.file(in: harness.root, named: "other.heic", bytes: 10)
+        let other = try await harness.repository.enqueue(
+            content: "another memo", visibility: "PRIVATE", capturedAt: harness.now,
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: picture, filename: "other.heic", mime: "image/heic")])
+        try await harness.repository.save(other.held(.serverRefused))
+
+        let drain = Task { await harness.engine.drain() }
+        await landed.waitUntilParked()
+        // The hold was earned and written under the first grant. Signed in again now, and an
+        // acquisition under the new grant finishes before the drain hears what it wrote.
+        harness.credentials.supersede()
+        let file = other.files[0]
+        await harness.engine.handle(
+            ChunkResult(
+                identity: OutboxTaskIdentity(
+                    jobID: other.id, fileID: file.id, offset: file.bytesConfirmed,
+                    attempt: file.uploadAttempt),
+                statusCode: 404))
+        await landed.open()
+        await drain.value
+        try await settled(harness.engine)
+        #expect(posts.count >= 1)
+
+        // The first drain under the new grant: the hold was earned under the old one, so it is
+        // released and sent — not mistaken for one earned under the grant that replaced it.
+        await harness.engine.drain()
+        try await settled(harness.engine)
+
+        #expect(posts.count == 2, "a hold labelled with the newer grant is never released")
+        #expect(await harness.reload() == nil)
+        #expect(await harness.repository.job(other.id)?.holdReason == .serverRefused)
+    }
+
+    @Test("a back-off whose deadline passed before its write landed asks for a pass itself")
+    func lapsedDeadlineAsksForADrain() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1
+                ? OutboxHTTPResponse(statusCode: 503, headers: ["Retry-After": "0"])
+                : Self.created
+        }
+        // The back-off's write, held before it lands, so the clock can run past its deadline.
+        let landing = TestGate()
+        let harness = try await Harness.make(
+            bytes: 0, http: http,
+            persistence: {
+                GatedPersistence($0, gate: landing, holdingWrite: { $0.waitReason == .retrying })
+            },
+            clockStart: Date(timeIntervalSince1970: 1_750_000_000.9))
+        defer { harness.cleanUp() }
+
+        let drain = Task { await harness.engine.drain() }
+        await landing.waitUntilParked()
+        // Decided at .9 for .9 + the floor, kept on disk as whole seconds; the write lands later
+        // than either.
+        harness.clock.advance(UploadBudget.shortestRetryAfter + 0.3)
+        await landing.open()
+        await drain.value
+        try await settled(harness.engine)
+
+        #expect(posts.count == 2, "a deadline already past is no timer's to meet")
+        #expect(await harness.reload() == nil)
+    }
+
+    @Test("control: a back-off that lands before its deadline is the timer's, and no pass is asked")
+    func timelyBackOffWaitsForTheTimer() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1
+                ? OutboxHTTPResponse(statusCode: 503, headers: ["Retry-After": "0"])
+                : Self.created
+        }
+        let harness = try await Harness.make(
+            bytes: 0, http: http, clockStart: Date(timeIntervalSince1970: 1_750_000_000.9))
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+        try await settled(harness.engine)
+
+        #expect(posts.count == 1)
+        #expect(await harness.reload()?.waitReason == .retrying)
+        #expect(!harness.sleeper.armed.isEmpty, "the timer is the wake")
+    }
 }

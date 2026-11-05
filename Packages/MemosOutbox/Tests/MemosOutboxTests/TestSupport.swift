@@ -433,15 +433,34 @@ actor TestGate {
 }
 
 /// The real queue with its first write held open, so a test can act while a drain is mid-write.
+///
+/// `holdingWrite` picks WHICH fenced write is held — by the candidate it offers — and `afterWrite`
+/// holds it once the real repository has written it, so a test can act between the bytes landing
+/// and the engine hearing what landed.
 actor GatedPersistence: OutboxPersisting {
     private let inner: OutboxRepository
     private let gate: TestGate
     private var held: Int
+    private let holdsWrite: @Sendable (UploadJob) -> Bool
+    private let afterWrite: Bool
 
-    init(_ inner: OutboxRepository, gate: TestGate, holding: Int = 1) {
+    init(
+        _ inner: OutboxRepository, gate: TestGate, holding: Int = 1,
+        holdingWrite: @escaping @Sendable (UploadJob) -> Bool = { _ in true },
+        afterWrite: Bool = false
+    ) {
         self.inner = inner
         self.gate = gate
         self.held = holding
+        self.holdsWrite = holdingWrite
+        self.afterWrite = afterWrite
+    }
+
+    /// Whether this write is one to hold; counted down only for the writes it picks.
+    private func claimsHold(_ job: UploadJob) -> Bool {
+        guard held > 0, holdsWrite(job) else { return false }
+        held -= 1
+        return true
     }
 
     func loadJobs() async throws -> [UploadJob] { try await inner.loadJobs() }
@@ -449,11 +468,10 @@ actor GatedPersistence: OutboxPersisting {
     func job(_ id: UUID) async -> UploadJob? { await inner.job(id) }
 
     func save(_ job: UploadJob) async throws {
-        if held > 0 {
-            held -= 1
-            await gate.pass()
-        }
+        let holds = claimsHold(job)
+        if holds, !afterWrite { await gate.pass() }
         try await inner.save(job)
+        if holds, afterWrite { await gate.pass() }
     }
 
     func save(
@@ -462,13 +480,13 @@ actor GatedPersistence: OutboxPersisting {
         matching snapshot: UploadJob,
         else fallback: UploadJob
     ) async throws -> UploadJob? {
-        if held > 0 {
-            held -= 1
-            await gate.pass()
-        }
-        return try await inner.save(
+        let holds = claimsHold(job)
+        if holds, !afterWrite { await gate.pass() }
+        let written = try await inner.save(
             job, ifStillCurrent: epoch, matching: snapshot, else: fallback
         )
+        if holds, afterWrite { await gate.pass() }
+        return written
     }
 
     func delete(_ job: UploadJob) async { await inner.delete(job) }

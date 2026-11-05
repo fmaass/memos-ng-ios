@@ -111,6 +111,10 @@ public final class Outbox {
     /// engine's own `isDraining` cannot exclude them from each other, and the interleaving loses a
     /// cursor. Held for the life of the process, because adoption happens once.
     private var adoption: Task<Void, Never>?
+    /// Captures whose release the disk refused, owed to the next drain (MEMNG-1173).
+    private var releasesOwed: Set<UUID> = []
+    /// The launch's sweep of other launches' arriving captures failed, and is owed likewise.
+    private var leftoverSweepOwed = false
     /// A withdrawal the disk refused to record, whose cancellation only this process can issue.
     private var unrecordedWithdrawal: OutboxWithdrawal?
 
@@ -421,7 +425,13 @@ public final class Outbox {
             await uploads?.attach(engine)
             // A capture an editor of a launch that has since died was still bringing files into:
             // nothing more will arrive, so it is let go with what it holds before any drain.
-            _ = try? await repository.releaseStaging(leftOverBefore: launch)
+            do {
+                try await repository.releaseStaging(leftOverBefore: launch)
+            } catch {
+                // Owed, not dropped (MEMNG-1173): adoption runs once per launch, so nothing else
+                // would ever sweep again in this one. The next drain takes it.
+                leftoverSweepOwed = true
+            }
             // A withdrawal whose cancellation the last process never issued, issued now — in
             // every launch, whether or not anyone is signed in to drain with — and before any
             // drain, which waits for this adoption.
@@ -435,6 +445,7 @@ public final class Outbox {
     /// every foreground — the engine refuses to drain twice at once.
     public func start() async {
         await adopt()
+        await releaseOwedStaging()
         await engine.drain()
     }
 
@@ -442,7 +453,37 @@ public final class Outbox {
     /// courtesy the first caller happens to observe.
     private func drainAfterAdoption() async {
         await adopted()
+        await releaseOwedStaging()
         await engine.drain()
+    }
+
+    /// Lets go, before a drain, of what a release the disk refused left arriving (MEMNG-1173): the
+    /// editor lets a capture go once, and the launch's sweep runs once, so a failed write is
+    /// owed here rather than dropped — dropped, the capture sits with its create held until a
+    /// relaunch. Claimed synchronously before the first hop: an overlapping caller finds nothing
+    /// owed and refuses rather than joins, so each owed release is one write. One that fails again
+    /// is owed to the drain after.
+    private func releaseOwedStaging() async {
+        let sweep = leftoverSweepOwed
+        let owed = releasesOwed
+        guard sweep || !owed.isEmpty else { return }
+        leftoverSweepOwed = false
+        releasesOwed = []
+        if sweep {
+            do {
+                try await repository.releaseStaging(leftOverBefore: launch)
+            } catch {
+                leftoverSweepOwed = true
+            }
+        }
+        for jobID in owed {
+            do {
+                _ = try await repository.releaseStaging(jobID, arrivingFrom: launch)
+            } catch {
+                releasesOwed.insert(jobID)
+            }
+        }
+        await refresh()
     }
 
     public func refresh() async {
@@ -680,7 +721,12 @@ public final class Outbox {
     /// The editor is done bringing files into this capture: the last landed or failed, or its time
     /// ran out. The create may go once what is here is up.
     public func release(_ jobID: UUID) async {
-        _ = try? await repository.releaseStaging(jobID, arrivingFrom: launch)
+        do {
+            _ = try await repository.releaseStaging(jobID, arrivingFrom: launch)
+        } catch {
+            // Owed to the next drain — the one below first (MEMNG-1173).
+            releasesOwed.insert(jobID)
+        }
         await refresh()
         await drainAfterAdoption()
     }
