@@ -6,38 +6,52 @@ import SwiftUI
 /// after the last capture lands. It lives in the list, under the pull-to-refresh, and never in the
 /// bar (ADR-0008). A tap opens the transfers sheet.
 ///
-/// It sets no repeating timer: it redraws when the ledger changes, and once more at the instant a
-/// lingering strip goes.
+/// Whether its row is in the list is the timeline's call (`TransfersStripPlace`, fed by
+/// `TransfersStripWatch`): a strip kept there while the reader is away from the top still has a
+/// line to say.
 struct TransfersStrip: View {
     let ledger: TransferLedger
     let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: DesignTokens.Space.snug) {
+                Image(systemName: ledger.jobs.isEmpty ? "checkmark.circle" : "arrow.up.circle")
+                Text(TransfersPresentation.shownLine(for: ledger, now: Date()))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.vertical, DesignTokens.Space.snug)
+            .padding(.horizontal, DesignTokens.Space.regular)
+            .background(.quaternary.opacity(0.5), in: .capsule)
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Shows every upload")
+    }
+}
+
+/// Reports whether the ledger wants a strip, from outside the list's rows: a row that is not in
+/// the list cannot watch for the moment it should be. It sets no repeating timer: it is read again
+/// when the ledger changes, and once more at the instant a lingering strip goes.
+struct TransfersStripWatch: View {
+    let ledger: TransferLedger
+    let enabled: Bool
+    let report: (Bool) -> Void
 
     /// Written when the linger runs out, so the body is read again and finds the strip gone.
     @State private var armedAt = Date()
 
     var body: some View {
-        let now = Swift.max(Date(), armedAt)
-        if let line = TransfersPresentation.stripLine(for: ledger, now: now) {
-            Button(action: open) {
-                HStack(spacing: DesignTokens.Space.snug) {
-                    Image(systemName: ledger.jobs.isEmpty ? "checkmark.circle" : "arrow.up.circle")
-                    Text(line)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.vertical, DesignTokens.Space.snug)
-                .padding(.horizontal, DesignTokens.Space.regular)
-                .background(.quaternary.opacity(0.5), in: .capsule)
-                .contentShape(.capsule)
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("Shows every upload")
+        let wanted = enabled && ledger.isStripVisible(at: Swift.max(Date(), armedAt))
+        Color.clear
+            .onChange(of: wanted, initial: true) { _, wanted in report(wanted) }
             .task(id: ledger.stripHidesAt) {
                 guard let hidesAt = ledger.stripHidesAt else { return }
                 let wait = hidesAt.timeIntervalSince(Date())
@@ -45,7 +59,6 @@ struct TransfersStrip: View {
                 guard !Task.isCancelled else { return }
                 armedAt = hidesAt
             }
-        }
     }
 }
 
@@ -67,8 +80,8 @@ struct TransfersSheet: View {
         let now = Swift.max(Date(), wokeAt)
         let sections = TransfersPresentation.sections(
             for: ledger, now: now, lastProgressAt: lastProgressAt, verdict: verdict)
-        let stall = PendingMemoPresentation.stallDeadline(
-            for: ledger.jobs.map(\.manifest), lastProgressAt: lastProgressAt, after: now)
+        let stall = TransfersPresentation.sheetWake(
+            for: ledger, lastProgressAt: lastProgressAt, after: now)
         NavigationStack {
             List {
                 if sections.isEmpty {

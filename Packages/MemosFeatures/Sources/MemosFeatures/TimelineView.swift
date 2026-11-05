@@ -65,7 +65,9 @@ public struct TimelineView: View {
     /// after the sheet has gone — a sign-in alert or the editor cannot present over it.
     @State private var transfersOpen = false
     @State private var transfersFixer = TransfersFixer()
-    @State private var transfersFollowUp: TransfersFollowUp?
+    @State private var transfersHandOff = TransfersHandOff<TransfersFollowUp>()
+    /// Whether the strip's row is in the list, so it never moves what is being read (MEMNG-1042).
+    @State private var stripPlace = TransfersStripPlace()
     /// The delete conversation the edit sheet can start, and the one thing that decides what its
     /// answer may write. The SAME coordinator the memo's own screen uses — a second delete path
     /// would be a second set of rules about when a memo may be removed.
@@ -380,7 +382,9 @@ public struct TimelineView: View {
                 // unnecessary.
                 .onChange(of: jumps) { _, _ in
                     withAnimation(.snappy) {
-                        proxy.scrollTo(Self.jumpTop, anchor: .top)
+                        proxy.scrollTo(
+                            stripPlace.jumpTarget(notice: Self.jumpTop, strip: Self.stripTop),
+                            anchor: .top)
                     } completion: {
                         // This scroll passes through "away from the top" on its way to the top.
                         // Left unsaid, its arrival would read as a reader scrolling back up and
@@ -411,12 +415,22 @@ public struct TimelineView: View {
                     guard topWatch.arrivedAtTop(atTop) else { return }
                     Task { await loadNewer(in: timeline) }
                 }
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    TransfersStripPlace.isAtTop(
+                        contentOffsetY: geometry.contentOffset.y,
+                        topInset: geometry.contentInsets.top
+                    )
+                } action: { _, atTop in
+                    stripPlace.scrolled(atTop: atTop)
+                }
         }
     }
 
     /// The row a jump scrolls to: the notice that says which day the list was taken to, which is
     /// the first thing in an anchored list.
     private static let jumpTop = "timeline-jump-top"
+    /// The transfers strip's row, the first in the list while it is there.
+    private static let stripTop = "timeline-transfers-strip"
 
     @ViewBuilder
     private func list(_ timeline: TimelineStore) -> some View {
@@ -428,9 +442,11 @@ public struct TimelineView: View {
         List {
             // The transfers strip: above the first card, under the pull-to-refresh, never in the
             // bar (ADR-0008). Behind the `transfers.sheet` switch.
-            if let outbox, TransfersFlag.isEnabled(SettingsBundleSync.paneDefaults) {
+            // Its row comes and goes only at the top of the list (`TransfersStripPlace`).
+            if let outbox, stripPlace.shown {
                 TransfersStrip(ledger: outbox.transfers) { transfersOpen = true }
                     .cardRow()
+                    .id(Self.stripTop)
             }
             // Why this list is not the one that was here a moment ago, and the way back to now.
             if let anchor = timeline.query.anchor {
@@ -570,6 +586,17 @@ public struct TimelineView: View {
         .scrollContentBackground(.hidden)
         .scrollEdgeEffectStyle(.soft, for: .top)
         .refreshable { await load() }
+        .background {
+            if let outbox {
+                TransfersStripWatch(
+                    ledger: outbox.transfers,
+                    enabled: TransfersFlag.isEnabled(SettingsBundleSync.paneDefaults)
+                ) { stripPlace.want($0) }
+            }
+        }
+        .onChange(of: transfersOpen) { _, open in
+            if open { transfersHandOff.opened() }
+        }
         // On the list rather than the screen: the compose sheet is presented from the screen, and
         // two presentations on one view is how one of them silently stops appearing.
         .sheet(isPresented: $transfersOpen, onDismiss: runTransfersFollowUp) {
@@ -630,18 +657,13 @@ public struct TimelineView: View {
     }
 
     /// A transfers row's fix, through the outbox's own operations. The two that open something
-    /// else close the sheet first and leave the opening for its dismissal.
+    /// else close the sheet first and leave the opening for its dismissal — or open it at once
+    /// when the sheet went while the fix was out (`TransfersHandOff`).
     private func fix(_ action: TransfersAction, jobID: UUID, outbox: Outbox) async {
         await transfersFixer.perform(
             action, jobID: jobID, outbox: outbox, uploads: uploadSettings,
-            signIn: {
-                transfersFollowUp = .signIn
-                transfersOpen = false
-            },
-            reopen: { draft in
-                transfersFollowUp = .reopen(draft)
-                transfersOpen = false
-            },
+            signIn: { handOff(.signIn) },
+            reopen: { handOff(.reopen($0)) },
             openSettings: {
                 guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
                 UIApplication.shared.open(url)
@@ -649,9 +671,15 @@ public struct TimelineView: View {
         )
     }
 
+    private func handOff(_ move: TransfersFollowUp) {
+        if let now = transfersHandOff.leave(move) { run(now) } else { transfersOpen = false }
+    }
+
     private func runTransfersFollowUp() {
-        guard let next = transfersFollowUp else { return }
-        transfersFollowUp = nil
+        if let next = transfersHandOff.dismissed() { run(next) }
+    }
+
+    private func run(_ next: TransfersFollowUp) {
         switch next {
         case .signIn: signOut.send(.requested, to: session)
         case .reopen(let draft): composing = .create(restoring: ComposeRestore(draft))

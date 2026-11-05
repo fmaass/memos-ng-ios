@@ -83,6 +83,119 @@ struct TransfersPresentationTests {
                 == TransfersPresentation.nothingLeft)
     }
 
+    @Test("a held capture is named on the strip, and its bytes on the server read sent")
+    func stripNamesAHeldCapture() {
+        // Every byte on the server, the create held: never "0 of 1 sent" with nothing left.
+        let sent = job(
+            .held, hold: .signInRequired, files: [file(100, confirmed: 100, uid: "u")])
+        #expect(
+            TransfersPresentation.stripLine(for: ledger([sent]), now: start)
+                == "1 of 1 sent · 1 held")
+        // Nothing sent yet: still named, beside what is left.
+        let stuck = job(.held, hold: .tooLarge)
+        #expect(
+            TransfersPresentation.stripLine(for: ledger([stuck, job(.uploading)]), now: start)
+                == "0 of 2 sent · 1 held · \(TransfersPresentation.byteString(200)) left")
+        // A file with no bytes of its own (an item still in Photos) is not sent by being empty.
+        let empty = job(.held, hold: .tooLarge, files: [file(0)])
+        #expect(
+            TransfersPresentation.stripLine(for: ledger([empty]), now: start)
+                == "0 of 1 sent · 1 held")
+        // No hold, no word for one.
+        #expect(
+            TransfersPresentation.stripLine(for: ledger([job(.uploading)]), now: start)
+                == "0 of 1 sent · \(TransfersPresentation.byteString(100)) left")
+    }
+
+    @Test("the strip's row changes only at the top of the list, so the reader is not moved")
+    func stripPlaceKeepsTheReadersPlace() {
+        var place = TransfersStripPlace()
+        place.want(true)
+        #expect(place.shown)
+        // Read further down: the strip going would pull everything up by its height.
+        place.scrolled(atTop: false)
+        place.want(false)
+        #expect(place.shown)
+        place.scrolled(atTop: true)
+        #expect(place.shown == false)
+        // Arriving while the reader is down the list waits for them to come back up.
+        place.scrolled(atTop: false)
+        place.want(true)
+        #expect(place.shown == false)
+        #expect(place.jumpTarget(notice: "notice", strip: "strip") == "notice")
+        place.scrolled(atTop: true)
+        #expect(place.shown)
+        // A jump lands on the strip, not on the notice with the strip just above the view.
+        #expect(place.jumpTarget(notice: "notice", strip: "strip") == "strip")
+        // A reading that changes nothing about the top changes nothing.
+        place.scrolled(atTop: true)
+        #expect(place.shown)
+        // The ledger and the scroll may report in either order; both end in the same place.
+        var ledgerFirst = place
+        ledgerFirst.scrolled(atTop: false)
+        ledgerFirst.want(false)
+        ledgerFirst.scrolled(atTop: true)
+        var scrollFirst = place
+        scrollFirst.scrolled(atTop: false)
+        scrollFirst.scrolled(atTop: true)
+        scrollFirst.want(false)
+        #expect(ledgerFirst == scrollFirst)
+        #expect(ledgerFirst.shown == false)
+    }
+
+    @Test("at the top means at rest there or pulled past it, tighter than the paging trigger")
+    func stripPlaceTop() {
+        #expect(TransfersStripPlace.isAtTop(contentOffsetY: -100, topInset: 100))
+        #expect(TransfersStripPlace.isAtTop(contentOffsetY: -160, topInset: 100))
+        #expect(TransfersStripPlace.isAtTop(contentOffsetY: -99, topInset: 100))
+        #expect(TransfersStripPlace.isAtTop(contentOffsetY: -98, topInset: 100) == false)
+        // Twenty points down still pages the list above; it would still move the reader.
+        #expect(TimelineTopWatch.isAtTop(contentOffsetY: -80, topInset: 100))
+        #expect(TransfersStripPlace.isAtTop(contentOffsetY: -80, topInset: 100) == false)
+    }
+
+    @Test("a fix's move belongs to its sheet: made at the dismissal, or at once once it has gone")
+    func handOffBelongsToItsPresentation() {
+        var handOff = TransfersHandOff<TimelineView.TransfersFollowUp>()
+        handOff.opened()
+        #expect(handOff.leave(.signIn) == nil)
+        #expect(handOff.dismissed() == .signIn)
+        #expect(handOff.dismissed() == nil)
+        // Dismissed while the fix was out: its move is made when it returns, not left for the
+        // next sheet's dismissal to open over whatever that one was for.
+        handOff.opened()
+        #expect(handOff.dismissed() == nil)
+        #expect(handOff.leave(.signIn) == .signIn)
+        handOff.opened()
+        #expect(handOff.dismissed() == nil)
+        // Dismissed and opened again while the fix was out: the open sheet is the one closed for
+        // it (the timeline closes it when `leave` keeps the move), and its dismissal makes it.
+        handOff.opened()
+        #expect(handOff.leave(.signIn) == nil)
+        #expect(handOff.dismissed() == .signIn)
+    }
+
+    @Test("an open sheet wakes when a row's stall threshold passes, with no ledger change")
+    func sheetWakesAtTheStall() {
+        let moving = job(.uploading)
+        let queue = ledger([moving])
+        let progress = [moving.id: start]
+        let now = start.addingTimeInterval(10)
+        let wake = TransfersPresentation.sheetWake(
+            for: queue, lastProgressAt: progress, after: now)
+        #expect(wake == start.addingTimeInterval(PendingMemoPresentation.stallInterval))
+        let before = TransfersPresentation.sections(
+            for: queue, now: now, lastProgressAt: progress, verdict: .permitted)
+        #expect(before.first?.rows.first?.reason == nil)
+        let woken = TransfersPresentation.sections(
+            for: queue, now: wake ?? now, lastProgressAt: progress, verdict: .permitted)
+        #expect(woken.first?.rows.first?.reason == PendingMemoPresentation.noProgressConfirmed)
+        // Said once: nothing after that instant changes the sentence on its own.
+        #expect(
+            TransfersPresentation.sheetWake(
+                for: queue, lastProgressAt: progress, after: wake ?? now) == nil)
+    }
+
     @Test("the ETA is worded under a minute, in minutes, then in hours")
     func etaWording() {
         #expect(TransfersPresentation.etaText(.unknown) == nil)
@@ -385,6 +498,29 @@ struct TransfersFixTests {
             signIn: { routed += 1 }, reopen: { _ in })
         #expect(routed == 2)
         #expect(await rig.repository.job(id)?.holdReason == .signInRequired)
+    }
+
+    @Test("a capture made under another account offers the switch, which signs out and keeps it")
+    func switchAccountKeepsTheCapture() async throws {
+        let rig = try FixRig()
+        defer { rig.forget() }
+        let mismatched = job(.held, hold: .accountMismatch)
+        let id = try await rig.queued(mismatched)
+        let offered = TransfersPresentation.sections(
+            for: rig.outbox.transfers, now: Date(), lastProgressAt: [:], verdict: .permitted)
+        #expect(offered.first?.rows.first?.action == .switchAccount)
+        var routed = 0
+        var reopened = 0
+        await TransfersFixer().perform(
+            .switchAccount, jobID: id, outbox: rig.outbox, uploads: rig.uploads,
+            signIn: { routed += 1 }, reopen: { _ in reopened += 1 })
+        #expect(routed == 1)
+        #expect(reopened == 0)
+        let after = await rig.repository.job(id)
+        #expect(after?.state == .held)
+        #expect(after?.holdReason == .accountMismatch)
+        #expect(after?.cancelledAt == nil)
+        #expect(rig.outbox.transfers.job(id) != nil)
     }
 
     @Test("Reopen takes the capture back through the outbox's own cancel and opens the draft")

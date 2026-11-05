@@ -80,12 +80,28 @@ public enum TransfersPresentation {
     /// The strip's line, or nil when the strip is not shown at `now`.
     public static func stripLine(for ledger: TransferLedger, now: Date) -> String? {
         guard ledger.isStripVisible(at: now) else { return nil }
-        return stripLine(summary: ledger.summary, eta: ledger.estimate(at: now))
+        // A held capture's files read held, not done, even with every byte on the server (the
+        // ledger keeps the capture's stop visible on its rows), so the strip counts what the
+        // server holds whole as sent and says how many captures are held — "0 of 2 sent" with
+        // nothing left to send read as a queue that had not started (MEMNG-1042).
+        var summary = ledger.summary
+        summary.filesDone = ledger.jobs.flatMap(\.files).count(where: { file in
+            file.state == .done || (file.byteSize > 0 && file.bytesConfirmed >= file.byteSize)
+        })
+        let held = ledger.jobs.count(where: { $0.manifest.state == .held })
+        return stripLine(summary: summary, eta: ledger.estimate(at: now), held: held)
     }
 
-    static func stripLine(summary: TransferSummary, eta: TransferETA) -> String {
+    /// The line a strip still in the list says once the ledger no longer shows one: it is kept
+    /// there while the reader is away from the top (`TransfersStripPlace`).
+    static func shownLine(for ledger: TransferLedger, now: Date) -> String {
+        stripLine(for: ledger, now: now) ?? nothingLeft
+    }
+
+    static func stripLine(summary: TransferSummary, eta: TransferETA, held: Int = 0) -> String {
         guard summary.jobs > 0 else { return nothingLeft }
         var parts = ["\(summary.filesDone) of \(summary.filesTotal) sent"]
+        if held > 0 { parts.append("\(held) held") }
         if summary.bytesLeft > 0 {
             parts.append("\(byteString(summary.bytesLeft)) left")
             if let time = etaText(eta) { parts.append(time) }
@@ -233,6 +249,82 @@ public enum TransfersPresentation {
     static func stalled(_ job: TransferJob, now: Date, lastProgressAt: [UUID: Date]) -> Bool {
         guard let last = lastProgressAt[job.id] else { return false }
         return now.timeIntervalSince(last) >= PendingMemoPresentation.stallInterval
+    }
+
+    /// The instant an open sheet must be drawn again on its own: the next row whose stall
+    /// threshold passes, when no ledger change would redraw it. Nil when nothing will change.
+    static func sheetWake(
+        for ledger: TransferLedger, lastProgressAt: [UUID: Date], after now: Date
+    ) -> Date? {
+        PendingMemoPresentation.stallDeadline(
+            for: ledger.jobs.map(\.manifest), lastProgressAt: lastProgressAt, after: now)
+    }
+}
+
+/// Whether the transfers strip's row is in the timeline (MEMNG-1042).
+///
+/// The strip is the list's first row, so a row added or removed while the reader is further down
+/// moved everything they were reading by the strip's height, and a row above the view is one
+/// nobody can see arrive anyway. So the row changes only while the list is at its top, where the
+/// reader watches the strip come and go; away from the top it keeps what it was, and a change
+/// waits until the reader is back up. Kept as a value so the sequence can be asserted.
+struct TransfersStripPlace: Equatable {
+    private(set) var shown = false
+    private(set) var wanted = false
+    private(set) var atTop = true
+
+    /// The ledger's answer: whether a strip should be showing now.
+    mutating func want(_ wanted: Bool) {
+        self.wanted = wanted
+        settle()
+    }
+
+    /// One scroll reading (`isAtTop`).
+    mutating func scrolled(atTop: Bool) {
+        self.atTop = atTop
+        settle()
+    }
+
+    private mutating func settle() {
+        if atTop { shown = wanted }
+    }
+
+    /// The row a jump to a day lands on: the strip while it is in the list, which would otherwise
+    /// sit just above the view, and the jump's own notice when it is not.
+    func jumpTarget<ID: Hashable>(notice: ID, strip: ID) -> ID { shown ? strip : notice }
+
+    /// The list at rest at its top, or pulled down past it. Tighter than the paging trigger's
+    /// slack: a row inserted a few points short of the top would still move what is read.
+    static func isAtTop(contentOffsetY: CGFloat, topInset: CGFloat) -> Bool {
+        TimelineTopWatch.isAtTop(contentOffsetY: contentOffsetY, topInset: topInset, slack: 1)
+    }
+}
+
+/// The move a transfers fix leaves for after the sheet — a sign-in alert or the editor cannot
+/// present over it — belongs to the presentation it was earned in (MEMNG-1042). A fix that
+/// returns after the sheet has already gone (dismissed while `outbox.cancel` was out) makes its
+/// move at once, rather than waiting for the NEXT sheet's dismissal to open the editor there.
+struct TransfersHandOff<Move: Equatable>: Equatable {
+    private(set) var presented = false
+    private(set) var pending: Move?
+
+    mutating func opened() {
+        presented = true
+        pending = nil
+    }
+
+    /// The move to make now, or nil when it waits for this sheet's dismissal.
+    mutating func leave(_ move: Move) -> Move? {
+        guard presented else { return move }
+        pending = move
+        return nil
+    }
+
+    /// The sheet has gone: the move it was left, once.
+    mutating func dismissed() -> Move? {
+        presented = false
+        defer { pending = nil }
+        return pending
     }
 }
 

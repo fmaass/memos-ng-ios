@@ -304,6 +304,25 @@ struct TransferLedgerETATests {
         #expect(ledger.estimate(at: clock.now) == .paused)
     }
 
+    @Test("bytes left only in a held capture, beside an uploading one that is done, read paused")
+    func onlyHeldBytesLeftIsPaused() {
+        let clock = MutableClock(start)
+        let ledger = TransferLedger(clock: { clock.now })
+        let (id, fileID) = (UUID(), UUID())
+        let stuck = job(
+            [file("big.mov", size: 1_000_000, confirmed: 0, uid: nil)], state: .held,
+            hold: .tooLarge)
+        ledger.apply([uploading(0, id: id, fileID: fileID), stuck], generation: 1)
+        clock.advance(10)
+        ledger.apply([uploading(5000, id: id, fileID: fileID), stuck], generation: 2)
+        clock.advance(10)
+        ledger.apply([uploading(10_000, id: id, fileID: fileID), stuck], generation: 3)
+        // A rate was measured and a capture is still uploading, but none of the bytes left will
+        // move: a time computed over nothing would read "under a minute" for a queue that waits.
+        #expect(ledger.summary.bytesLeft == 1_000_000)
+        #expect(ledger.estimate(at: clock.now) == .paused)
+    }
+
     @Test("a queue with every byte confirmed has nothing left to estimate")
     func nothingLeft() {
         let clock = MutableClock(start)
