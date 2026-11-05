@@ -574,6 +574,35 @@ struct RetryClassEdgeTests {
         #expect(await harness.reload() == nil)
     }
 
+    @Test("a back-off whose write lands at the very instant of its deadline asks for a pass itself")
+    func deadlineDueAtTheWriteAsksForADrain() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1
+                ? OutboxHTTPResponse(statusCode: 503, headers: ["Retry-After": "0"])
+                : Self.created
+        }
+        let landing = TestGate()
+        let harness = try await Harness.make(
+            bytes: 0, http: http,
+            persistence: {
+                GatedPersistence($0, gate: landing, holdingWrite: { $0.waitReason == .retrying })
+            },
+            clockStart: Date(timeIntervalSince1970: 1_750_000_000))
+        defer { harness.cleanUp() }
+
+        let drain = Task { await harness.engine.drain() }
+        await landing.waitUntilParked()
+        // A whole-second start, so the floored deadline is exactly the clock once it moves on by
+        // the floor: the timer arms only a deadline after now, so this one is the write's to wake.
+        harness.clock.advance(UploadBudget.shortestRetryAfter)
+        await landing.open()
+        await drain.value
+        try await settled(harness.engine)
+
+        #expect(posts.count == 2, "a deadline due right now is no timer's to meet")
+        #expect(await harness.reload() == nil)
+    }
+
     @Test("control: a back-off that lands before its deadline is the timer's, and no pass is asked")
     func timelyBackOffWaitsForTheTimer() async throws {
         let (http, posts) = Self.creating { count in

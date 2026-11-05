@@ -1767,14 +1767,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         let before = wakeDeadlines[job.id] ?? []
         noteDeadlines(of: job)
         rearmDeadlineTimer()
-        // A deadline this write set that is already behind the clock (MEMNG-1183). The timer only
-        // arms a future one, and the deadline was computed before the write's hop and kept on disk
-        // in whole seconds, so a write that landed late can leave a back-off due with nothing to
-        // wake it. Only a NEW deadline asks: one the row already carried was already somebody's,
+        // A deadline this write set that is already due (MEMNG-1183). The timer only arms one
+        // strictly after now, so a deadline at this very instant is the write's to wake too. The
+        // deadline was computed before the write's hop and kept on disk in whole seconds, so a
+        // write that landed late can leave a back-off due with nothing to wake it. Only a NEW deadline asks: one the row already carried was already somebody's,
         // and `.distantPast` is a step's own "due now" that the pass writing it carries on with.
         let now = clock()
         let lapsed = (wakeDeadlines[job.id] ?? []).contains {
-            $0 < now && $0 != .distantPast && !before.contains($0)
+            $0 <= now && $0 != .distantPast && !before.contains($0)
         }
         if lapsed, schedulingGate.isOpen { requestDrain() }
     }
