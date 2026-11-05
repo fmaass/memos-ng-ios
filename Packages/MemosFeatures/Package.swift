@@ -42,6 +42,8 @@ let package = Package(
             resources: [
                 .process("Resources/DesignTokens.xcassets"),
                 .copy("Resources/ReleaseNotes.md"),
+                // Written from the repo's Package.resolved for the Licenses sheet; read as written.
+                .copy("Resources/spm-licenses.json"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),

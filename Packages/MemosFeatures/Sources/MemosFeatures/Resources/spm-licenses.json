@@ -1,0 +1,82 @@
+{
+  "packages": [
+    {
+      "name": "NetworkImage",
+      "version": "6.0.1",
+      "license": "MIT",
+      "repository": "https://github.com/gonzalezreal/NetworkImage"
+    },
+    {
+      "name": "OpenAPIKit",
+      "version": "6.2.0",
+      "license": "MIT",
+      "repository": "https://github.com/mattpolzin/OpenAPIKit"
+    },
+    {
+      "name": "swift-algorithms",
+      "version": "1.2.1",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-algorithms"
+    },
+    {
+      "name": "swift-argument-parser",
+      "version": "1.8.2",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-argument-parser"
+    },
+    {
+      "name": "swift-cmark",
+      "version": "0.8.0",
+      "license": "see repository",
+      "repository": "https://github.com/swiftlang/swift-cmark"
+    },
+    {
+      "name": "swift-collections",
+      "version": "1.6.0",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-collections"
+    },
+    {
+      "name": "swift-http-types",
+      "version": "1.6.0",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-http-types"
+    },
+    {
+      "name": "swift-markdown-ui",
+      "version": "2.4.1",
+      "license": "MIT",
+      "repository": "https://github.com/gonzalezreal/swift-markdown-ui"
+    },
+    {
+      "name": "swift-numerics",
+      "version": "1.1.1",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-numerics"
+    },
+    {
+      "name": "swift-openapi-generator",
+      "version": "1.13.0",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-openapi-generator"
+    },
+    {
+      "name": "swift-openapi-runtime",
+      "version": "1.12.0",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-openapi-runtime"
+    },
+    {
+      "name": "swift-openapi-urlsession",
+      "version": "1.3.1",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/apple/swift-openapi-urlsession"
+    },
+    {
+      "name": "Yams",
+      "version": "6.2.2",
+      "license": "MIT",
+      "repository": "https://github.com/jpsim/Yams"
+    }
+  ]
+}
