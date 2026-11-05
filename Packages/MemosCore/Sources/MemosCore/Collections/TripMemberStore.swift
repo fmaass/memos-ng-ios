@@ -664,8 +664,9 @@ public final class TripMemberStore {
     /// `contributions` came in after the drain held for the lineage `handle` reads under was asked
     /// for, or when none is held — the picture may be missing from it. The server stamps
     /// `createdAt`, the device `asked`, so a clock that runs behind the server's can read once more
-    /// than needed; the age gate covers one that runs ahead. Joins a drain on the wire. Answers
-    /// whether it read.
+    /// than needed; the age gate covers one that runs ahead. Joins a drain on the wire, and reads
+    /// once more after it when that drain was asked for before the newest of `contributions`
+    /// (MEMNG-1176). Answers whether it read.
     @discardableResult
     public func drainIfNewer(
         _ trip: Trip, contributions: [TripContribution], using handle: SessionHandle,
@@ -673,6 +674,16 @@ public final class TripMemberStore {
     ) async -> Bool {
         guard let newest = contributions.map(\.createdAt).max() else { return false }
         if let held = held(.trip(trip), under: handle), newest <= held.asked { return false }
+        let lineage = Lineage(revision: trips.revision, session: handle.generation, uid: trip.uid)
+        let joined = flights[trip.uid]?.lineage == lineage
+        await drain(trip, using: handle, baseURL: baseURL)
+        // A joined drain may have been answered before the picture came in: what it left is read
+        // once more when it was asked for before the newest contribution — one read, no loop. Not
+        // behind a failure, which the screen shows and the user retries, and not after a drain
+        // this call started itself, asked after the listing.
+        guard joined, drainFailures[trip.uid] == nil,
+            let held = held(.trip(trip), under: handle), held.asked < newest
+        else { return true }
         await drain(trip, using: handle, baseURL: baseURL)
         return true
     }
