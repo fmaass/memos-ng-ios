@@ -78,6 +78,37 @@ else
   echo "FOREGROUND-EDIT ok: no foreground edit uploader named under Packages/ or Sources/"
 fi
 
+# The NAMES above are a hint: an uploader renamed is still an uploader (MEMNG-1187 item 6). What it
+# cannot rename is the generated client's upload-session operations it would have to call, so the
+# fence is those, in every shipping source above the outbox — the outbox opens its sessions with its
+# own requests and is out of this scope by design. The limits read is not an upload and stays legal.
+ops_scope=("$root/Packages/MemosCore/Sources" "$root/Packages/MemosFeatures/Sources" "$app")
+for path in "${ops_scope[@]}"; do
+  if [ ! -d "$path" ]; then
+    echo "FOREGROUND-EDIT FAIL: $path does not exist — the upload-operation fence has no scope there"
+    echo "                      and proves nothing"
+    exit 2
+  fi
+done
+op_hits="$(grep -rnaF --include='*.swift' -e 'start_upload_api_uploads_post' \
+  -e 'append_chunk_api_uploads__upload_uid__patch' \
+  -e 'finalize_upload_api_uploads__upload_uid__finalize_post' "${ops_scope[@]}" 2>/dev/null)"
+op_rc=$?
+if [ "$op_rc" -ge 2 ] && [ -z "$op_hits" ]; then
+  echo "FOREGROUND-EDIT FAIL: the upload-operation grep ended with exit $op_rc and read nothing, so"
+  echo "                      the rule was never checked"
+  exit 2
+fi
+if [ -n "$op_hits" ]; then
+  echo "FOREGROUND-EDIT FAIL: a source above the outbox calls the generated upload-session API —"
+  echo "                      a foreground uploader under any name. Files added to an existing memo"
+  echo "                      go through the outbox's edit job (Outbox.enqueueEdit)."
+  echo "$op_hits"
+  rc=1
+else
+  echo "FOREGROUND-EDIT ok: no upload-session operation called from MemosCore, MemosFeatures or the app"
+fi
+
 # Each control counts uncommented lines, so a comment that merely mentions the name is no witness.
 uncommented() { # file pattern
   grep -naF -e "$2" "$1" 2>/dev/null | grep -vaE '^[0-9]+:[[:space:]]*//' | head -1

@@ -51,7 +51,7 @@ core_stores="Packages/MemosCore/Sources/MemosCore/Stores"
 new_tree() { # $1 name
   local work="$tmp/$1"
   mkdir -p "$work/$outbox_dir" "$work/$core_stores" "$work/Packages/MemosCore/Tests/MemosCoreTests" \
-    "$work/Sources/App" || return 1
+    "$work/Packages/MemosFeatures/Sources/MemosFeatures" "$work/Sources/App" || return 1
   cat > "$work/$outbox_dir/Outbox.swift" <<'SWIFT'
 public final class Outbox {
     public func enqueueEdit(_ order: MemoEditOrder, sources: [StagedSource]) async -> Bool { true }
@@ -123,6 +123,19 @@ check "a comment naming the uploader" 1 "$w"
 w="$(new_tree in-the-app)" || exit 1
 printf 'let u = %s.self\n' "$uploader" >> "$w/Sources/App/App.swift"
 check "the app target naming the uploader" 1 "$w"
+
+# MEMNG-1187 item 6: the uploader renamed, still opening upload sessions through the generated client.
+w="$(new_tree renamed-uploader)" || exit 1
+printf 'enum Sender { static func go(_ c: Client) async { _ = try? await c.%s(.init()) } }\n' \
+  "start_upload""_api_uploads_post" > "$w/Packages/MemosCore/Sources/MemosCore/Sender.swift"
+check "a renamed uploader opening an upload session" 1 "$w"
+
+# The same, appending a chunk from the features layer.
+w="$(new_tree renamed-chunker)" || exit 1
+printf 'func f(_ c: Client) async { _ = try? await c.%s(.init()) }\n' \
+  "append_chunk""_api_uploads__upload_uid__patch" \
+  > "$w/Packages/MemosFeatures/Sources/MemosFeatures/F.swift"
+check "a renamed chunk sender in the features layer" 1 "$w"
 
 # Each positive control, checked by removing its subject: a grep that finds nothing reads the same
 # whether the rule holds or the edit job is gone.
