@@ -49,7 +49,8 @@ private final class RecordingHost: TransferActivityHosting {
         case start(String, TransferActivityState)
         case refused(TransferActivityState)
         case update(String, TransferActivityState)
-        case end(String, TransferActivityState)
+        case end(String, TransferActivityState, TransferActivityDismissal)
+        case dismissEnded
     }
 
     var calls: [Call] = []
@@ -72,8 +73,15 @@ private final class RecordingHost: TransferActivityHosting {
         calls.append(.update(activity.id, state))
     }
 
-    func end(_ activity: TransferActivityHandle, on state: TransferActivityState) {
-        calls.append(.end(activity.id, state))
+    func end(
+        _ activity: TransferActivityHandle, on state: TransferActivityState,
+        dismissal: TransferActivityDismissal
+    ) {
+        calls.append(.end(activity.id, state, dismissal))
+    }
+
+    func dismissEnded() {
+        calls.append(.dismissEnded)
     }
 
     func surviving() -> [SurvivingTransferActivity] { survivors }
@@ -83,9 +91,9 @@ private final class RecordingHost: TransferActivityHosting {
         calls.compactMap { call in
             switch call {
             case .start(let activity, let state), .update(let activity, let state),
-                .end(let activity, let state):
+                .end(let activity, let state, _):
                 activity == id ? state : nil
-            case .refused: nil
+            case .refused, .dismissEnded: nil
             }
         }
     }
@@ -128,13 +136,17 @@ struct TransferActivityTests {
         driver.observe(job(400, .uploading))
         #expect(
             host.calls == [
+                .dismissEnded,
                 .start("activity-1", state(jobs: 1, files: (0, 1), bytes: (100, 1000), .sending)),
                 .update(
                     "activity-1",
                     state(jobs: 1, files: (0, 1), bytes: (300, 1000), .paused(.waitingForWiFi))),
+                // The paused card stays, saying why, until the next activity clears it.
                 .end(
                     "activity-1",
-                    state(jobs: 1, files: (0, 1), bytes: (300, 1000), .paused(.waitingForWiFi))),
+                    state(jobs: 1, files: (0, 1), bytes: (300, 1000), .paused(.waitingForWiFi)),
+                    .whenDealtWith),
+                .dismissEnded,
                 .start("activity-2", state(jobs: 1, files: (0, 1), bytes: (400, 1000), .sending)),
             ])
         #expect(driver.shown == state(jobs: 1, files: (0, 1), bytes: (400, 1000), .sending))
@@ -157,7 +169,7 @@ struct TransferActivityTests {
         ]
         // A background relaunch for an upload's events: a new process, a new driver.
         let driver = TransferActivityDriver(host: host, clock: { clock.now })
-        #expect(host.calls == [.end("older", stale)])
+        #expect(host.calls == [.end("older", stale, .whenDealtWith)])
         #expect(driver.shown == shown)
         // Its first read sees only the capture still queued: what had landed is kept as it was,
         // and the queued capture counts on top of it.
@@ -165,7 +177,7 @@ struct TransferActivityTests {
         driver.observe(read([still], at: clock.now))
         #expect(
             host.calls == [
-                .end("older", stale),
+                .end("older", stale, .whenDealtWith),
                 .update(
                     "newest",
                     state(
@@ -180,7 +192,8 @@ struct TransferActivityTests {
                     "newest",
                     state(
                         jobs: 2, files: (3, 5), bytes: (1400, 1500), .paused(nil),
-                        settled: landed)))
+                        settled: landed),
+                    .whenDealtWith))
         #expect(!host.calls.contains { if case .start = $0 { true } else { false } })
     }
 
@@ -223,7 +236,8 @@ struct TransferActivityTests {
                 == .end(
                     "survivor",
                     state(
-                        jobs: 2, files: (2, 2), bytes: (200, 200), .finished, settled: whole)))
+                        jobs: 2, files: (2, 2), bytes: (200, 200), .finished, settled: whole),
+                    .soon))
         // Every byte B confirmed shows on top of A, the first adopted read included; a read
         // that repeats what the survivor already showed changes nothing.
         let confirmed = Set(host.shown(by: "survivor").map(\.summary.bytesConfirmed))
@@ -249,12 +263,16 @@ struct TransferActivityTests {
         driver.observe(job(200, .uploading))
         #expect(
             host.calls == [
+                .dismissEnded,
                 .start(
                     "activity-1",
                     state(jobs: 1, files: (0, 1), bytes: (100, 1000), .paused(.noConnection))),
+                // Ended to stay, and cleared at once by the start that replaces it: never two.
                 .end(
                     "activity-1",
-                    state(jobs: 1, files: (0, 1), bytes: (200, 1000), .paused(.noConnection))),
+                    state(jobs: 1, files: (0, 1), bytes: (200, 1000), .paused(.noConnection)),
+                    .whenDealtWith),
+                .dismissEnded,
                 .start("activity-2", state(jobs: 1, files: (0, 1), bytes: (200, 1000), .sending)),
             ])
     }
@@ -341,8 +359,9 @@ struct TransferActivityTests {
             host.calls.last
                 == .end(
                     "activity-1",
-                    state(jobs: 1, files: (0, 1), bytes: (0, 1000), .paused(.waitingForWiFi))))
-        #expect(host.calls.count == 3)
+                    state(jobs: 1, files: (0, 1), bytes: (0, 1000), .paused(.waitingForWiFi)),
+                    .whenDealtWith))
+        #expect(host.calls.count == 4)
     }
 
     @Test("a start the system refuses is asked again on the next read, bytes or none")
@@ -379,9 +398,13 @@ struct TransferActivityTests {
                 case .start(let id, _): "start \(id)"
                 case .refused: "refused"
                 case .update(let id, _): "update \(id)"
-                case .end(let id, _): "end \(id)"
+                case .end(let id, _, _): "end \(id)"
+                case .dismissEnded: "dismissEnded"
                 }
-            } == ["start activity-1", "end activity-1", "refused", "start activity-2"])
+            } == [
+                "dismissEnded", "start activity-1", "end activity-1", "dismissEnded", "refused",
+                "dismissEnded", "start activity-2",
+            ])
         #expect(driver.shown == state(jobs: 1, files: (0, 1), bytes: (20, 1000), .sending))
     }
 
@@ -447,13 +470,102 @@ struct TransferActivityTests {
         #expect(ledger.apply([half], generation: 2) == false)
         #expect(
             host.calls == [
+                .dismissEnded,
                 .start("activity-1", state(jobs: 1, files: (0, 1), bytes: (500, 1000), .sending)),
+                // The capture is a memo, though the last read this activity saw had it half sent:
+                // a finished end leaves soon whatever its counts say.
                 .end(
                     "activity-1",
                     state(
                         jobs: 1, files: (0, 1), bytes: (500, 1000), .finished,
-                        settled: sum(jobs: 1, files: (0, 1), bytes: (500, 1000)))),
+                        settled: sum(jobs: 1, files: (0, 1), bytes: (500, 1000))),
+                    .soon),
             ])
         #expect(driver.shown == nil)
+    }
+
+    @Test("a batch that completes ends on its finished card, which leaves seconds later")
+    func completedBatchLeavesSoon() {
+        let clock = MutableClock(dawn)
+        let host = RecordingHost()
+        let driver = TransferActivityDriver(host: host, clock: { clock.now })
+        let ledger = TransferLedger(clock: { clock.now })
+        ledger.onApplied = { driver.observe($0) }
+        let (id, f1, f2) = (UUID(), UUID(), UUID())
+        func photos(_ first: Int64, _ second: Int64, _ state: JobState) -> UploadJob {
+            capture(
+                [upload(100, confirmed: first, id: f1), upload(300, confirmed: second, id: f2)],
+                state: state, id: id)
+        }
+        #expect(ledger.apply([photos(40, 0, .uploading)], generation: 1))
+        clock.advance(5)
+        #expect(ledger.apply([photos(100, 300, .creating)], generation: 2))
+        clock.advance(5)
+        #expect(ledger.apply([], generation: 3))
+        let whole = sum(jobs: 1, files: (2, 2), bytes: (400, 400))
+        #expect(
+            host.calls == [
+                .dismissEnded,
+                .start("activity-1", state(jobs: 1, files: (0, 2), bytes: (40, 400), .sending)),
+                .update(
+                    "activity-1", state(jobs: 1, files: (2, 2), bytes: (400, 400), .sending)),
+                .end(
+                    "activity-1",
+                    TransferActivityState(summary: whole, status: .finished, settled: whole),
+                    .soon),
+            ])
+        #expect(driver.shown == nil)
+        // A few seconds: long enough to read "done", short enough not to linger.
+        #expect((5...10).contains(TransferActivityDismissal.soonInterval))
+    }
+
+    @Test("a held capture is never ended: its card stays, paused, saying why")
+    func heldCaptureIsNeverEnded() {
+        let clock = MutableClock(dawn)
+        let host = RecordingHost()
+        let driver = TransferActivityDriver(host: host, clock: { clock.now })
+        let ledger = TransferLedger(clock: { clock.now })
+        ledger.onApplied = { driver.observe($0) }
+        let id = UUID()
+        let fileID = UUID()
+        let sending = capture([upload(1000, confirmed: 200, id: fileID)], id: id)
+        let held = capture(
+            [upload(1000, confirmed: 200, id: fileID)], state: .held, hold: .tooLarge, id: id)
+        #expect(ledger.apply([sending], generation: 1))
+        clock.advance(60)
+        #expect(ledger.apply([held], generation: 2))
+        clock.advance(60 * 60)
+        #expect(ledger.apply([held], generation: 3))
+        #expect(!host.calls.contains { if case .end = $0 { true } else { false } })
+        #expect(driver.shown == state(jobs: 1, files: (0, 1), bytes: (200, 1000), .paused(.held)))
+    }
+
+    @Test("a new batch after a finished one clears the card it left before starting its own")
+    func newBatchClearsTheFinishedCardFirst() {
+        let clock = MutableClock(dawn)
+        let host = RecordingHost()
+        let driver = TransferActivityDriver(host: host, clock: { clock.now })
+        let ledger = TransferLedger(clock: { clock.now })
+        ledger.onApplied = { driver.observe($0) }
+        let first = capture([upload(100, confirmed: 100)], state: .creating)
+        let second = capture([upload(500, confirmed: 0)])
+        #expect(ledger.apply([first], generation: 1))
+        clock.advance(5)
+        #expect(ledger.apply([], generation: 2))
+        // Two seconds later, inside the finished card's few seconds, the next capture is queued.
+        clock.advance(2)
+        #expect(ledger.apply([second], generation: 3))
+        let done = sum(jobs: 1, files: (1, 1), bytes: (100, 100))
+        #expect(
+            host.calls == [
+                .dismissEnded,
+                .start("activity-1", state(jobs: 1, files: (1, 1), bytes: (100, 100), .sending)),
+                .end(
+                    "activity-1",
+                    TransferActivityState(summary: done, status: .finished, settled: done),
+                    .soon),
+                .dismissEnded,
+                .start("activity-2", state(jobs: 1, files: (0, 1), bytes: (0, 500), .sending)),
+            ])
     }
 }

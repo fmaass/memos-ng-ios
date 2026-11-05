@@ -49,9 +49,18 @@ final class LiveTransferActivity: TransferActivityHosting {
         enqueue { await Self.update(id: id, to: state) }
     }
 
-    func end(_ activity: TransferActivityHandle, on state: TransferActivityState) {
+    func end(
+        _ activity: TransferActivityHandle, on state: TransferActivityState,
+        dismissal: TransferActivityDismissal
+    ) {
         let id = activity.id
-        enqueue { await Self.end(id: id, on: state) }
+        enqueue { await Self.end(id: id, on: state, dismissal: dismissal) }
+    }
+
+    /// Queued like an end, and it reads which activities have ended only when its turn comes, so
+    /// an end the driver decided just before is among them and the activity just requested is not.
+    func dismissEnded() {
+        enqueue { await Self.dismissEnded() }
     }
 
     func surviving() -> [SurvivingTransferActivity] {
@@ -80,8 +89,26 @@ final class LiveTransferActivity: TransferActivityHosting {
         await running(id)?.update(ActivityContent(state: state, staleDate: nil))
     }
 
-    private nonisolated static func end(id: String, on state: TransferActivityState) async {
+    private nonisolated static func end(
+        id: String, on state: TransferActivityState, dismissal: TransferActivityDismissal
+    ) async {
         await running(id)?.end(
-            ActivityContent(state: state, staleDate: nil), dismissalPolicy: .default)
+            ActivityContent(state: state, staleDate: nil), dismissalPolicy: policy(dismissal))
+    }
+
+    private nonisolated static func dismissEnded() async {
+        for activity in Activity<TransferActivityAttributes>.activities
+        where activity.activityState == .ended {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    private nonisolated static func policy(_ dismissal: TransferActivityDismissal)
+        -> ActivityUIDismissalPolicy
+    {
+        switch dismissal {
+        case .soon: .after(Date().addingTimeInterval(TransferActivityDismissal.soonInterval))
+        case .whenDealtWith: .default
+        }
     }
 }

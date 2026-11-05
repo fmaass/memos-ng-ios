@@ -26,6 +26,19 @@ public struct SurvivingTransferActivity: Sendable, Equatable {
     }
 }
 
+/// How long an ended activity stays on the lock screen and in the Dynamic Island. The driver
+/// decides it with the end; the host maps it onto the system's dismissal policy.
+public enum TransferActivityDismissal: Hashable, Sendable {
+    /// The batch is done: the card shows that for `soonInterval`, then leaves by itself.
+    case soon
+    /// The card stays, showing what it showed, until the person swipes it away or the next batch
+    /// clears it (`dismissEnded`). The system's own default.
+    case whenDealtWith
+
+    /// How long a finished batch stays on screen before it leaves.
+    public static let soonInterval: TimeInterval = 8
+}
+
 /// The seam ActivityKit sits behind. The driver decides; the host carries the decision out, in the
 /// order it was made. Nothing here awaits: a host whose calls are asynchronous orders them itself.
 @MainActor
@@ -35,7 +48,12 @@ public protocol TransferActivityHosting: AnyObject {
     /// the driver asks again on a later read.
     func start(_ state: TransferActivityState) -> TransferActivityHandle?
     func update(_ activity: TransferActivityHandle, to state: TransferActivityState)
-    func end(_ activity: TransferActivityHandle, on state: TransferActivityState)
+    func end(
+        _ activity: TransferActivityHandle, on state: TransferActivityState,
+        dismissal: TransferActivityDismissal)
+    /// Takes away at once every activity that has ended but is still on screen, so a new batch
+    /// never shows next to the card an earlier one left.
+    func dismissEnded()
     /// The activities the system is still showing, active or stale — not ended, not dismissed.
     func surviving() -> [SurvivingTransferActivity]
 }
@@ -48,10 +66,14 @@ public protocol TransferActivityHosting: AnyObject {
 /// - Every applied read updates it. What it shows is summed over the captures it has counted,
 ///   each held at the highest numbers any read showed for it, so a capture leaving the queue or a
 ///   file starting over never takes the ring or the count back: within one activity they only rise.
-/// - It ends on `finished` when the queue empties.
+/// - It ends on `finished` when the queue empties, and that card leaves a few seconds later
+///   (`TransferActivityDismissal.soon`). A capture leaves the queue only when it became a memo or
+///   a person took it back or discarded it; a held one stays queued, so its activity stays,
+///   paused, saying why.
 /// - The system ends a Live Activity eight hours after it started. An activity that would outlive
 ///   that ceiling — a read inside `renewalMargin` of it, or after it — ends on `paused`, naming the
 ///   pause it was showing, and the next one starts on the first byte the server confirms after.
+///   That card stays until the next activity starts: every start first clears the ended cards.
 ///
 /// Main-actor and synchronous: one read is judged whole before the next, so two reads cannot
 /// interleave a start with an end. The ledger hands it only the reads it accepted, in order, so a
@@ -126,7 +148,9 @@ public final class TransferActivityDriver {
     private func adoptSurvivors() {
         let survivors = host.surviving().sorted { $0.startedAt > $1.startedAt }
         guard let newest = survivors.first else { return }
-        for older in survivors.dropFirst() { host.end(older.handle, on: older.state) }
+        for older in survivors.dropFirst() {
+            host.end(older.handle, on: older.state, dismissal: .whenDealtWith)
+        }
         phase = .running(
             Running(
                 handle: newest.handle, startedAt: newest.startedAt, marks: [:],
@@ -172,7 +196,7 @@ public final class TransferActivityDriver {
             if jobs.isEmpty {
                 let state = TransferActivityState(
                     summary: summary, status: .finished, settled: settled)
-                host.end(running.handle, on: state)
+                host.end(running.handle, on: state, dismissal: .soon)
                 phase = .idle(awaitingBytes: false)
                 return
             }
@@ -180,7 +204,7 @@ public final class TransferActivityDriver {
                 let pause = Self.pause(of: status) ?? Self.pause(of: running.shown.status)
                 let state = TransferActivityState(
                     summary: summary, status: .paused(pause), settled: settled)
-                host.end(running.handle, on: state)
+                host.end(running.handle, on: state, dismissal: .whenDealtWith)
                 phase = .idle(awaitingBytes: true)
                 if moved { begin(jobs, status: status, at: now) }
                 return
@@ -194,12 +218,14 @@ public final class TransferActivityDriver {
         }
     }
 
-    /// Starts an activity over `jobs`, counting from where they stand now. A start the system
-    /// refuses leaves no activity and no condition: the next read asks again.
+    /// Starts an activity over `jobs`, counting from where they stand now, after clearing the
+    /// cards earlier activities left ended on screen. A start the system refuses leaves no
+    /// activity and no condition: the next read asks again.
     private func begin(_ jobs: [TransferJob], status: TransferActivityStatus, at now: Date) {
         var marks: [UUID: Marks] = [:]
         for job in jobs { marks[job.id] = Marks(job) }
         let state = TransferActivityState(summary: Self.summary(of: marks), status: status)
+        host.dismissEnded()
         guard let handle = host.start(state) else {
             phase = .idle(awaitingBytes: false)
             return
