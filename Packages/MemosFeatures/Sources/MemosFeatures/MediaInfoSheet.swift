@@ -258,6 +258,9 @@ struct MediaInfoSheet: View {
     var openInPlaces: ((PlacesFocus.Request) -> Void)? = nil
     /// The one question a widening from the chip asks before anything is sent (`WideningAsk`).
     @State private var widening = WideningAsk()
+    /// What the sheet says under the chip when a change from it failed (MEMNG-1034): the failure
+    /// would otherwise land only in the timeline's error line, behind the viewer.
+    @State private var chipLine = ChipLine()
 
     var body: some View {
         let facts = store.facts(for: opening)
@@ -340,6 +343,8 @@ struct MediaInfoSheet: View {
 
     private func send(_ change: VisibilityChange, uid: String) {
         guard let timeline, let handle, let baseURL else { return }
+        // Taken before the hop, so the answer is judged against the change that was sent.
+        let ticket = chipLine.sending()
         Task {
             let outcome = await Self.sendVisibility(
                 change, uid: uid, through: timeline, holding: store, using: handle,
@@ -347,6 +352,7 @@ struct MediaInfoSheet: View {
             // A change that became a widening while it queued comes back as its question
             // (MEMNG-981), and is asked like any widening.
             widening.heard(outcome, on: uid)
+            chipLine.heard(outcome, for: ticket)
         }
     }
 
@@ -369,6 +375,12 @@ struct MediaInfoSheet: View {
             Text(card.tags.map { "#\($0)" }.joined(separator: " ")).foregroundStyle(.secondary)
         }
         visibilityChip(card)
+        if let failure = chipLine.sentence {
+            Text(failure)
+                .font(.footnote)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if card.showable {
             Button("Show memo") { showMemo(card.uid) }
         }

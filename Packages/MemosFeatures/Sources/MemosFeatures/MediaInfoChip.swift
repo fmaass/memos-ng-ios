@@ -47,3 +47,34 @@ extension MediaInfoSheet {
         return answer.outcome
     }
 }
+
+extension MediaInfoSheet {
+    /// What the sheet says under the chip after a change from it (MEMNG-1034): the failure's own
+    /// sentence, the one the compose and edit sheets say, or nil when there is nothing to tell —
+    /// a change that went, and a question, which the widening ask puts up instead.
+    static func failureLine(for outcome: ComposeOutcome) -> String? {
+        outcome.failure.map(ComposeFailurePresentation.sentence(for:))
+    }
+
+    /// The line under the chip, about the LATEST change sent from this sheet and no other: a
+    /// change clears it as it goes, and an answer to a change that a later one overtook lands
+    /// nowhere, so an outlived failure cannot put its sentence over a later change's answer.
+    struct ChipLine: Equatable {
+        private(set) var sentence: String?
+        private var latest = 0
+
+        /// A change is going: the line clears, and the ticket returned is the one its answer
+        /// must carry.
+        mutating func sending() -> Int {
+            latest += 1
+            sentence = nil
+            return latest
+        }
+
+        /// The answer to the change that was handed `ticket`.
+        mutating func heard(_ outcome: ComposeOutcome, for ticket: Int) {
+            guard ticket == latest else { return }
+            sentence = MediaInfoSheet.failureLine(for: outcome)
+        }
+    }
+}

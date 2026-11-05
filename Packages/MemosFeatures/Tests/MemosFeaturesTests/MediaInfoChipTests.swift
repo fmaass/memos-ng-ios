@@ -8,14 +8,32 @@ import Testing
 @testable import MemosFeatures
 
 /// A server holding memo "m1": the list and a read answer it at `start`, owned by the reader when
-/// `mine`; a PATCH answers it at the audience its body asked for, written an hour later. While
-/// `holding` is set a PATCH waits before it answers.
+/// `mine`; a PATCH answers as `answers` scripts it, by default at the audience its body asked
+/// for, written an hour later. While `holding` is set a PATCH waits before it answers.
 nonisolated private final class ChipServer: ClientTransport, @unchecked Sendable {
+    /// How a PATCH is answered (MEMNG-1034).
+    nonisolated enum PatchAnswer: Sendable {
+        /// The memo at the audience the body asked for, written an hour after the list's stamp.
+        case echo
+        /// The memo at this audience and this stamp, whatever the body asked for.
+        case memo(visibility: String, updated: String)
+        /// This status and no body.
+        case status(Int)
+        /// No answer at all: the device is offline.
+        case offline
+    }
+
+    /// The stamp the list and a read carry.
+    static let listed = "2026-08-23T09:00:00.443000Z"
+    /// The stamp an echoed PATCH answer carries.
+    static let anHourLater = "2026-08-23T10:00:00.443000Z"
+
     private let lock = NSLock()
     private let start: String
     private let mine: Bool
     private var sent: [String] = []
     private var held = false
+    private var script: [PatchAnswer] = []
 
     init(start: String, mine: Bool = true) {
         self.start = start
@@ -26,6 +44,11 @@ nonisolated private final class ChipServer: ClientTransport, @unchecked Sendable
     var holding: Bool {
         get { lock.withLock { held } }
         set { lock.withLock { held = newValue } }
+    }
+    /// The answers to the next PATCHes, in order; once they run out every PATCH is `.echo`.
+    var answers: [PatchAnswer] {
+        get { lock.withLock { script } }
+        set { lock.withLock { script = newValue } }
     }
 
     func memo(_ visibility: String, updated: String) -> String {
@@ -41,7 +64,7 @@ nonisolated private final class ChipServer: ClientTransport, @unchecked Sendable
     ) async throws -> (HTTPResponse, HTTPBody?) {
         var response = HTTPResponse(status: .ok)
         response.headerFields[.contentType] = "application/json"
-        let earlier = "2026-08-23T09:00:00.443000Z"
+        let earlier = Self.listed
         switch operationID {
         case "list_memos_api_memos_get":
             let item = memo(start, updated: earlier)
@@ -53,9 +76,21 @@ nonisolated private final class ChipServer: ClientTransport, @unchecked Sendable
             let data = try await Data(collecting: body ?? HTTPBody(), upTo: 1 << 20)
             let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let visibility = object?["visibility"] as? String ?? "absent"
-            lock.withLock { sent.append(visibility) }
+            let answer: PatchAnswer = lock.withLock {
+                sent.append(visibility)
+                return script.isEmpty ? .echo : script.removeFirst()
+            }
             while holding { try await Task.sleep(for: .milliseconds(1)) }
-            return (response, HTTPBody(memo(visibility, updated: "2026-08-23T10:00:00.443000Z")))
+            switch answer {
+            case .echo:
+                return (response, HTTPBody(memo(visibility, updated: Self.anHourLater)))
+            case .memo(let answered, let updated):
+                return (response, HTTPBody(memo(answered, updated: updated)))
+            case .status(let code):
+                return (HTTPResponse(status: .init(code: code)), nil)
+            case .offline:
+                throw URLError(.notConnectedToInternet)
+            }
         default:
             return (HTTPResponse(status: .internalServerError), nil)
         }
@@ -271,5 +306,138 @@ struct MediaInfoChipTests {
 
         #expect(server.visibilities == ["PRIVATE"], "control: the change went")
         #expect(Self.lookedUp(context)?.visibility == .protected, "an outlived answer landed")
+    }
+
+    /// A pick of Private on the person's Public memo, sent the way the sheet sends it, with the
+    /// sheet's line fed the outcome as the sheet feeds it.
+    private static func pickPrivate(
+        _ server: ChipServer, on context: MediaContextStore, line: inout MediaInfoSheet.ChipLine
+    ) async throws -> ComposeOutcome {
+        let handle = Self.handle(server)
+        await context.loadMemo(uid: "m1", using: handle, baseURL: Self.base)
+        let card = try #require(Self.lookedUp(context))
+        var ask = WideningAsk()
+        guard case .send(let change?) = ask.pick(.private, from: card.visibility, on: card.uid)
+        else {
+            Issue.record("Public → Private did not go at once")
+            return .saved
+        }
+        let ticket = line.sending()
+        let outcome = await MediaInfoSheet.sendVisibility(
+            change, uid: card.uid, through: TimelineStore(), holding: context, using: handle,
+            baseURL: Self.base)
+        ask.heard(outcome, on: card.uid)
+        #expect(ask.pending == nil, "a failure put a question up")
+        line.heard(outcome, for: ticket)
+        return outcome
+    }
+
+    @Test("a refused, failed or unheard change is told in the sheet; the chip keeps the audience")
+    func failedChangeIsToldInTheSheet() async throws {
+        let cases: [(ChipServer.PatchAnswer, ComposeFailure, String)] = [
+            (.status(403), .rejection, "4xx"),
+            (.status(500), .serverFailure, "5xx"),
+            (.offline, .transport(sent: true), "offline"),
+        ]
+        for (answer, failure, label) in cases {
+            let server = ChipServer(start: "PUBLIC")
+            server.answers = [answer]
+            let context = MediaContextStore()
+            var line = MediaInfoSheet.ChipLine()
+
+            let outcome = try await Self.pickPrivate(server, on: context, line: &line)
+
+            #expect(server.visibilities == ["PRIVATE"], "control: the change went (\(label))")
+            #expect(outcome == .failed(failure), "\(label)")
+            let said = ComposeFailurePresentation.sentence(for: failure)
+            #expect(MediaInfoSheet.failureLine(for: outcome) == said, "\(label)")
+            #expect(line.sentence == said, "the sheet said nothing (\(label))")
+            let card = try #require(Self.lookedUp(context))
+            #expect(MediaInfoRows.chip(card, canChange: true) == .menu(.public), "\(label)")
+        }
+    }
+
+    @Test("every outcome category has its line: a failure its sentence, a save and a question none")
+    func everyOutcomeHasItsLine() throws {
+        #expect(MediaInfoSheet.failureLine(for: .saved) == nil)
+        guard case .ask(let question) = VisibilityChange.propose(.public, from: .private) else {
+            Issue.record("Private → Public did not ask")
+            return
+        }
+        #expect(MediaInfoSheet.failureLine(for: .ask(question)) == nil)
+        let failures: [ComposeFailure] = [
+            .transport(sent: false), .transport(sent: true), .authorization, .storage, .rejection,
+            .serverFailure, .defaultVisibilityUnknown,
+        ]
+        for failure in failures {
+            let said = MediaInfoSheet.failureLine(for: .failed(failure))
+            #expect(said == ComposeFailurePresentation.sentence(for: failure), "\(failure)")
+            #expect(said?.isEmpty == false, "\(failure)")
+        }
+    }
+
+    @Test("a failed change's line goes once the next change goes, and that change's answer shows")
+    func nextChangeClearsTheLine() async throws {
+        let server = ChipServer(start: "PUBLIC")
+        server.answers = [.status(500)]
+        let context = MediaContextStore()
+        var line = MediaInfoSheet.ChipLine()
+        let failed = try await Self.pickPrivate(server, on: context, line: &line)
+        #expect(failed == .failed(.serverFailure), "control: the first change failed")
+        #expect(line.sentence != nil, "control: the failure was told")
+
+        let again = try await Self.pickPrivate(server, on: context, line: &line)
+
+        #expect(again == .saved)
+        #expect(server.visibilities == ["PRIVATE", "PRIVATE"])
+        #expect(line.sentence == nil, "the failure outlived the change that went")
+        #expect(Self.lookedUp(context)?.visibility == .private)
+    }
+
+    @Test("the line speaks for the latest change only: an overtaken change's failure lands nowhere")
+    func overtakenFailureLandsNowhere() {
+        var line = MediaInfoSheet.ChipLine()
+        let failing = line.sending()
+        line.heard(.failed(.rejection), for: failing)
+        #expect(line.sentence == ComposeFailurePresentation.sentence(for: .rejection))
+        let earlier = line.sending()
+        #expect(line.sentence == nil, "a change went and the old failure stayed up")
+        let later = line.sending()
+        line.heard(.saved, for: later)
+        line.heard(.failed(.serverFailure), for: earlier)
+        #expect(line.sentence == nil, "an overtaken change's failure landed over a later answer")
+        line.heard(.failed(.storage), for: later)
+        #expect(line.sentence == ComposeFailurePresentation.sentence(for: .storage), "control")
+    }
+
+    @Test("an answer stamped the same instant as the memo held is the one the chip shows")
+    func tiedAnswerWins() async throws {
+        let server = ChipServer(start: "PUBLIC")
+        // The server's answer carries the very stamp the read did: equal is not older.
+        server.answers = [.memo(visibility: "PRIVATE", updated: ChipServer.listed)]
+        let context = MediaContextStore()
+        var line = MediaInfoSheet.ChipLine()
+
+        let outcome = try await Self.pickPrivate(server, on: context, line: &line)
+
+        #expect(outcome == .saved)
+        let card = try #require(Self.lookedUp(context))
+        #expect(MediaInfoRows.chip(card, canChange: true) == .menu(.private), "a tie kept the read")
+    }
+
+    @Test("the chip shows the audience the server answered with, not the one that was picked")
+    func answerNotSelectionIsShown() async throws {
+        let server = ChipServer(start: "PUBLIC")
+        server.answers = [.memo(visibility: "PROTECTED", updated: ChipServer.anHourLater)]
+        let context = MediaContextStore()
+        var line = MediaInfoSheet.ChipLine()
+
+        let outcome = try await Self.pickPrivate(server, on: context, line: &line)
+
+        #expect(outcome == .saved)
+        #expect(server.visibilities == ["PRIVATE"], "control: Private was asked for")
+        #expect(line.sentence == nil)
+        let card = try #require(Self.lookedUp(context))
+        #expect(MediaInfoRows.chip(card, canChange: true) == .menu(.protected), "the pick shown")
     }
 }
