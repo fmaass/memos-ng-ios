@@ -5,6 +5,20 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (77)
+
+- A trip pass link opened from the Camera or Messages opens the app on that pass; without the app it falls back to the door's landing page.
+- Each file now uploads whole through the system's background transfer and is retried whole after a failure.
+- Adding files to an existing memo goes through the upload queue, the same way a new memo does.
+- I can choose when videos use mobile data, and a file that waits shows the real reason.
+- The Transfers strip keeps my reading place when it comes and goes, and it names a held capture.
+- The Info sheet tells me when a visibility change fails.
+- A new memo from a trip starts on my account's default visibility instead of a preselected one.
+- A pending card keeps its missing-photo notice when it becomes the memo, and clears it when a re-post brings the photo.
+- The guest Uploads list shows the filename and capture time, opens a picture big, and offers Hide and Remove on a swipe.
+- Pictures from guests that land after the first refresh appear in the trip without a relaunch.
+- Delete memo is a red trash icon at the right end of the edit sheet's pill row.
+
 ## 2.4.0 (76)
 
 - I can invite guests to a trip with a scannable QR pass, see who joined on which device, and revoke a device or end the pass.
