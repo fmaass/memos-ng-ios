@@ -42,12 +42,12 @@ public enum RetrySchedule {
     }
 
     /// The transient class's next attempt: the server's `Retry-After` when it gave a usable one,
-    /// otherwise the curve.
+    /// raised to `UploadBudget.shortestRetryAfter`, otherwise the curve.
     public static func nextAttempt(
         afterFailure attempt: Int, from now: Date, retryAfter: TimeInterval? = nil
     ) -> Date {
         if let retryAfter, retryAfter >= 0, retryAfter <= UploadBudget.longestRetryAfter {
-            return now.addingTimeInterval(retryAfter)
+            return now.addingTimeInterval(Swift.max(retryAfter, UploadBudget.shortestRetryAfter))
         }
         return now.addingTimeInterval(delay(forAttempt: attempt))
     }
@@ -61,14 +61,17 @@ public enum RetrySchedule {
     ///
     /// - Parameters:
     ///   - retryAfter: seconds the server asked for, which REPLACE the curve un-jittered and are
-    ///     taken as named: `cap` bounds the curve this computes, not a delay the server chose.
+    ///     taken as named down to `UploadBudget.shortestRetryAfter`: `cap` bounds the curve this
+    ///     computes, not a delay the server chose.
     ///   - rng: a draw in `[0, 1]`; the live one is the system generator.
     public static func delay(
         forAttempt attempt: Int,
         retryAfter: TimeInterval?,
         rng: () -> Double
     ) -> TimeInterval {
-        if let retryAfter, retryAfter >= 0 { return retryAfter }
+        if let retryAfter, retryAfter >= 0 {
+            return Swift.max(retryAfter, UploadBudget.shortestRetryAfter)
+        }
         let draw = Swift.min(Swift.max(rng(), 0), 1)
         return delay(forAttempt: attempt) * draw
     }

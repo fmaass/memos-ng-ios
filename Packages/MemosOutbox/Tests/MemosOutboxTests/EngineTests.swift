@@ -24,6 +24,8 @@ struct Harness {
     let job: UploadJob
     let clock: MutableClock
     let credentials: SwitchableCredentials
+    /// The deadline timer's sleeper, which no test advances unless it asks to.
+    let sleeper: ControlledSleeper
     let now = Date(timeIntervalSince1970: 1_750_000_000)
 
     var file: OutboxFile { job.files[0] }
@@ -47,7 +49,8 @@ struct Harness {
         // Where the engine's clock starts. Whole seconds unless a test says otherwise; the
         // round-trip witness starts it on a fraction, which is what a real clock hands out and
         // what the manifest cannot keep.
-        clockStart: Date? = nil
+        clockStart: Date? = nil,
+        sleeper: ControlledSleeper = ControlledSleeper()
     ) async throws -> Harness {
         let root = try Fixture.temporaryDirectory()
         // The provider is built BEFORE the repository, because the repository decides a refusal
@@ -95,9 +98,10 @@ struct Harness {
             network: network,
             preferences: preferences.store,
             clock: { clock.now },
-            // A timer no test advances: chunk-lane backoffs arm the deadline timer (MEMNG-955),
-            // and a system sleeper would fire at once against this fixed 2025 clock.
-            sleeper: ControlledSleeper()
+            // A timer no test advances unless it asks to: chunk-lane backoffs arm the deadline
+            // timer (MEMNG-955), and a system sleeper would fire at once against this fixed 2025
+            // clock.
+            sleeper: sleeper
         )
         return Harness(
             root: root,
@@ -111,7 +115,8 @@ struct Harness {
             engine: engine,
             job: job,
             clock: clock,
-            credentials: provider
+            credentials: provider,
+            sleeper: sleeper
         )
     }
 

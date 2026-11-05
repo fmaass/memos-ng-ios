@@ -2211,6 +2211,27 @@ struct WholeBudgetEngineTests {
         #expect(sleeper.mostArmedAtOnce == 1)
     }
 
+    /// MEMNG-1035: a zero is a deadline of `now`, which the answer's own continuation met at once
+    /// — a server answering 429 with `Retry-After: 0` every time was asked again in a tight loop.
+    @Test("a 429 with Retry-After: 0 waits the floor, and only the timer sends the retry")
+    func retryAfterZeroIsTheTimers() async throws {
+        let sleeper = ControlledSleeper()
+        let rig = try await WholeRig.make(sleeper: sleeper)
+        defer { rig.cleanUp() }
+        let start = rig.clock.now
+        try await rig.storm(retryAfter: "0")
+
+        #expect(rig.attempts(of: rig.video.id) == [0], "sent again before any wake")
+        let due = start.addingTimeInterval(UploadBudget.shortestRetryAfter)
+        #expect(try await rig.reload().file(rig.video.id)?.nextAttemptAt == due)
+        #expect(sleeper.armed == [due])
+
+        rig.clock.advance(UploadBudget.shortestRetryAfter)
+        sleeper.advance(to: rig.clock.now)
+        #expect(try await rig.eventually { rig.attempts(of: rig.video.id) == [0, 1] })
+        #expect(sleeper.mostArmedAtOnce == 1)
+    }
+
     @Test("closing the gate first leaves no armed timer, and nothing is sent at the deadline")
     func closedGateSendsNothing() async throws {
         let sleeper = ControlledSleeper()

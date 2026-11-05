@@ -56,6 +56,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// next term, whether it has minted it yet or not, and a second bump would mint one for a
     /// transfer nobody scheduled.
     private var releasing: Set<UUID> = []
+    /// The epoch of the latest grant this engine acquired, whoever acquired it (MEMNG-1035).
+    private var latestEpoch: Int?
+    /// The epoch the sign-in release last looked under; nil until this launch's first drain.
+    private var releaseScanEpoch: Int?
+    /// Each signInRequired hold that landed in this launch, by the epoch it was earned under —
+    /// in memory only, so a hold an earlier launch left reads as earned under another grant.
+    private var signInHeldUnder: [UUID: Int] = [:]
     /// The jobs whose memo create is being sent, claimed synchronously before the first hop by
     /// whichever of a drain pass or an answer continuation reaches it first. A second claimant is
     /// REFUSED, not joined: the first owns the create and its outcome. Released on every outcome,
@@ -374,7 +381,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     }
 
     private func drainOnce() async {
-        guard let credentials = await credentials.currentCredentials() else { return }
+        guard let credentials = await acquire() else { return }
+        await releaseSignInHolds(under: credentials)
         let plan: ReconciliationPlan
         do {
             plan = try await reconcile()
@@ -1036,7 +1044,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                     creating.held(reason, error: message),
                     ifStillCurrent: refused.issuedUnder,
                     matching: creating,
-                    else: creating.backingOff(at: clock(), error: refused.supersededMessage)
+                    // Under a replaced grant only a credential refusal is the successor's to
+                    // retry; a 409 or a 413 says the same whoever presented it (MEMNG-1035).
+                    else: creating.applying(
+                        refused.disposition(assumingCurrent: false), at: clock())
                 )
             } else {
                 await save(creating.held(.serverRefused, error: message), matching: creating)
@@ -1252,7 +1263,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         )
 
         let fileID = result.identity.fileID
-        let credentials = await credentials.currentCredentials()
+        let credentials = await acquire()
         var next = job
         // Set when only the server can say where the upload stands, which is the one decision
         // here that cannot be made offline.
@@ -1650,6 +1661,59 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         requestDrain()
     }
 
+    // MARK: - signing in again
+
+    /// Every grant this engine takes, through one door, so a hold can be told which grant it
+    /// was earned under.
+    private func acquire() async -> OutboxCredentials? {
+        let acquired = await credentials.currentCredentials()
+        if let acquired { latestEpoch = acquired.epoch }
+        return acquired
+    }
+
+    /// A landed signInRequired hold is earned under the grant this engine holds now: one refused
+    /// under a replaced grant lands as a back-off instead, so the latest acquisition is its grant.
+    private func noteSignInHold(_ job: UploadJob) {
+        guard job.state == .held, job.holdReason == .signInRequired else {
+            signInHeldUnder[job.id] = nil
+            return
+        }
+        if signInHeldUnder[job.id] == nil { signInHeldUnder[job.id] = latestEpoch }
+    }
+
+    /// Signing in again releases what "Sign in again" held (MEMNG-1035), through "Try again"'s own
+    /// path. Neither a foreground nor a verified session is a sign-in, so the signal is the grant's
+    /// epoch: looked at once per move of it — and once per launch, the epoch restarting there —
+    /// releasing only holds of this account earned under another grant. A hold earned again under
+    /// this one stays, so each capture is released at most once per move. Member holds only: the
+    /// guest pass has its own way back.
+    private func releaseSignInHolds(under credentials: OutboxCredentials) async {
+        guard credentials.kind == .member, credentials.epoch != releaseScanEpoch,
+            schedulingGate.isOpen
+        else { return }
+        // Claimed before the hop; drains run one at a time, so only a release that did not run
+        // gives the claim back, and the next drain looks again.
+        let before = releaseScanEpoch
+        releaseScanEpoch = credentials.epoch
+        let jobs: [UploadJob]
+        do {
+            jobs = try await repository.loadJobs()
+        } catch {
+            releaseScanEpoch = before
+            return
+        }
+        for job in jobs
+        where job.state == .held && job.holdReason == .signInRequired && job.cancelledAt == nil
+            && job.binding.matches(credentials) && signInHeldUnder[job.id] != credentials.epoch
+        {
+            guard schedulingGate.isOpen else {
+                releaseScanEpoch = before
+                return
+            }
+            await release(jobID: job.id)
+        }
+    }
+
     // MARK: - the deadline timer
 
     private func noteDeadlines(of job: UploadJob) {
@@ -1675,6 +1739,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// Records what a write left and re-arms the timer on it.
     private func wrote(_ job: UploadJob) {
         Self.logReason(of: job)
+        noteSignInHold(job)
         noteDeadlines(of: job)
         rearmDeadlineTimer()
     }
@@ -2356,7 +2421,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         if refused { requestDrain() }
         await onChange()
         guard let written,
-            let credentials = await credentials.currentCredentials(),
+            let credentials = await acquire(),
             mayStillSend(credentials)
         else { return }
         await advance(written, credentials: credentials)
@@ -2371,7 +2436,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// answer.
     private func askWhereItStands(_ job: UploadJob, fileID: UUID) async -> WholeFileChange? {
         guard schedulingGate.isOpen, permitsNetwork(job),
-            let credentials = await credentials.currentCredentials(),
+            let credentials = await acquire(),
             let file = job.file(fileID)
         else { return nil }
         // Asked under another account, that server knows nothing of this upload, and its 404

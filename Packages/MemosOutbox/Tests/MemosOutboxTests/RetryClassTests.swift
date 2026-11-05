@@ -225,3 +225,268 @@ struct RetryClassTests {
         #expect(await harness.reload() == nil, "the replay resolved the capture")
     }
 }
+
+/// The retry-class edges MEMNG-1035 closed, through the real engine over a scripted server.
+@Suite("Retry classes: the edges")
+struct RetryClassEdgeTests {
+    private static func eventually(_ condition: () async -> Bool) async throws -> Bool {
+        for _ in 0..<300 {
+            if await condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
+    /// A server whose memo create answers `create` for every POST; `/health` is fine.
+    private static func creating(
+        _ create: @escaping @Sendable (Int) -> OutboxHTTPResponse
+    ) -> (ScriptedHTTP, Counter) {
+        let posts = Counter()
+        let http = ScriptedHTTP { request in
+            switch (request.httpMethod ?? "", request.url?.path() ?? "") {
+            case ("GET", "/health"):
+                return OutboxHTTPResponse(statusCode: 200)
+            case ("POST", "/api/memos"):
+                posts.increment()
+                return create(posts.count)
+            default:
+                return OutboxHTTPResponse(statusCode: 500)
+            }
+        }
+        return (http, posts)
+    }
+
+    private static let created = OutboxHTTPResponse(
+        statusCode: 201, body: Data(#"{"uid":"m1"}"#.utf8))
+
+    // MARK: - item 1: Retry-After 0
+
+    @Test("a server-named delay under the floor waits the floor; one at or over it is kept")
+    func retryAfterFloor() {
+        let now = Date(timeIntervalSince1970: 1000)
+        let floor = UploadBudget.shortestRetryAfter
+        #expect(floor > 1, "a whole-second manifest can put now + 1 back on now")
+        for asked in [0.0, 1.0] {
+            #expect(
+                RetrySchedule.nextAttempt(afterFailure: 1, from: now, retryAfter: asked)
+                    == now.addingTimeInterval(floor))
+            #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: asked, rng: { 0 }) == floor)
+        }
+        for asked in [floor, 7] {
+            #expect(
+                RetrySchedule.nextAttempt(afterFailure: 1, from: now, retryAfter: asked)
+                    == now.addingTimeInterval(asked))
+            #expect(RetrySchedule.delay(forAttempt: 1, retryAfter: asked, rng: { 0 }) == asked)
+        }
+    }
+
+    @Test("a create answered 503 with Retry-After: 0 is sent again by the timer, no drain asked")
+    func createRetryAfterZeroIsWokenByTheTimer() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1
+                ? OutboxHTTPResponse(statusCode: 503, headers: ["Retry-After": "0"])
+                : Self.created
+        }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+
+        let waiting = try #require(await harness.reload())
+        #expect(waiting.waitReason == .retrying)
+        let deadline = try #require(harness.sleeper.armed.first, "nothing armed: no wake")
+        #expect(deadline == harness.now.addingTimeInterval(UploadBudget.shortestRetryAfter))
+        #expect(posts.count == 1)
+
+        harness.clock.advance(UploadBudget.shortestRetryAfter)
+        harness.sleeper.advance(to: harness.clock.now)
+
+        #expect(try await Self.eventually { await harness.reload() == nil })
+        #expect(posts.count == 2)
+    }
+
+    // MARK: - items 5 and 7: the create's 413 and 409
+
+    @Test("a create answered 413 under the current grant holds tooLarge, with no second POST")
+    func createTooLargeHolds() async throws {
+        let (http, posts) = Self.creating { _ in OutboxHTTPResponse(statusCode: 413) }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+
+        await harness.engine.drain()
+        await harness.engine.drain()
+
+        let held = try #require(await harness.reload())
+        #expect(held.state == .held)
+        #expect(held.holdReason == .tooLarge)
+        #expect(posts.count == 1, "held means no second try")
+    }
+
+    @Test(
+        "a create refused under a grant replaced in flight holds by its status, not a back-off",
+        arguments: [(413, HoldReason.tooLarge), (409, HoldReason.serverRefused)]
+    )
+    func createRefusalUnderAReplacedGrantHolds(status: Int, reason: HoldReason) async throws {
+        let switched = CredentialsBox()
+        let (http, posts) = Self.creating { _ in
+            switched.value?.supersede()
+            return OutboxHTTPResponse(statusCode: status)
+        }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        switched.value = harness.credentials
+
+        await harness.engine.drain()
+        await harness.engine.drain()
+
+        let held = try #require(await harness.reload())
+        #expect(held.state == .held, "a \(status) is not the credential's to space out")
+        #expect(held.holdReason == reason)
+        #expect(posts.count == 1)
+    }
+
+    // MARK: - item 7: a chunk row waiting on the network
+
+    @Test("a chunk-lane row waiting on the network arms no timer, its deadline still ahead")
+    func chunkConnectivityWaitArmsNothing() async throws {
+        let harness = try await Harness.make(
+            bytes: 1000, http: .standard(chunkSize: 400), network: StubNetworkPath(.cellular),
+            allowsMobileData: false)
+        defer { harness.cleanUp() }
+        // Backing off when the phone left the wifi: its deadline is still ahead, so only the wait
+        // reason keeps it off the timer.
+        let ahead = harness.now.addingTimeInterval(30)
+        var backingOff = harness.job
+        backingOff.state = .waiting
+        backingOff.waitReason = .retrying
+        backingOff.nextAttemptAt = ahead
+        try await harness.repository.save(backingOff)
+
+        await harness.engine.drain()
+
+        let saved = try #require(await harness.reload())
+        #expect(saved.lane == .chunk)
+        #expect(saved.waitReason == .homeNetwork)
+        #expect(saved.nextAttemptAt == ahead)
+        #expect(harness.sleeper.history.isEmpty, "armed \(harness.sleeper.history)")
+    }
+
+    // MARK: - item 8: a sign-in releases signInRequired
+
+    @Test("a sign-in releases a signInRequired hold; another account's capture stays held")
+    func signInReleasesTheHold() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1 ? OutboxHTTPResponse(statusCode: 401) : Self.created
+        }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        #expect(await harness.reload()?.holdReason == .signInRequired)
+        let other = try await harness.repository.enqueue(
+            content: "someone else's memo", visibility: "PRIVATE", capturedAt: harness.now,
+            binding: Fixture.binding(owner: "someone-else"), sources: [])
+        try await harness.repository.save(other.held(.signInRequired))
+
+        // Signed in again as the same account: the session's epoch moved.
+        harness.credentials.supersede()
+        await harness.engine.drain()
+
+        #expect(await harness.reload() == nil, "released and sent")
+        #expect(posts.count == 2)
+        #expect(await harness.repository.job(other.id)?.state == .held)
+        let bodies = harness.http.requests(method: "POST").map {
+            String(decoding: $0.httpBody ?? Data(), as: UTF8.self)
+        }
+        #expect(!bodies.contains { $0.contains("someone else") })
+    }
+
+    @Test("a plain foreground under the same grant releases nothing")
+    func sameGrantReleasesNothing() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1 ? OutboxHTTPResponse(statusCode: 401) : Self.created
+        }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+
+        await harness.engine.drain()
+        await harness.engine.drain()
+
+        #expect(await harness.reload()?.holdReason == .signInRequired)
+        #expect(posts.count == 1)
+    }
+
+    @Test("a hold an earlier launch left is released once by this launch's first drain")
+    func earlierLaunchHoldReleasedOnce() async throws {
+        let (http, posts) = Self.creating { _ in OutboxHTTPResponse(statusCode: 401) }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        try await harness.repository.save(harness.job.held(.signInRequired))
+
+        await harness.engine.drain()
+        await harness.engine.drain()
+
+        #expect(posts.count == 1, "one release, one answer, held again")
+        #expect(await harness.reload()?.holdReason == .signInRequired)
+    }
+
+    @Test("two drains racing a sign-in release each hold once; a hold earned again stays")
+    func racingDrainsReleaseOnce() async throws {
+        let (http, posts) = Self.creating { _ in OutboxHTTPResponse(statusCode: 401) }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        harness.credentials.supersede()
+
+        async let first: Void = harness.engine.drain()
+        async let second: Void = harness.engine.drain()
+        _ = await (first, second)
+        await harness.engine.untilQuiescent()
+
+        #expect(posts.count == 2)
+        #expect(await harness.reload()?.holdReason == .signInRequired)
+    }
+
+    @Test("a guest capture's signInRequired is not released by an epoch move")
+    func guestHoldIsNotReleased() async throws {
+        let guest = OutboxCredentials(
+            serverBaseURL: Fixture.server, ownerSubject: "device-1", token: "guest-token",
+            kind: .guest)
+        // A guest capture always carries a file: the guest door has no text-only memo.
+        let harness = try await Harness.make(
+            bytes: 1000, http: .standard(), credentials: guest,
+            binding: AccountBinding(
+                serverBaseURL: Fixture.server, ownerSubject: "device-1", kind: .guest))
+        defer { harness.cleanUp() }
+        try await harness.repository.save(harness.job.held(.signInRequired))
+        harness.credentials.supersede()
+
+        await harness.engine.drain()
+
+        let held = try #require(await harness.reload())
+        #expect(held.state == .held)
+        #expect(held.holdReason == .signInRequired)
+    }
+
+    @Test("a queue that could not be read leaves the sign-in release owed to the next drain")
+    func unreadableQueueKeepsTheReleaseOwed() async throws {
+        let (http, posts) = Self.creating { count in
+            count == 1 ? OutboxHTTPResponse(statusCode: 401) : Self.created
+        }
+        let harness = try await Harness.make(bytes: 0, http: http)
+        defer { harness.cleanUp() }
+        await harness.engine.drain()
+        harness.credentials.supersede()
+
+        let restore = try Fixture.permissions(
+            0, on: harness.root.appending(path: "outbox").appending(path: "jobs"))
+        await harness.engine.drain()
+        restore()
+        #expect(posts.count == 1)
+
+        await harness.engine.drain()
+
+        #expect(posts.count == 2, "the release was owed, not spent on a list nobody read")
+        #expect(await harness.reload() == nil)
+    }
+}

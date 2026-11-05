@@ -38,6 +38,13 @@ public enum UploadBudget {
     /// HTTP-date, and the computed schedule applies.
     public static let longestRetryAfter: TimeInterval = 604_800
 
+    /// The shortest server-named delay taken as named, in seconds; a shorter one waits this long
+    /// (MEMNG-1035). A `Retry-After: 0` deadline is `now`, and the timer arms only deadlines still
+    /// ahead — a past one is a pass's, and nothing asks for that pass — so the row would wait for
+    /// an outside wake. One second is not enough: a capture's deadline goes down in whole seconds,
+    /// truncated, so `now + 1` can land on disk a hair after `now`. Two always lands a second ahead.
+    public static let shortestRetryAfter: TimeInterval = 2
+
     /// How many fresh upload sessions one file is given in a row after the server says its session
     /// is gone. The next loss holds the capture: a server that loses every session it opens is not
     /// helped by being asked for another.
