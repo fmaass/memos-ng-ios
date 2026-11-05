@@ -697,6 +697,8 @@ struct TripView: View {
                     if let invited = live ?? openedTrip {
                         TripGuestsSheet(trip: invited, entry: entry, access: access) {
                             memberStore.invalidate(uid: invited.uid)
+                        } onContributions: { listed in
+                            await drainIfNewer(invited, than: listed)
                         }
                     }
                 }
@@ -826,7 +828,9 @@ struct TripView: View {
                 // account — in a task, after the change's own handlers, which retire the lease
                 // the account held — so it is the one live now; a forget on the way out retires it.
                 if !scope.isTrip { coverLease = memberStore.coverLease(for: scope) }
-                await drain()
+                // Read again only once the held drain is a minute old: what landed on the server
+                // since shows on the next appearance, without a read on every one (MEMNG-1160).
+                await drainIfStale()
             }
             // The store let the members go — a change to a trip moved its revision — so they are
             // read again; the screen keeps showing the last ones meanwhile. A drain that failed is
@@ -1032,6 +1036,7 @@ struct TripView: View {
             hostAction: coverAction
         )
         .environment(\.signedURLRefresher, refresher)
+        .refreshable { await refresh() }
         // The reader's scroll folds and unfolds the main bar, as the Timeline's does: told as the
         // Collections tab's, so it counts only while that tab is on screen (MEMNG-715).
         .feedsDock(dock, on: .collections, owner: feedOwner(.photos))
@@ -1507,6 +1512,27 @@ struct TripView: View {
     private func drain() async {
         guard let readScope, let access = access() else { return }
         await memberStore.drain(readScope, using: access.handle, baseURL: access.baseURL)
+    }
+
+    private func drainIfStale() async {
+        guard let readScope, let access = access() else { return }
+        await memberStore.drainIfStale(readScope, using: access.handle, baseURL: access.baseURL)
+    }
+
+    /// Pull-to-refresh (MEMNG-1160): the members whatever their age, and the grid's filtered read
+    /// with them; a read on the wire is joined.
+    private func refresh() async {
+        await drain()
+        await drainFiltered()
+    }
+
+    /// A Guest Uploads read listed `listed`: the trip, and the grid's filtered read, again when
+    /// one of them is newer than the drain (MEMNG-1160).
+    private func drainIfNewer(_ trip: Trip, than listed: [TripContribution]) async {
+        guard let access = access() else { return }
+        let read = await memberStore.drainIfNewer(
+            trip, contributions: listed, using: access.handle, baseURL: access.baseURL)
+        if read { await drainFiltered() }
     }
 
     /// The grid's filtered read, or the retirement of one for the unfiltered query.

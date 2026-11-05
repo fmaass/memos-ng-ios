@@ -20,6 +20,9 @@ struct TripGuestsSheet: View {
     /// Told after a moderation reached the server: the trip's own grid still holds what it read
     /// before, and a hidden or removed picture must leave it.
     var onModerated: @MainActor () -> Void = {}
+    /// Told what each Guest Uploads read listed: a picture newer than the trip's drain is read
+    /// into the grid (MEMNG-1160).
+    var onContributions: @MainActor ([TripContribution]) async -> Void = { _ in }
 
     @Environment(SessionStore.self) private var session: SessionStore?
     @Environment(\.dismiss) private var dismiss
@@ -57,7 +60,8 @@ struct TripGuestsSheet: View {
                 onUnauthorized: { [session] refusal in
                     guard let session else { return .superseded }
                     return await session.handle(refusal)
-                })
+                },
+                onContributions: onContributions)
             if let session { made.reports(to: session) }
             store = made
             if entry == .invite { path = [.invite] }

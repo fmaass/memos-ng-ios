@@ -232,11 +232,16 @@ struct TripScreenRenderTests {
     /// Every member's tile, in the order the drain's pages came.
     static let files = ["p0", "p1", "p2", "p3", "p4"]
 
-    private func stores(memberCap: Int = TripMemberStore.memberCap)
+    private func stores(memberCap: Int = TripMemberStore.memberCap, clock: TripClock? = nil)
         -> (TripStore, TripMemberStore)
     {
         let trips = TripStore(identity: alice, root: root)
-        return (trips, TripMemberStore(trips: trips, pageSize: 2, memberCap: memberCap))
+        guard let clock else {
+            return (trips, TripMemberStore(trips: trips, pageSize: 2, memberCap: memberCap))
+        }
+        let members = TripMemberStore(
+            trips: trips, pageSize: 2, memberCap: memberCap, clock: { clock.read() })
+        return (trips, members)
     }
 
     /// `title` on the scripted server under `tag`, with its removals and its cover already made
@@ -3146,15 +3151,18 @@ extension TripScreenRenderTests {
     }
 
     /// A trip opened over members already read keeps them on screen from its first frame while
-    /// its own read is out — not only once a later read has settled.
+    /// its own read is out — not only once a later read has settled. The earlier read is made
+    /// older than `staleAfter` first: one inside it is not read again on opening (MEMNG-1160).
     @Test("a trip opened over members already read keeps them while its own read is out")
     func openedOverReadMembers() async {
         let wire = TripWire()
-        let stores = stores()
+        let clock = TripClock()
+        let stores = stores(clock: clock)
         let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
         await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
         let read = stores.1.state(for: record) == .complete
         #expect(read, "precondition: the members were read")
+        clock.advance(TripMemberStore.staleAfter)
         wire.transport.trips.hold(TripRows.members)
         await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
             let draining = await screen.until { stores.1.state(for: record) == .draining }
@@ -3162,6 +3170,30 @@ extension TripScreenRenderTests {
             await screen.settle(turns: 10)
             let shown = TripProbe.photos(in: screen.window).count
             #expect(shown == 5, "the screen dropped the members it opened over: \(shown)")
+            wire.transport.trips.release(TripRows.members)
+        }
+    }
+
+    /// A trip opened within `staleAfter` of a complete read sends no read of its own and shows
+    /// what was read (MEMNG-1160): a read would stay on the wire, held, and show as draining.
+    @Test("a trip opened within the window over a complete read sends no read")
+    func openedWithinTheWindowReadsNothing() async {
+        let wire = TripWire()
+        let clock = TripClock()
+        let stores = stores(clock: clock)
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        await stores.1.drain(record, using: wire.access.handle, baseURL: TripWire.baseURL)
+        #expect(stores.1.state(for: record) == .complete, "precondition: the members were read")
+        clock.advance(TripMemberStore.staleAfter - 1)
+        wire.transport.trips.hold(TripRows.members)
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let shownAll = await screen.until { TripProbe.photos(in: screen.window).count == 5 }
+            #expect(shownAll, "the screen did not show the members it opened over")
+            await screen.settle(turns: 10)
+            let draining = await screen.until(seconds: 1) {
+                stores.1.state(for: record) == .draining
+            }
+            #expect(!draining, "a trip opened within the window read its members again")
             wire.transport.trips.release(TripRows.members)
         }
     }
@@ -4086,4 +4118,14 @@ extension TripScreenRenderTests {
             #expect(writes.isEmpty, "a cancelled dialog wrote \(writes)")
         }
     }
+}
+
+/// The member store's clock, moved by a test (MEMNG-1160). Read off the main actor by the
+/// store's `@Sendable` clock, so not of the target's default isolation.
+nonisolated final class TripClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var now = Date(timeIntervalSince1970: 1_793_000_000)
+
+    func read() -> Date { lock.withLock { now } }
+    func advance(_ seconds: TimeInterval) { lock.withLock { now += seconds } }
 }

@@ -123,15 +123,20 @@ public final class TripGuestStore {
     private var epoch = 0
     private var nextToken = 0
     private let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
+    /// Told what each Guest Uploads read listed: the trip re-reads its members when one of them
+    /// is newer than its drain (MEMNG-1160).
+    private let onContributions: @MainActor ([TripContribution]) async -> Void
     private var session: (any SessionReporting)?
 
     public init(
         collectionUid: String,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
-            { _ in .superseded }
+            { _ in .superseded },
+        onContributions: @escaping @MainActor ([TripContribution]) async -> Void = { _ in }
     ) {
         self.collectionUid = collectionUid
         self.onUnauthorized = onUnauthorized
+        self.onContributions = onContributions
     }
 
     /// Names the session this store's transport failures belong to. Idempotent.
@@ -170,6 +175,8 @@ public final class TripGuestStore {
                 $0.contributions = merged
             }
         }
+        guard sessionStillCurrent(handle), let listed = contributions else { return }
+        await onContributions(listed)
     }
 
     /// Reads the record of picture `uid` for its thumbnail and its row's file name, once per

@@ -23,6 +23,10 @@ import Observation
 public final class TripMemberStore {
     public static let pageSize = 60
     public static let memberCap = 2000
+    /// How long a landed drain is taken as what the server holds (MEMNG-1160): until memo
+    /// events exist (MEMNG-966) pictures that land after a drain — a guest's, another member's,
+    /// a memo edited on the web — are seen only when the trip is read again.
+    public static let staleAfter: TimeInterval = 60
 
     /// What the last drain could not do.
     public internal(set) var lastError: String?
@@ -33,6 +37,9 @@ public final class TripMemberStore {
         var lineage: Lineage
         var rows: [LibraryRow]
         var complete: Bool
+        /// When the drain that landed was asked for: its age, and what a contribution must be
+        /// newer than to be missing from it (MEMNG-1160). A filtered read never asks either.
+        var asked = Date.distantPast
     }
 
     /// A screen's standing to read its automatic collection again for a lapsed signature — the
@@ -71,6 +78,10 @@ public final class TripMemberStore {
     let pageSize: Int
     public let memberCap: Int
     let onUnauthorized: @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome
+    /// What `Drained.asked` is read from; a test's own clock.
+    let clock: @Sendable () -> Date
+    /// How old a landed drain may be before an appearance reads it again (`drainIfStale`).
+    let staleAfter: TimeInterval
     var session: (any SessionReporting)?
     private var drained: [String: Drained] = [:]
     /// The unfiltered drain that failed, per key: the lineage that issued it, its request
@@ -175,12 +186,16 @@ public final class TripMemberStore {
         pageSize: Int = TripMemberStore.pageSize,
         memberCap: Int = TripMemberStore.memberCap,
         onUnauthorized: @escaping @MainActor @Sendable (CredentialRefusal) async -> RefusalOutcome =
-            { _ in .superseded }
+            { _ in .superseded },
+        clock: @escaping @Sendable () -> Date = Date.init,
+        staleAfter: TimeInterval = TripMemberStore.staleAfter
     ) {
         self.trips = trips
         self.pageSize = pageSize
         self.memberCap = memberCap
         self.onUnauthorized = onUnauthorized
+        self.clock = clock
+        self.staleAfter = staleAfter
         trips.onInvalidate.append { [weak self] uid in self?.invalidate(uid: uid) }
         trips.onReconcile.append { [weak self] uid, handle, baseURL in
             await self?.drain(uid: uid, using: handle, baseURL: baseURL)
@@ -502,6 +517,7 @@ public final class TripMemberStore {
     ) async {
         defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
         let owned = { self.stillCurrent(lineage) && self.flights[lineage.uid]?.token == token }
+        let asked = clock()
         let walked: AutomaticWalk?
         do {
             walked = try await walkAutomatic(
@@ -516,7 +532,8 @@ public final class TripMemberStore {
         var landed = lineage
         landed.revision = trips.revision
         drained[lineage.uid] = Drained(
-            lineage: landed, rows: fenced(walked.rows, walked.issued), complete: walked.complete)
+            lineage: landed, rows: fenced(walked.rows, walked.issued), complete: walked.complete,
+            asked: asked)
         drainFailures[lineage.uid] = nil
         lastError = nil
     }
@@ -625,6 +642,41 @@ public final class TripMemberStore {
         await drain(uid: trip.uid, using: handle, baseURL: baseURL)
     }
 
+    /// A screen's appearance (MEMNG-1160): reads `scope`'s members again unless what is held for
+    /// the lineage `handle` reads under was asked for less than `staleAfter` ago, so a trip opened
+    /// again shows what landed since, and two appearances within it are one request. A drain of
+    /// the same lineage on the wire is joined. A pull-to-refresh is `drain(_:using:baseURL:)`,
+    /// which reads whatever the age. Answers whether it read (or joined a read).
+    @discardableResult
+    public func drainIfStale(
+        _ scope: CollectionScope, using handle: SessionHandle, baseURL: URL
+    ) async -> Bool {
+        if let held = held(scope, under: handle),
+            clock().timeIntervalSince(held.asked) < staleAfter
+        {
+            return false
+        }
+        await drain(scope, using: handle, baseURL: baseURL)
+        return true
+    }
+
+    /// What a Guest Uploads read listed (MEMNG-1160): reads the trip's members again when one of
+    /// `contributions` came in after the drain held for the lineage `handle` reads under was asked
+    /// for, or when none is held — the picture may be missing from it. The server stamps
+    /// `createdAt`, the device `asked`, so a clock that runs behind the server's can read once more
+    /// than needed; the age gate covers one that runs ahead. Joins a drain on the wire. Answers
+    /// whether it read.
+    @discardableResult
+    public func drainIfNewer(
+        _ trip: Trip, contributions: [TripContribution], using handle: SessionHandle,
+        baseURL: URL
+    ) async -> Bool {
+        guard let newest = contributions.map(\.createdAt).max() else { return false }
+        if let held = held(.trip(trip), under: handle), newest <= held.asked { return false }
+        await drain(trip, using: handle, baseURL: baseURL)
+        return true
+    }
+
     func drain(uid: String, using handle: SessionHandle, baseURL: URL) async {
         let lineage = Lineage(revision: trips.revision, session: handle.generation, uid: uid)
         if let running = flights[uid], running.lineage == lineage {
@@ -644,6 +696,7 @@ public final class TripMemberStore {
     ) async {
         defer { if flights[lineage.uid]?.token == token { flights[lineage.uid] = nil } }
         let issued = favoriteStamp
+        let asked = clock()
         var rows: [LibraryRow] = []
         var cursor: String?
         var complete = true
@@ -674,7 +727,7 @@ public final class TripMemberStore {
         }
         let landed = Lineage(revision: trips.revision, session: lineage.session, uid: lineage.uid)
         drained[lineage.uid] = Drained(
-            lineage: landed, rows: fenced(rows, issued), complete: complete)
+            lineage: landed, rows: fenced(rows, issued), complete: complete, asked: asked)
         drainFailures[lineage.uid] = nil
         contradict(uid: lineage.uid, listed: rows, askedAt: token)
         lastError = nil
@@ -1340,6 +1393,15 @@ public final class TripMemberStore {
     /// `request`.
     private func held(_ uid: String, request: MemberRequest = .trip) -> Drained? {
         guard let held = drained[uid], current(held.lineage), held.lineage.request == request
+        else { return nil }
+        return held
+    }
+
+    /// What a drain left for `scope`, while it is the current lineage's and was read under the
+    /// session `handle` belongs to.
+    private func held(_ scope: CollectionScope, under handle: SessionHandle) -> Drained? {
+        guard let request = Self.request(for: scope), let held = held(scope.id, request: request),
+            held.lineage.session == handle.generation
         else { return nil }
         return held
     }
