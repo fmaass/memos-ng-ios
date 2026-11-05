@@ -392,7 +392,9 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8", newline="").read()
 open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", "\r\n"))
 PY
-check "the config with CRLF line endings" 0 "$w" "97 operationIds named by filter.operations"
+real_count="$("$RULE" "$repo_root" 2>&1 | sed -n 's/^openapi-coverage: \([0-9][0-9]*\) operationIds named by filter.operations$/\1/p')"
+[ -n "$real_count" ] || { echo "FAIL: the real tree reported no operationId count"; exit 1; }
+check "the config with CRLF line endings" 0 "$w" "$real_count operationIds named by filter.operations"
 
 # And the repository this suite ships in, which is the point of the whole exercise. With the copied
 # pair at the top of this file it is also the positive control on every refusal above: the real
