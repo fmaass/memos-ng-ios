@@ -1131,7 +1131,13 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // A 404 is answered before the key is looked up, so it says nothing about this edit —
             // only that the memo it is owed to is gone. Its own reason, because the row's actions
             // are read from the reason and Remove belongs on this hold and no other.
-            let reason: HoldReason = refused.statusCode == 404 ? .memoGone : .serverRefused
+            var reason: HoldReason = refused.statusCode == 404 ? .memoGone : .serverRefused
+            // An answer about the credential is named by the one mapping every lane asks: held for
+            // signing in again, which releases it (MEMNG-1035), never behind a Try again no
+            // sign-in frees (MEMNG-1187). The epoch fence below still picks this or the back-off.
+            if case .hold(.signInRequired, _) = refused.disposition(assumingCurrent: true) {
+                reason = .signInRequired
+            }
             // The only refusal that settles the key: the server decided it from the body this
             // edit is frozen on, so the first transmission would have been answered the same way
             // and cannot have committed. Everything else leaves the capture uncertain, and the

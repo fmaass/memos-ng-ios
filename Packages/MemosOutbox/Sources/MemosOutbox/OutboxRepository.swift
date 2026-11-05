@@ -404,10 +404,12 @@ public actor OutboxRepository {
     /// One job, or nil when nothing actionable stands under that id.
     public func job(_ id: UUID) -> UploadJob? { presence(id).job }
 
-    /// Whether an edit job for this memo is still on disk (MEMNG-954). A finished one is removed,
-    /// so any row naming the memo — waiting, uploading, held — is a change still owed to it.
+    /// Whether a change is still owed to this memo (MEMNG-954): an edit job, or a capture whose
+    /// create resolved to it with an edit still to send (MEMNG-1187) — both froze the memo's words
+    /// and are patched later, so an edit made beside either would be undone by it. A finished one
+    /// is removed, so any row naming the memo — waiting, uploading, held — is a change still owed.
     public func unfinishedEdit(for memoUID: String) throws -> Bool {
-        try loadJobs().contains { $0.memoEdit != nil && $0.resolvedMemoUID == memoUID }
+        try loadJobs().contains { $0.pendingEdit != nil && $0.resolvedMemoUID == memoUID }
     }
 
     public func save(_ job: UploadJob) throws {

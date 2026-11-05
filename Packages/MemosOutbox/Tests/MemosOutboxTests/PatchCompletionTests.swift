@@ -209,10 +209,12 @@ struct PatchCompletionTests {
         completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil,
         uploads: (any OutboxUploadScheduling)? = nil,
         sessionUID: (@Sendable (URLRequest) -> String)? = nil,
-        performer wrap: ((ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil
+        performer wrap: ((ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil,
+        credentials given: (any OutboxCredentialsProviding)? = nil,
+        gate: SchedulingGate = SchedulingGate()
     ) throws -> Patching {
         let root = try existing ?? Fixture.temporaryDirectory()
-        let provider = StaticCredentials(credentials: Fixture.credentials())
+        let provider = given ?? StaticCredentials(credentials: Fixture.credentials())
         let repository = try OutboxRepository(
             root: root.appending(path: "outbox"),
             stillCurrent: { _ in true }
@@ -259,6 +261,7 @@ struct PatchCompletionTests {
             network: StubNetworkPath(),
             preferences: preferences.store,
             clock: tick,
+            schedulingGate: gate,
             uploads: uploads
         )
         return Patching(
@@ -1178,7 +1181,9 @@ struct PatchCompletionTests {
         #expect(harness.memoPatches.count == 2, "the refusal was never replayed into")
         let refused = try #require(await harness.repository.job(job.id))
         #expect(refused.state == .held)
-        #expect(refused.holdReason == .serverRefused)
+        // A 401 is the credential's: held for signing in again, so the sign-in releases it
+        // (MEMNG-1187 item 2), never a server refusal no sign-in can free.
+        #expect(refused.holdReason == .signInRequired)
         #expect(
             refused.editUnansweredSince != nil,
             "an answer that never looked at the key was read as the edit's fate")
@@ -1557,14 +1562,16 @@ extension PatchCompletionTests {
     /// Queues the edit through the facade, lets its one file arrive on the whole lane, and waits
     /// for the first PATCH. Returns the harness, the job and the key it was written with.
     private func editJobSent(
-        server: KeyedMemoServer, clock: MutableClock
+        server: KeyedMemoServer, clock: MutableClock,
+        credentials: (any OutboxCredentialsProviding)? = nil
     ) async throws -> (Patching, UploadJob, String) {
         let session = ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1))
         let delegate = UploadSessionDelegate()
         server.seed(uid: Self.editedMemo, attachmentUIDs: ["att-old"])
         let harness = try harness(
             server: server, clock: clock,
-            uploads: BackgroundUploadScheduler(session: session, delegate: delegate))
+            uploads: BackgroundUploadScheduler(session: session, delegate: delegate),
+            credentials: credentials)
         let url = try Fixture.file(in: harness.root, named: "dock.heic", bytes: 1000)
         let source = StagedSource(url: url, filename: "dock.heic", mime: "image/heic")
         #expect(await harness.outbox.enqueueEdit(editOrder(), sources: [source]) == .queued)
@@ -1637,6 +1644,16 @@ extension PatchCompletionTests {
         #expect(harness.memoPatches.count == 1, "a held edit was sent again by itself")
         #expect(server.editApplications == 0)
         #expect(await harness.repository.job(job.id)?.editKey == minted)
+
+        // A 409 on a keyed PATCH is answered after the key was looked up — nothing was edited —
+        // so it settles the change, and the person may throw the edit away (MEMNG-1187 item 4):
+        // otherwise the memo could never be edited again, its edit job owed for ever.
+        let settled = try #require(await harness.repository.job(job.id))
+        #expect(settled.editUnansweredSince == nil, "a 409 left the edit unanswered")
+        #expect(await harness.outbox.withdraw(job.id), "a 409-held edit job could not be removed")
+        #expect(await harness.repository.job(job.id) == nil)
+        #expect(await harness.outbox.hasUnfinishedEdit(memoUID: Self.editedMemo) == false)
+        #expect(harness.memoPatches.count == 1, "removing the edit sent it")
     }
 
     @Test("an edit job survives a reopen of its repository with its key, memo and files")
@@ -1807,6 +1824,139 @@ extension PatchCompletionTests {
         MemoEditOrder(
             memoUID: "m9", content: "the dock, later", visibility: nil, createdAt: nil,
             pictures: [.kept("att-old"), .adding(0)])
+    }
+}
+
+/// The MEMNG-954 review gaps (MEMNG-1187): the edit job's way through a closed gate, a 401, and the
+/// owed edit of a capture, each through the real outbox against the keyed server.
+extension PatchCompletionTests {
+    /// An edit job written straight into the harness's repository with its one file already on
+    /// the server, so the next pass's only request is the PATCH.
+    private func uploadedEditJob(_ harness: Patching) async throws -> UploadJob {
+        let url = try Fixture.file(in: harness.root, named: "dock.heic", bytes: 1000)
+        var job = try await harness.repository.enqueue(
+            content: "ignored", visibility: nil, capturedAt: Date(timeIntervalSince1970: 0),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: url, filename: "dock.heic", mime: "image/heic")],
+            editing: editOrder())
+        job.files[0].uploadUID = "uC"
+        job.files[0].bytesConfirmed = job.files[0].byteSize
+        try await harness.repository.save(job)
+        return job
+    }
+
+    private func wholeLane() -> BackgroundUploadScheduler {
+        BackgroundUploadScheduler(
+            session: ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1)),
+            delegate: UploadSessionDelegate())
+    }
+
+    /// Item 1, the advance guard (`|| memoEdit != nil`): a background wake runs with the gate
+    /// closed, and an edit job's PATCH finishes a transfer that already happened, so it goes.
+    @Test("a closed gate: an edit job whose file is up still sends its PATCH and finishes")
+    func aClosedGateStillFinishesAnEditJob() async throws {
+        let server = KeyedMemoServer()
+        server.seed(uid: Self.editedMemo, attachmentUIDs: ["att-old"])
+        let harness = try harness(
+            server: server, uploads: wholeLane(), gate: SchedulingGate(isOpen: false))
+        defer { harness.cleanUp() }
+        let job = try await uploadedEditJob(harness)
+
+        await harness.outbox.drain()
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 1, "the closed gate kept the edit job's PATCH back")
+        #expect(await harness.repository.job(job.id) == nil, "the edit job was not finished")
+        #expect(server.editApplications == 1)
+        #expect(server.memo(Self.editedMemo)?.attachmentUIDs == ["att-old", "att-uC"])
+        #expect(harness.uploadPosts.isEmpty, "a closed gate started new work")
+    }
+
+    /// Item 1, the authority (`.memoCreate` on the edit job's PATCH): the gate closing between the
+    /// engine's read and the send withholds new work, and must not withhold this PATCH. The gate
+    /// is open when the pass reads the row, so only the sender's authority is under test here.
+    @Test("a gate closing at the send does not withhold an edit job's PATCH")
+    func aGateClosingAtTheSendDoesNotWithholdAnEditJob() async throws {
+        let server = KeyedMemoServer()
+        server.seed(uid: Self.editedMemo, attachmentUIDs: ["att-old"])
+        let gate = SchedulingGate()
+        let harness = try harness(server: server, uploads: wholeLane(), gate: gate)
+        defer { harness.cleanUp() }
+        harness.http.beforeSend = { request in
+            if request.httpMethod == "PATCH" { gate.close() }
+        }
+        let job = try await uploadedEditJob(harness)
+
+        await harness.outbox.drain()
+
+        #expect(server.editApplications == 1, "the edit job's PATCH was withheld by the gate")
+        #expect(await harness.repository.job(job.id) == nil)
+        #expect(!gate.isOpen, "the control never closed the gate")
+    }
+
+    /// Item 2: a 401 is the credential's. Held as `signInRequired`, the sign-in releases it
+    /// (MEMNG-1035) and the replay presents the key the job was written with.
+    @Test("a 401 on an edit job's PATCH holds it for signing in, and signing in again sends it")
+    func anEditJobRefusedByItsCredentialIsReleasedBySigningIn() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = KeyedMemoServer(refusingPatchesWith: [401])
+        let credentials = SwitchableCredentials(Fixture.credentials())
+        let (harness, job, minted) = try await editJobSent(
+            server: server, clock: clock, credentials: credentials)
+        defer { harness.cleanUp() }
+        await settle(harness, job.id, passes: 1)
+
+        let held = try #require(await harness.repository.job(job.id))
+        #expect(held.state == .held)
+        #expect(
+            held.holdReason == .signInRequired,
+            "a 401 was held as \(String(describing: held.holdReason))")
+
+        credentials.supersede()
+        await settle(harness, job.id)
+
+        #expect(harness.memoPatches.count == 2, "signing in again did not send the edit")
+        let replay = try sent(try #require(harness.memoPatches.last))
+        #expect(replay["edit_key"] as? String == minted)
+        #expect(server.editApplications == 1)
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    /// Item 10: a capture whose create resolved with an edit still owed freezes the memo's words
+    /// exactly as an edit job does, so it is an unfinished edit of that memo.
+    @Test("a capture's owed edit is an unfinished edit of its memo")
+    func aCapturesOwedEditIsAnUnfinishedEdit() async throws {
+        let harness = try harness()
+        defer { harness.cleanUp() }
+        let url = try Fixture.file(in: harness.root, named: "dock.heic", bytes: 1000)
+        var capture = try await harness.repository.enqueue(
+            content: "the dock", visibility: nil, capturedAt: Date(timeIntervalSince1970: 0),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: url, filename: "dock.heic", mime: "image/heic")])
+        capture.resolvedMemoUID = "m7"
+        try await harness.repository.save(capture)
+        #expect(
+            await harness.outbox.hasUnfinishedEdit(memoUID: "m7") == false,
+            "a resolved capture with nothing owed blocked its memo")
+
+        capture.editKey = "owed-edit-key-1"
+        capture.pendingEdit = PendingEdit(
+            content: "the dock, later", visibility: nil, capturedAt: capture.capturedAt,
+            fileIDs: [])
+        try await harness.repository.save(capture)
+
+        #expect(await harness.outbox.hasUnfinishedEdit(memoUID: "m7"), "the owed edit was missed")
+        #expect(await harness.outbox.hasUnfinishedEdit(memoUID: "m8") == false)
+        let second = try Fixture.file(in: harness.root, named: "pier.heic", bytes: 1200)
+        await #expect(throws: OutboxStorageError.editPending) {
+            try await harness.repository.enqueue(
+                content: "ignored", visibility: nil, capturedAt: Date(timeIntervalSince1970: 1),
+                binding: Fixture.binding(),
+                sources: [StagedSource(url: second, filename: "pier.heic", mime: "image/heic")],
+                editing: MemoEditOrder(
+                    memoUID: "m7", content: "again", visibility: nil, createdAt: nil,
+                    pictures: nil))
+        }
     }
 }
 

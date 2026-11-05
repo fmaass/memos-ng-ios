@@ -47,6 +47,13 @@ public struct VisibilityChange: Hashable, Sendable {
     }
 
     /// What asking for `to` on a memo that is `from` amounts to.
+    /// The question this change must be answered before it is sent at a LATER, unknown instant —
+    /// an edit job's PATCH (MEMNG-1187) — or nil when no audience the memo can be given meanwhile
+    /// makes it a widening: it was confirmed, or it is Private.
+    public var askedBeforeDeferral: Question? {
+        maySend(over: .private) ? nil : Question(from: from, to: to)
+    }
+
     public enum Proposal: Hashable, Sendable {
         /// The memo is already there: nothing is sent.
         case unchanged

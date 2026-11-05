@@ -1160,6 +1160,11 @@ public final class TimelineStore {
         if !files.isEmpty {
             defer { mutationChangedNothing(claim, on: attempt.uid) }
             guard let queue else { return .failed(.storage) }
+            // The audience goes LATER (MEMNG-1187): the job's PATCH is sent after this sheet has
+            // closed, when the memo may have been narrowed elsewhere, and nothing asks then. So the
+            // job carries only an audience no later state can make a widening — Private, or one the
+            // person confirmed — and any other is asked here, before anything is written.
+            if let question = attempt.visibility?.askedBeforeDeferral { return .ask(question) }
             let order = MemoEditOrder(
                 memoUID: attempt.uid,
                 content: attempt.content,

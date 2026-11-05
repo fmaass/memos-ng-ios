@@ -121,6 +121,72 @@ struct MediaEditTests {
         #expect(job.memoEdit?.statesDate == false)
     }
 
+    /// MEMNG-1187 item 3: an edit job sends its audience LATER — after the sheet has closed, when
+    /// the memo may have been narrowed elsewhere — so the one it carries must be one no later state
+    /// can make a widening: Private, or an audience the person confirmed. A narrowing to anything
+    /// wider than Private is asked at the Save, and nothing is written until it is answered.
+    @Test("an edit job's audience that could widen later is asked before the job is written")
+    func anEditJobsDeferredAudienceIsAsked() async throws {
+        let file = try stagedFile(bytes: 12)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineStore()
+        let client = Stub.client { _, _, _ in
+            Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let narrowing = VisibilityChange.cleared(.protected, from: .public)
+        #expect(!narrowing.confirmed, "the case needs a narrowing nobody was asked about")
+
+        let asked = await store.edit(
+            uid: "a", content: "edited", attaching: [file],
+            listing: [.kept("p1"), .uploading(0)], visibility: narrowing, through: outbox,
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        guard case .ask(let question) = asked else {
+            Issue.record("a deferred Protected was written unasked: \(asked)")
+            return
+        }
+        #expect(question.to == .protected)
+        #expect(try await repository.loadJobs().isEmpty, "the job was written before the answer")
+
+        let answered = await store.edit(
+            uid: "a", content: "edited", attaching: [file],
+            listing: [.kept("p1"), .uploading(0)], visibility: question.confirmed(),
+            through: outbox, using: client.handle, baseURL: Stub.baseURL
+        )
+        #expect(answered == .saved)
+        let job = try #require(try await repository.loadJobs().first)
+        #expect(job.pendingEdit?.visibility == "PROTECTED")
+    }
+
+    /// The control: Private is never wider than any audience the memo can be given meanwhile.
+    @Test("an edit job narrowing its memo to Private is written without a question")
+    func anEditJobNarrowingToPrivateIsNotAsked() async throws {
+        let file = try stagedFile(bytes: 12)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineStore()
+        let client = Stub.client { _, _, _ in
+            Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let outcome = await store.edit(
+            uid: "a", content: "edited", attaching: [file],
+            listing: [.kept("p1"), .uploading(0)],
+            visibility: VisibilityChange.cleared(.private, from: .public), through: outbox,
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .saved)
+        let job = try #require(try await repository.loadJobs().first)
+        #expect(job.pendingEdit?.visibility == "PRIVATE")
+    }
+
     /// A store with one memo, a real outbox, and an edit job for that memo already written by the
     /// store itself. Answers the store, the client's log of operations (cleared after the
     /// enqueue), the repository, the outbox and the cleanup.

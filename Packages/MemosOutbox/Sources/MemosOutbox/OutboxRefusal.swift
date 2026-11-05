@@ -52,8 +52,11 @@ public struct OutboxRefusal: Sendable, Equatable {
     /// Whether this refusal is decided by the body this edit is frozen on, and so says the same
     /// thing about every transmission of that key. A 401 or 403 is answered before the key is
     /// looked up, a 404 says the memo is gone rather than that this edit never applied, a 429 and
-    /// a 5xx answer nothing.
-    public var deterministicOnTheFrozenBody: Bool { statusCode == 422 }
+    /// a 5xx answer nothing. A 409 on a keyed PATCH is answered AFTER the key is looked up — a key
+    /// that had landed on this memo is answered 200 before the uploads are checked — and the
+    /// contract says nothing was edited, so it settles the change too (MEMNG-1187): left
+    /// unanswered, an edit job held on it could never be removed.
+    public var deterministicOnTheFrozenBody: Bool { statusCode == 422 || statusCode == 409 }
 
     /// What the queue should do about it.
     ///
