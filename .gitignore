@@ -34,3 +34,6 @@ MemosShare.entitlements
 # Local working copies; the durable record is BookStack.
 docs/plans/
 docs/session-reviews/
+
+# household operations overlay for Claude Code, read beside CLAUDE.md; never public
+CLAUDE.local.md
