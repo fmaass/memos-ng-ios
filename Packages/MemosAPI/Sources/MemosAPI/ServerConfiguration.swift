@@ -32,4 +32,16 @@ public struct ServerConfiguration: Sendable, Equatable {
         guard let url = components.url else { return nil }
         self.baseURL = url
     }
+
+    /// The address as a person types it back into the sign-in field: the base URL without its
+    /// scheme, so `https://memos.example.com:8443` reads `memos.example.com:8443`.
+    ///
+    /// Cut from the absolute string rather than rebuilt from `host` and `port`, because that is
+    /// the form `init?(serverAddress:)` accepts again unchanged — an IPv6 literal keeps its
+    /// brackets, which `URLComponents.host` drops.
+    public var displayAddress: String {
+        let absolute = baseURL.absoluteString
+        guard let separator = absolute.range(of: "://") else { return absolute }
+        return String(absolute[separator.upperBound...])
+    }
 }

@@ -83,6 +83,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // Beside the licence, and removed with it: the share extension's upload-only credential.
         captureGrants: CaptureGrantStore.live(),
         lastKnownUser: LastKnownUserFile.live(),
+        // The app's own defaults, not the app group's: only this process shows the sign-in field.
+        serverMemory: ServerAddressMemory(defaults: .standard),
         snapshots: TimelineSnapshotStore.live(),
         // A route coming back is the one recovery trigger the app has that nobody has to be
         // looking at the screen for.

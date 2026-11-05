@@ -376,6 +376,9 @@ public final class SessionStore {
     /// Where the identity a launch may open on is kept. Nil in a suite that is not about it, for
     /// the reason `account` is nil there: a test must never write into the real container.
     private let lastKnownUser: (any LastKnownUserStoring)?
+    /// The server the sign-in field offers when this session holds none. Nil in a suite that does
+    /// not ask, and in any process that never shows the sign-in screen.
+    private let serverMemory: ServerAddressMemory?
     /// What to do the moment a session becomes confirmed — the app wires its outbox drain to it.
     ///
     /// It is a handler rather than something this store calls directly because the queue lives a
@@ -426,6 +429,7 @@ public final class SessionStore {
         captureGrants: CaptureGrantStore? = nil,
         identity: MediaIdentity = .shared,
         lastKnownUser: (any LastKnownUserStoring)? = nil,
+        serverMemory: ServerAddressMemory? = nil,
         // The DIRECTORY, not a writer over it. The writer is built below, against this
         // store's own epoch, so nothing can hand it a counter this session does not move.
         snapshots: TimelineSnapshotStore? = nil,
@@ -451,6 +455,7 @@ public final class SessionStore {
         self.captureGrants = captureGrants
         self.identity = identity
         self.lastKnownUser = lastKnownUser
+        self.serverMemory = serverMemory
         self.onVerified = onVerified
         self.onAccountWithdrawn = onAccountWithdrawn
         self.diagnostics =
@@ -531,6 +536,14 @@ public final class SessionStore {
     }
 
     public var serverBaseURL: URL? { configuration?.baseURL }
+
+    /// What the sign-in field starts with: the server of the account this session holds, then the
+    /// server this device last signed in to, then nothing. Never a compiled-in address, and never
+    /// a reason to trust one — it only fills a field the person can change.
+    public var suggestedServerAddress: String {
+        if let configuration { return configuration.displayAddress }
+        return serverMemory?.lastUsed ?? ""
+    }
 
     // MARK: - signing in
 
@@ -1014,6 +1027,11 @@ public final class SessionStore {
             await invalidateIdentityScopedState()
             return
         }
+        // The server this install was set up for, remembered from the vault itself and before the
+        // server is asked: a stored token refused below wipes the vault, and the sign-in screen it
+        // lands on should still name the server it belonged to. Nothing awaited since the read's
+        // fence above, so this is the read this session issued.
+        serverMemory?.remember(configuration)
         let storedToken = stored.token
         // A licence naming a different server than the stored credential is what an interrupted
         // account switch leaves behind. Deny first; the admission below republishes, and so does
@@ -1685,6 +1703,9 @@ public final class SessionStore {
         account?.publish(
             AccountBinding(serverBaseURL: configuration.baseURL, ownerSubject: user.subject)
         )
+        // Here, where every session is adopted, so a launch restoring an install from before the
+        // field lost its default records that install's server too: its next sign-in starts there.
+        serverMemory?.remember(configuration)
         // The file has just been overwritten with the right pair, so an earlier failure to delete
         // it no longer describes anything.
         licenceRevocationFailed = false

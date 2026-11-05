@@ -47,4 +47,26 @@ struct ServerConfigurationTests {
         let configuration = try #require(ServerConfiguration(serverAddress: address))
         #expect(configuration.baseURL.absoluteString == "https://memos.example.com")
     }
+
+    /// Typed address -> what the sign-in field shows again for it. The same vectors as the
+    /// parsing tests above: scheme, trailing slash, path, port and whitespace.
+    private static let displayVectors: [(typed: String, shown: String)] = [
+        ("memos.example.com", "memos.example.com"),
+        ("https://memos.example.com/", "memos.example.com"),
+        ("https://memos.example.com/app/", "memos.example.com"),
+        ("memos.example.com:8443", "memos.example.com:8443"),
+        ("  memos.example.com \n", "memos.example.com"),
+        ("https://[::1]:8443/", "[::1]:8443"),
+    ]
+
+    @Test("shows an address without its scheme, slash or path, and reads it back unchanged")
+    func displayAddressRoundTrips() throws {
+        for vector in Self.displayVectors {
+            let configuration = try #require(ServerConfiguration(serverAddress: vector.typed))
+            #expect(configuration.displayAddress == vector.shown, "typed \(vector.typed)")
+            let shown = configuration.displayAddress
+            let again = try #require(ServerConfiguration(serverAddress: shown))
+            #expect(again == configuration, "\(vector.shown) must parse back to the same server")
+        }
+    }
 }
