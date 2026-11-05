@@ -2344,6 +2344,28 @@
         "title": "ExportSettingsPut",
         "type": "object"
       },
+      "GuestOut": {
+        "description": "Who sent a guest memo in, and through which trip pass.",
+        "properties": {
+          "contributor_name": {
+            "title": "Contributor Name",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pass_uid": {
+            "title": "Pass Uid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "contributor_name",
+          "pass_uid"
+        ],
+        "title": "GuestOut",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -2412,6 +2434,50 @@
           "outcome"
         ],
         "title": "InclusionResult",
+        "type": "object"
+      },
+      "LiveActivityTokenIn": {
+        "properties": {
+          "environment": {
+            "default": "production",
+            "description": "The APNs environment the token was issued for.",
+            "enum": [
+              "production",
+              "sandbox"
+            ],
+            "title": "Environment",
+            "type": "string"
+          },
+          "token": {
+            "description": "The ActivityKit push-to-start token, hex-encoded; stored in lower case.",
+            "maxLength": 512,
+            "minLength": 32,
+            "pattern": "^[0-9a-fA-F]+$",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "LiveActivityTokenIn",
+        "type": "object"
+      },
+      "LiveActivityTokenRef": {
+        "properties": {
+          "token": {
+            "description": "The ActivityKit push-to-start token, hex-encoded; stored in lower case.",
+            "maxLength": 512,
+            "minLength": 32,
+            "pattern": "^[0-9a-fA-F]+$",
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "LiveActivityTokenRef",
         "type": "object"
       },
       "MailSubsampling": {
@@ -2756,6 +2822,38 @@
         "title": "MapMarkerList",
         "type": "object"
       },
+      "MeOut": {
+        "properties": {
+          "default_visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "notify_on_household_posts": {
+            "title": "Notify On Household Posts",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "default_visibility",
+          "notify_on_household_posts"
+        ],
+        "title": "MeOut",
+        "type": "object"
+      },
+      "MePatch": {
+        "description": "Both optional: an absent field leaves the preference as it is; a JSON null is a 422.",
+        "properties": {
+          "default_visibility": {
+            "$ref": "#/components/schemas/Visibility",
+            "title": "Default Visibility"
+          },
+          "notify_on_household_posts": {
+            "title": "Notify On Household Posts",
+            "type": "boolean"
+          }
+        },
+        "title": "MePatch",
+        "type": "object"
+      },
       "MemberOut": {
         "description": "One household member, in the field shapes `/api/auth/user` already uses for the caller.\n\nA deliberate subset of `UserOut`: `email` and `role` are the account's own business and no\nclient needs them to draw a filter row, so they are not published about OTHER people here.\n`avatar` is whatever the settings feature stores \u2014 a `data:image/\u2026` URL (nothing else is\naccepted, capped at 256 KB) or, for an account carried over from old memos, the path string\nthat came with it \u2014 and null for a member who never set one. It is\npassed through verbatim rather than normalised, so the value a client renders for a member is\nthe same one `/api/auth/user` hands that member for themselves.",
         "properties": {
@@ -2923,6 +3021,31 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "guest": {
+            "description": "Who sent a guest memo in, and through which trip pass.",
+            "properties": {
+              "contributor_name": {
+                "title": "Contributor Name",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "pass_uid": {
+                "title": "Pass Uid",
+                "type": "string"
+              }
+            },
+            "required": [
+              "contributor_name",
+              "pass_uid"
+            ],
+            "title": "GuestOut",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "idempotency_key": {
             "title": "Idempotency Key",
@@ -3203,7 +3326,7 @@
       "PassCreate": {
         "properties": {
           "expiresAt": {
-            "description": "An instant with its UTC offset, in the future. Default: the trip's span end plus 14 days, else 30 days from now.",
+            "description": "An instant with its UTC offset, in the future. Default: the later of the trip's span end and now, plus 14 days; else 30 days from now.",
             "format": "date-time",
             "title": "Expiresat",
             "type": [
@@ -3379,6 +3502,22 @@
           "deviceCount": {
             "title": "Devicecount",
             "type": "integer"
+          },
+          "doorSuspended": {
+            "description": "What the door last said, display only; null when home does not know (an old door, a malformed answer, or a view older than the sync's stale window).",
+            "title": "Doorsuspended",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "doorSuspendedAt": {
+            "format": "date-time",
+            "title": "Doorsuspendedat",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "expiresAt": {
             "format": "date-time",
@@ -3836,6 +3975,68 @@
         "title": "PushKeys",
         "type": "object"
       },
+      "QuarantineOut": {
+        "properties": {
+          "batches": {
+            "items": {
+              "$ref": "#/components/schemas/QuarantinedBatchOut"
+            },
+            "title": "Batches",
+            "type": "array"
+          },
+          "unknownOpen": {
+            "description": "The total less what the owner cleared.",
+            "title": "Unknownopen",
+            "type": "integer"
+          },
+          "unknownTotal": {
+            "description": "Quarantines for a pass home never issued, ever.",
+            "title": "Unknowntotal",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "batches",
+          "unknownTotal",
+          "unknownOpen"
+        ],
+        "title": "QuarantineOut",
+        "type": "object"
+      },
+      "QuarantinedBatchOut": {
+        "properties": {
+          "byteTotal": {
+            "title": "Bytetotal",
+            "type": "integer"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "fileCount": {
+            "title": "Filecount",
+            "type": "integer"
+          },
+          "passUid": {
+            "title": "Passuid",
+            "type": "string"
+          },
+          "uid": {
+            "title": "Uid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uid",
+          "passUid",
+          "fileCount",
+          "byteTotal",
+          "createdAt"
+        ],
+        "title": "QuarantinedBatchOut",
+        "type": "object"
+      },
       "ReactionIn": {
         "properties": {
           "emoji": {
@@ -4081,6 +4282,81 @@
         "title": "TagCount",
         "type": "object"
       },
+      "UnknownResolveIn": {
+        "properties": {
+          "through": {
+            "description": "The `unknownTotal` the owner saw; later ones stay counted.",
+            "minimum": 0.0,
+            "title": "Through",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "title": "UnknownResolveIn",
+        "type": "object"
+      },
+      "UploadBatchCreate": {
+        "properties": {
+          "entries": {
+            "description": "One POST /api/uploads body per session to open, 1 to 50 of them. A request with more, with none, or with any entry that is not a valid body is answered 422 whole.",
+            "items": {
+              "$ref": "#/components/schemas/UploadCreate"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Entries",
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "title": "UploadBatchCreate",
+        "type": "object"
+      },
+      "UploadBatchOut": {
+        "properties": {
+          "results": {
+            "description": "One per entry, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/UploadBatchResult"
+            },
+            "title": "Results",
+            "type": "array"
+          }
+        },
+        "required": [
+          "results"
+        ],
+        "title": "UploadBatchOut",
+        "type": "object"
+      },
+      "UploadBatchResult": {
+        "properties": {
+          "detail": {
+            "description": "Why this entry was refused. Present only when it was.",
+            "title": "Detail",
+            "type": "string"
+          },
+          "status": {
+            "description": "201 when the session was opened, and `upload` holds it. Otherwise the status POST /api/uploads would have answered for this entry alone \u2014 413 over the size limit, 507 when the volume cannot hold it \u2014 and `detail` says why; nothing was stored for it.",
+            "title": "Status",
+            "type": "integer"
+          },
+          "upload": {
+            "$ref": "#/components/schemas/UploadOut",
+            "description": "The session, exactly as POST /api/uploads returns it. Present only when `status` is 201.",
+            "title": "Upload"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UploadBatchResult",
+        "type": "object"
+      },
       "UploadCreate": {
         "properties": {
           "filename": {
@@ -4097,6 +4373,15 @@
           "mime": {
             "title": "Mime",
             "type": "string"
+          },
+          "sha256": {
+            "description": "Optional SHA-256 of the file's bytes, lowercase hex. When the caller already owns an attachment with this digest and `size`, the session is created complete (`bytes_received` equals `size`) and the client goes straight to finalize; otherwise it is an ordinary session. Only the caller's own attachments are ever matched.",
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Sha256",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "size": {
             "title": "Size",
@@ -4160,6 +4445,38 @@
           "bytes_received"
         ],
         "title": "UploadOut",
+        "type": "object"
+      },
+      "UploadWithdrawnDetail": {
+        "description": "Why a finalize was refused: the session was withdrawn with DELETE, so it will never become\nan attachment. Nothing was stored or changed. A file that is still wanted needs a new\nsession.",
+        "properties": {
+          "code": {
+            "const": "upload_withdrawn",
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "UploadWithdrawnDetail",
+        "type": "object"
+      },
+      "UploadWithdrawnError": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/UploadWithdrawnDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "UploadWithdrawnError",
         "type": "object"
       },
       "UploadsUnlinkableDetail": {
@@ -7743,6 +8060,96 @@
         ]
       }
     },
+    "/api/devices/live-activity-token": {
+      "delete": {
+        "description": "Remove this device's push-to-start token if the signed-in member holds it.\n\nAlways 204: a token that is unknown, already removed, or held by another member is left as it\nis and answered the same way.",
+        "operationId": "unregister_live_activity_token_api_devices_live_activity_token_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveActivityTokenRef"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Unregister Live Activity Token",
+        "tags": [
+          "devices"
+        ]
+      },
+      "post": {
+        "description": "Register this device's push-to-start token for the signed-in member.\n\nIdempotent: posting the same token again updates its one row. A token another member posted\nmoves to the caller, since the device has switched accounts.",
+        "operationId": "register_live_activity_token_api_devices_live_activity_token_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiveActivityTokenIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Register Live Activity Token",
+        "tags": [
+          "devices"
+        ]
+      }
+    },
     "/api/events": {
       "get": {
         "operationId": "events_api_events_get",
@@ -8276,6 +8683,88 @@
         ]
       }
     },
+    "/api/me": {
+      "get": {
+        "operationId": "get_me_api_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Get Me",
+        "tags": [
+          "me"
+        ]
+      },
+      "patch": {
+        "operationId": "update_me_api_me_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Update Me",
+        "tags": [
+          "me"
+        ]
+      }
+    },
     "/api/members": {
       "get": {
         "description": "Every member of the household, for the client-side \"whose memos?\" filter.\n\nASSUMPTION, and the reason this route needs no scoping argument: this is a single-household\ninstance \u2014 every account that exists is a member of the one household, so membership needs\nnothing to express it. A multi-tenant deployment would have to record tenancy and filter here;\nnothing in this API expresses it today.\n\nEveryone who can authenticate sees the whole roster, and it deliberately does NOT depend on\nwhat the caller can read: a member who has posted nothing, or only PRIVATE memos, still appears\n\u2014 a filter that silently omitted them would make an empty result indistinguishable from a\nmember who does not exist, and the roster leaks nothing beyond a display name the household\nalready sees on every shared memo.\n\nOrdered by (display_name, subject) so the list is stable across calls and across pages of any\nclient that caches it; `subject` alone breaks the tie for the members with no display name,\nwhom Postgres would otherwise return in whatever order it liked.",
@@ -8381,6 +8870,22 @@
                 "array",
                 "null"
               ]
+            }
+          },
+          {
+            "description": "Whether memos a trip pass brought in (those carrying `guest`) are listed. `exclude`, the default, leaves them out, so the home timeline shows what the household wrote; `include` returns them alongside every other memo. Composes with every other filter (they still AND), and must be resent unchanged on each page \u2014 it is not carried inside `cursor`. A guest memo whose pass record was deleted is a plain memo and is listed either way.",
+            "in": "query",
+            "name": "guest",
+            "required": false,
+            "schema": {
+              "default": "exclude",
+              "description": "Whether memos a trip pass brought in (those carrying `guest`) are listed. `exclude`, the default, leaves them out, so the home timeline shows what the household wrote; `include` returns them alongside every other memo. Composes with every other filter (they still AND), and must be resent unchanged on each page \u2014 it is not carried inside `cursor`. A guest memo whose pass record was deleted is a plain memo and is listed either way.",
+              "enum": [
+                "exclude",
+                "include"
+              ],
+              "title": "Guest",
+              "type": "string"
             }
           },
           {
@@ -9869,6 +10374,105 @@
         ]
       }
     },
+    "/api/passes/{uid}/unsuspend": {
+      "post": {
+        "description": "Lift the guest door's automatic suspension (too many refused redemptions) and push that at\nonce. Raises `version`; the door clears a suspension it held before this version and keeps\none it sets later. Home does not see the suspension itself, so this answers the same whether\nor not one stood.",
+        "operationId": "unsuspend_pass_api_passes__uid__unsuspend_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "uid",
+            "required": true,
+            "schema": {
+              "title": "Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PassOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No valid session cookie or bearer token."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "No such pass. Nothing was changed."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The pass is revoked (detail \"pass_revoked\"), which is terminal. Nothing was changed."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Unsuspend Pass",
+        "tags": [
+          "passes"
+        ]
+      }
+    },
     "/api/pats": {
       "get": {
         "operationId": "list_pats_api_pats_get",
@@ -10342,6 +10946,130 @@
         ]
       }
     },
+    "/api/trip-ingest/quarantine": {
+      "get": {
+        "operationId": "list_quarantine_api_trip_ingest_quarantine_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuarantineOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "List Quarantine",
+        "tags": [
+          "trip-ingest"
+        ]
+      }
+    },
+    "/api/trip-ingest/quarantine/unknown/resolve": {
+      "post": {
+        "description": "`through` is the total the owner saw: anything since stays counted, so no ABA and no 409.\nWith no `through` this is the batch whose door-chosen uid is literally unknown, which this\nroute would otherwise make unresolvable and its alert unclearable.",
+        "operationId": "resolve_unknown_api_trip_ingest_quarantine_unknown_resolve_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnknownResolveIn",
+                "default": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Resolve Unknown",
+        "tags": [
+          "trip-ingest"
+        ]
+      }
+    },
+    "/api/trip-ingest/quarantine/{batch_uid}/resolve": {
+      "post": {
+        "operationId": "resolve_batch_api_trip_ingest_quarantine__batch_uid__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "batch_uid",
+            "required": true,
+            "schema": {
+              "title": "Batch Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Resolve Batch",
+        "tags": [
+          "trip-ingest"
+        ]
+      }
+    },
     "/api/uploads": {
       "post": {
         "operationId": "start_upload_api_uploads_post",
@@ -10378,6 +11106,21 @@
           },
           "503": {
             "$ref": "#/components/responses/DatabaseBusy"
+          },
+          "507": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The server's upload volume has less free space than the declared size plus 10 %. Nothing was stored; `detail` says why. A session the server can complete from bytes it already holds (a `sha256` match) is never refused for space."
           }
         },
         "security": [
@@ -10389,6 +11132,59 @@
           }
         ],
         "summary": "Start Upload",
+        "tags": [
+          "uploads"
+        ]
+      }
+    },
+    "/api/uploads/batch": {
+      "post": {
+        "description": "Open several upload sessions in one request. Each entry is answered exactly as POST /api/uploads would answer it alone \u2014 a session (complete already on a `sha256` match) or that entry's own refusal \u2014 in request order. Disk admission counts the batch: an entry is refused 507 when the volume cannot hold it on top of the earlier admitted entries that still need their bytes. The admitted sessions are created together: if the request fails, none of them exists.",
+        "operationId": "start_upload_batch_api_uploads_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadBatchCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadBatchOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Start Upload Batch",
         "tags": [
           "uploads"
         ]
@@ -10427,6 +11223,51 @@
       }
     },
     "/api/uploads/{upload_uid}": {
+      "delete": {
+        "description": "Withdraw an upload session the caller no longer wants.\n\nA withdrawn session takes no more bytes (PATCH answers 409 with `upload_withdrawn`), is no\nlonger offered for resuming (HEAD answers 404), and is never finalized (finalize answers 409\nwith `upload_withdrawn`; a memo naming it reports it as missing). Its bytes are removed within\nthe hour.\n\nAlways 204, and idempotent: the same answer for a session withdrawn earlier, for one that no\nlonger exists, and for a uid this caller does not own. A session that was already finalized\nis left as it is: the attachment it became is not touched.",
+        "operationId": "withdraw_upload_api_uploads__upload_uid__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_uid",
+            "required": true,
+            "schema": {
+              "title": "Upload Uid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/DatabaseBusy"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "summary": "Withdraw Upload",
+        "tags": [
+          "uploads"
+        ]
+      },
       "head": {
         "operationId": "upload_offset_api_uploads__upload_uid__head",
         "parameters": [
@@ -10546,7 +11387,7 @@
                 }
               }
             },
-            "description": "Offset gap \u2014 re-sync with HEAD and resend from the offset it reports."
+            "description": "Offset gap \u2014 re-sync with HEAD and resend from the offset it reports. A `detail` of `upload_withdrawn` instead means the session was withdrawn with DELETE: it takes no more bytes, and re-syncing will not help."
           },
           "422": {
             "content": {
@@ -10677,6 +11518,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadWithdrawnError"
+                }
+              }
+            },
+            "description": "The session was withdrawn with DELETE (`upload_withdrawn`). Nothing was stored; a file that is still wanted needs a new session."
           },
           "422": {
             "content": {
