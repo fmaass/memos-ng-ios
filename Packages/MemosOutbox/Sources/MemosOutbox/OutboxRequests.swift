@@ -115,6 +115,8 @@ public enum OutboxRequests {
         token: String,
         job: UploadJob
     ) throws -> URLRequest {
+        // An edit job names a memo that already exists; posted, its files would be a second memo.
+        guard job.memoEdit == nil else { throw Failure.editIsNotACreate }
         var request = URLRequest(url: baseURL.appending(path: "api/memos"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -146,6 +148,12 @@ public enum OutboxRequests {
         guard let uid = job.resolvedMemoUID, let editKey = job.editKey,
             let edit = job.pendingEdit
         else { throw Failure.incompleteEdit }
+        if let memoEdit = job.memoEdit {
+            return try patchExistingMemo(
+                baseURL: baseURL, token: token, job: job, uid: uid, editKey: editKey, edit: edit,
+                memoEdit: memoEdit
+            )
+        }
         let staged = Set(job.files.filter { $0.stagedForEdit == true }.map(\.id))
         // A kept picture may be named only by the attachment uid the create's answer was matched
         // to; a picture picked in the editor is named by its upload uid, which the memo has not
@@ -188,12 +196,55 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The PATCH an edit job sends to a memo that already existed (MEMNG-954): the edit's words,
+    /// its audience and date only where it states them, every added file's upload uid, and the
+    /// picture list only where the sheet stated one — kept pictures by attachment uid, added ones by
+    /// upload uid. Built from the manifest alone, like the owed edit above, so a relaunch's second
+    /// transmission is the same request under the same key and the server answers it as a replay.
+    static func patchExistingMemo(
+        baseURL: URL, token: String, job: UploadJob, uid: String, editKey: String,
+        edit: PendingEdit, memoEdit: MemoEdit
+    ) throws -> URLRequest {
+        let added = try edit.fileIDs.map { id -> String in
+            guard let upload = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }
+            return upload
+        }
+        let listed = try memoEdit.pictures?.map { picture -> String in
+            switch picture {
+            case .kept(let attachment):
+                return attachment
+            case .added(let id):
+                guard let upload = job.file(id)?.uploadUID else { throw Failure.incompleteEdit }
+                return upload
+            }
+        }
+        var request = URLRequest(url: baseURL.appending(path: "api/memos").appending(path: uid))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try OutboxWire.encode(
+            OutboxWire.MemoPatch(
+                content: edit.content,
+                // Nil leaves the audience: the job never carries a create's visibility to fall
+                // back on, so an untouched pill says nothing to the server.
+                visibility: edit.visibility,
+                createdAt: memoEdit.statesDate ? OutboxEncoding.iso8601(edit.capturedAt) : nil,
+                editKey: editKey,
+                uploadUIDs: added,
+                attachmentUIDs: listed
+            )
+        )
+        return request
+    }
+
     /// A request this device cannot build from what it holds.
     public enum Failure: Error, Sendable, Equatable {
         /// The job is not carrying everything an edit names — the memo it resolved to, the key it
         /// is applied under, or the upload session of a picture the editor added. Nothing is sent
         /// on a guess.
         case incompleteEdit
+        /// The job is an edit of a memo already posted (MEMNG-954): it is never sent as a create.
+        case editIsNotACreate
     }
 
     /// The header the offset HEAD answers with, read case-insensitively because header names are.

@@ -632,6 +632,35 @@ public final class Outbox {
         return job?.id
     }
 
+    /// Writes an edit of an existing memo that adds files to it as a job (MEMNG-954), and only then
+    /// tries the network — the same contract as `enqueue`: true means PERSISTED, and the sheet
+    /// closes on it. The job carries the edit key minted as it is written, its files go up on the
+    /// whole lane, and the PATCH that names them is its terminal action; nothing is sent from the
+    /// caller. Refused, like a capture, when the account it would be bound to is not `account`.
+    ///
+    /// Refused (`.editPending`) while an edit job for the same memo is still queued: the check and
+    /// the write are one call on the repository's actor, so two overlapping edits are one job.
+    @discardableResult
+    public func enqueueEdit(
+        _ order: MemoEditOrder, sources: [StagedSource],
+        composedUnder account: AccountBinding? = nil
+    ) async -> MemoEditQueueAnswer {
+        let job = await enqueueJob(
+            content: order.content, visibility: nil, capturedAt: order.createdAt ?? Date(),
+            sources: sources, composedUnder: account, stagingLaunch: nil, editing: order
+        )
+        // Read with no suspension since `enqueueJob` wrote it, on this actor.
+        if job != nil { return .queued }
+        return lastEnqueueFailure == .editPending ? .editPending : .notWritten
+    }
+
+    /// Whether an edit job for this memo is still in the queue (MEMNG-954), read on the
+    /// repository's own isolation. A queue that cannot be read answers true: an edit refused for
+    /// an instant is a sentence on the sheet, an edit sent beside an owed one is a lost change.
+    public func hasUnfinishedEdit(memoUID: String) async -> Bool {
+        (try? await repository.unfinishedEdit(for: memoUID)) ?? true
+    }
+
     /// This process's launch: what a capture still taking files is marked with, so the next
     /// launch can tell a mark nobody will ever clear from one an editor here still holds.
     private var launch: UUID { uploads?.launch ?? OutboxUploadSession.processLaunch }
@@ -691,7 +720,8 @@ public final class Outbox {
         composedUnder account: AccountBinding?,
         stagingLaunch: UUID?,
         arriving: Int = 0,
-        inPhotos: [StagingFile] = []
+        inPhotos: [StagingFile] = [],
+        editing order: MemoEditOrder? = nil
     ) async -> UploadJob? {
         guard let credentials = await credentials.currentCredentials(),
             self.credentials.isCurrent(credentials)
@@ -722,6 +752,7 @@ public final class Outbox {
                 stagingLaunch: stagingLaunch,
                 arriving: arriving,
                 staging: inPhotos,
+                editing: order,
                 under: SendAuthority { authority.isCurrent(credentials) }
             )
             enqueueError = nil
@@ -729,6 +760,10 @@ public final class Outbox {
         } catch is SendAuthorityWithdrawn {
             enqueueError = "Sign in before writing a memo."
             lastEnqueueFailure = .notSignedIn
+            return nil
+        } catch OutboxStorageError.editPending {
+            // Not a fault of the device or the queue: the sheet says why, and nothing was written.
+            lastEnqueueFailure = .editPending
             return nil
         } catch {
             enqueueError =
@@ -774,6 +809,9 @@ public final class Outbox {
         guard snapshot.editUnansweredSince == nil, !snapshot.stillArriving,
             !snapshot.hasNothingToSend
         else { return nil }
+        // An edit of an existing memo has no draft to hand back: opened as a new capture it would
+        // become a second memo. It is removed (`withdraw`) or left to finish.
+        guard snapshot.memoEdit == nil else { return nil }
         let taken = snapshot.cancelled(at: Date())
         let written = try? await repository.save(
             taken, ifStillCurrent: nil, matching: snapshot, else: taken
@@ -1160,3 +1198,28 @@ private struct OwedEdit {
         binding = Binding(job)
     }
 }
+
+/// Where an edit that adds files to an existing memo is queued (MEMNG-954). The timeline store asks
+/// for this rather than for `Outbox` itself, so the store's own suite can hand it a real outbox and
+/// read back what was written.
+@MainActor
+public protocol MemoEditQueue: AnyObject {
+    /// `.queued` once the edit is persisted; see `Outbox.enqueueEdit`.
+    func enqueueEdit(
+        _ order: MemoEditOrder, sources: [StagedSource], composedUnder account: AccountBinding?
+    ) async -> MemoEditQueueAnswer
+    /// Whether an edit job for this memo is still owed; see `Outbox.hasUnfinishedEdit`.
+    func hasUnfinishedEdit(memoUID: String) async -> Bool
+}
+
+/// What writing an edit job came to (MEMNG-954).
+public enum MemoEditQueueAnswer: Sendable, Equatable {
+    /// Persisted: the queue sends it from here, and the sheet may close.
+    case queued
+    /// An earlier edit job for the same memo is still in the queue; nothing was written.
+    case editPending
+    /// Not written: nobody signed in for it, the account changed, or the device refused the copy.
+    case notWritten
+}
+
+extension Outbox: MemoEditQueue {}

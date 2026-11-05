@@ -467,10 +467,9 @@ public struct ComposeView: View {
     /// nothing and leaves the sheet as it was. An untouched pill says nothing to the server at all.
     /// The rule is `VisibilityChange`'s, shared with the timeline's long press, not this sheet's.
     ///
-    /// The files an edit picks go up in the FOREGROUND and the memo is patched with them directly
-    /// (`TimelineStore.edit(attaching:)`), rather than through the outbox that owns new captures:
-    /// without an edit key a queued retry cannot be made safe, so an edit is something that
-    /// happens while its sheet is open or does not happen at all.
+    /// The files an edit picks make it an outbox job (MEMNG-954): written with an edit key of its
+    /// own, uploaded on the lane new captures use, and patched onto the memo after this sheet has
+    /// closed — the sheet closes as soon as the job is on disk.
     @ViewBuilder
     private var controls: some View {
         VStack(alignment: .leading, spacing: DesignTokens.Space.regular) {
@@ -824,7 +823,7 @@ public struct ComposeView: View {
                 // the set is not frozen by it — whatever may already have landed was frozen when
                 // THAT request went.
                 case .transport(sent: false), .authorization, .storage, .rejection,
-                    .captureUnchanged, .defaultVisibilityUnknown:
+                    .captureUnchanged, .defaultVisibilityUnknown, .editPending:
                     break
                 }
                 // One exception, and it is about a single sentence: an answer that never left the

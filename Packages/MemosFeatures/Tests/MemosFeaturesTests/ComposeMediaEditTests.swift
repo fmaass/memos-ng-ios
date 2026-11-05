@@ -64,11 +64,21 @@ private final class FailureSequence {
 ///
 /// Until now an edit could change the words and the date and nothing else: the sheet showed only
 /// the date row, so a memo posted without its picture could never be given one from the app. The
-/// picker is on the edit sheet now, and what it picks rides the submission to a foreground upload
-/// (`TimelineStore.edit(attaching:)`) rather than the outbox, which owns new captures.
+/// picker is on the edit sheet now, and what it picks rides the submission to
+/// `TimelineStore.edit(attaching:)`, which writes it to the outbox as an edit job (MEMNG-954).
 @MainActor
 @Suite("Attaching media on an edit")
 struct ComposeMediaEditTests {
+    /// An edit the store refuses because the memo still owes an edit job (MEMNG-954) says so in
+    /// plain words on the sheet, and marks no tile: nothing about the files went wrong.
+    @Test("an edit refused behind a queued edit job says the last change is still sending")
+    func editPendingSentence() {
+        #expect(
+            ComposeFailurePresentation.sentence(for: .editPending)
+                == "This memo is still sending your last change. Edit it once it's in.")
+        #expect(ComposeFailurePresentation.tileCategory(for: .editPending) == nil)
+    }
+
     private let created = Date(timeIntervalSince1970: 1_750_000_000)
 
     private func mode() -> ComposeView.Mode {

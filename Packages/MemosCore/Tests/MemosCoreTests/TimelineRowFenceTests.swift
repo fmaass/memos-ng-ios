@@ -10,9 +10,6 @@ import Testing
 private let listMemosOperation = "list_memos_api_memos_get"
 private let getMemoOperation = "get_memo_api_memos__uid__get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
-private let startUploadOperation = "start_upload_api_uploads_post"
-private let appendChunkOperation = "append_chunk_api_uploads__upload_uid__patch"
-private let finalizeUploadOperation = "finalize_upload_api_uploads__upload_uid__finalize_post"
 
 /// Keeps a request open until the test lets it go. `nonisolated`, because it is called from inside
 /// the scripted transport, which the client runs off the main actor.
@@ -20,13 +17,6 @@ private func hold(until release: LockedValue<Bool>) async throws {
     while !release.get() {
         try await Task.sleep(for: .milliseconds(1))
     }
-}
-
-/// One upload session's answer, in the shape the server sends it.
-private func uploadOut(uid: String, chunkSize: Int, received: Int) -> String {
-    """
-    {"upload_uid":"\(uid)","chunk_size":\(chunkSize),"bytes_received":\(received)}
-    """
 }
 
 /// A file on disk with known contents, cleaned up by the test that made it.
@@ -252,7 +242,11 @@ struct TimelineRowFenceTests {
     @Test("a save that never left the device does not hold off the list behind it")
     func aSaveThatNeverLeftDoesNotHoldOffTheListBehindIt() async throws {
         let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, _, outbox) = try editOutbox()
+        defer {
+            try? FileManager.default.removeItem(at: file.url)
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let store = TimelineStore()
         let lists = Counter()
@@ -260,8 +254,6 @@ struct TimelineRowFenceTests {
         let release = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
             switch operation {
-            case startUploadOperation:
-                return Stub.empty(.internalServerError)
             case listMemosOperation:
                 let index = lists.count
                 lists.increment()
@@ -283,10 +275,13 @@ struct TimelineRowFenceTests {
         while !entered.get() {
             await Task.yield()
         }
-        await store.edit(
-            uid: "a", content: "C", attaching: [file],
+        // An edit with files is written to the outbox and sends nothing from here (MEMNG-954):
+        // it changed nothing on the server, so the list it held is free the moment it is queued.
+        let queued = await store.edit(
+            uid: "a", content: "C", attaching: [file], through: outbox,
             using: client.handle, baseURL: Stub.baseURL
         )
+        #expect(queued == .saved, "control: the edit was queued")
         release.set(true)
         await refreshing.value
 
@@ -295,30 +290,28 @@ struct TimelineRowFenceTests {
 
     @Test("two saves that both failed leave the list they were holding free")
     func twoFailedSavesLeaveTheListFree() async throws {
-        let first = try stagedFile()
-        let second = try stagedFile(named: "second.jpg")
-        defer {
-            try? FileManager.default.removeItem(at: first.url)
-            try? FileManager.default.removeItem(at: second.url)
-        }
 
         let store = TimelineStore()
         let lists = Counter()
-        let uploads = Counter()
+        let patches = Counter()
         let listEntered = LockedValue<Bool>(false)
-        let uploadEntered = LockedValue<Bool>(false)
+        let patchEntered = LockedValue<Bool>(false)
         let listRelease = LockedValue<Bool>(false)
-        let uploadRelease = LockedValue<Bool>(false)
+        let patchRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, _, operation in
             switch operation {
-            case startUploadOperation:
-                let index = uploads.count
-                uploads.increment()
+            case patchMemoOperation:
+                let index = patches.count
+                patches.increment()
                 if index == 0 {
-                    uploadEntered.set(true)
-                    try await hold(until: uploadRelease)
+                    patchEntered.set(true)
+                    try await hold(until: patchRelease)
                 }
-                return Stub.empty(.internalServerError)
+                // A refusal: the server changed nothing, which is what releases the row.
+                return Stub.json(
+                    #"{"detail":{"code":"edit_key_conflict","memo_uid":"b","message":"bound"}}"#,
+                    status: .conflict
+                )
             case listMemosOperation:
                 let index = lists.count
                 lists.increment()
@@ -342,23 +335,23 @@ struct TimelineRowFenceTests {
         }
         let sending = Task {
             await store.edit(
-                uid: "a", content: "X", attaching: [first],
+                uid: "a", content: "X",
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
-        while !uploadEntered.get() {
+        while !patchEntered.get() {
             await Task.yield()
         }
         // One turn of the main actor: the place in line is taken by synchronous code, so this is
         // all the second save needs to be queued behind the first.
         let queued = Task {
             await store.edit(
-                uid: "a", content: "Y", attaching: [second],
+                uid: "a", content: "Y",
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
         await Task.yield()
-        uploadRelease.set(true)
+        patchRelease.set(true)
         _ = await sending.value
         _ = await queued.value
         listRelease.set(true)
@@ -369,37 +362,28 @@ struct TimelineRowFenceTests {
 
     @Test("a save still on its way keeps the list from overwriting the row it owns")
     func aSaveStillOnItsWayKeepsTheListFromOverwritingItsRow() async throws {
-        let first = try stagedFile()
-        let second = try stagedFile(named: "second.jpg")
-        defer {
-            try? FileManager.default.removeItem(at: first.url)
-            try? FileManager.default.removeItem(at: second.url)
-        }
 
         let store = TimelineStore()
         let lists = Counter()
-        let uploads = Counter()
+        let patches = Counter()
         let listEntered = LockedValue<Bool>(false)
-        let uploadEntered = LockedValue<Bool>(false)
+        let patchEntered = LockedValue<Bool>(false)
         let listRelease = LockedValue<Bool>(false)
-        let uploadRelease = LockedValue<Bool>(false)
+        let patchRelease = LockedValue<Bool>(false)
         let client = Stub.client { _, body, operation in
             switch operation {
-            case startUploadOperation:
-                let index = uploads.count
-                uploads.increment()
-                if index == 0 {
-                    return Stub.empty(.internalServerError)
-                }
-                uploadEntered.set(true)
-                try await hold(until: uploadRelease)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case finalizeUploadOperation:
-                return Stub.empty(.ok)
             case patchMemoOperation:
+                let index = patches.count
+                patches.increment()
+                if index == 0 {
+                    // A refusal: the first save changed nothing.
+                    return Stub.json(
+                        #"{"detail":{"code":"edit_key_conflict","memo_uid":"b","message":"bound"}}"#,
+                        status: .conflict
+                    )
+                }
+                patchEntered.set(true)
+                try await hold(until: patchRelease)
                 let content = (try await Stub.body(body))["content"] as? String ?? ""
                 return Stub.json(Stub.memo(uid: "a", content: content))
             // The read that pays for the held list leaves once no save owns the row any more, so
@@ -429,18 +413,18 @@ struct TimelineRowFenceTests {
         }
         let failing = Task {
             await store.edit(
-                uid: "a", content: "X", attaching: [first],
+                uid: "a", content: "X",
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
         await Task.yield()
         let queued = Task {
             await store.edit(
-                uid: "a", content: "Y", attaching: [second],
+                uid: "a", content: "Y",
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
-        while !uploadEntered.get() {
+        while !patchEntered.get() {
             await Task.yield()
         }
         _ = await failing.value
@@ -449,7 +433,7 @@ struct TimelineRowFenceTests {
 
         #expect(store.memos.first?.content == "A")
 
-        uploadRelease.set(true)
+        patchRelease.set(true)
         _ = await queued.value
         await store.owedReadsSettled()
 
@@ -570,15 +554,14 @@ struct TimelineRowFenceTests {
     /// only thing that brings the second file in.
     @Test("a read a save fenced is paid back by exactly one fresh read")
     func aFencedReadIsPaidBackByOneFreshRead() async throws {
-        let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
 
         let store = TimelineStore()
         let gets = Counter()
         let readEntered = LockedValue<Bool>(false)
         let readRelease = LockedValue<Bool>(false)
-        let uploadEntered = LockedValue<Bool>(false)
-        let uploadRelease = LockedValue<Bool>(false)
+        let patchEntered = LockedValue<Bool>(false)
+        let patchRelease = LockedValue<Bool>(false)
+        let patches = Counter()
         let client = Stub.client { _, _, operation in
             switch operation {
             case getMemoOperation:
@@ -597,10 +580,18 @@ struct TimelineRowFenceTests {
                         ]
                     )
                 )
-            case startUploadOperation:
-                uploadEntered.set(true)
-                try await hold(until: uploadRelease)
-                return Stub.empty(.internalServerError)
+            case patchMemoOperation:
+                let index = patches.count
+                patches.increment()
+                if index == 0 {
+                    patchEntered.set(true)
+                    try await hold(until: patchRelease)
+                }
+                // A refusal: the save changed nothing on the server.
+                return Stub.json(
+                    #"{"detail":{"code":"edit_key_conflict","memo_uid":"b","message":"bound"}}"#,
+                    status: .conflict
+                )
             case listMemosOperation:
                 return Stub.json(
                     Stub.page([
@@ -624,18 +615,17 @@ struct TimelineRowFenceTests {
         }
         let saving = Task {
             await store.edit(
-                uid: "a", content: "new", attaching: [file],
-                using: client.handle, baseURL: Stub.baseURL
+                uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL
             )
         }
-        while !uploadEntered.get() {
+        while !patchEntered.get() {
             await Task.yield()
         }
         readRelease.set(true)
         _ = await reading.value
-        // The save never reaches the server, so the last claim leaves the row without applying
+        // The server refuses the save, so the last claim leaves the row without applying
         // anything to it — the words the read carried are still the server's own.
-        uploadRelease.set(true)
+        patchRelease.set(true)
         _ = await saving.value
 
         await store.owedReadsSettled()
@@ -646,8 +636,7 @@ struct TimelineRowFenceTests {
         // A debt is paid ONCE. The same save again leaves its claim the same way and finds nothing
         // owed: no read was refused since, so a third GET would be the first debt paid twice.
         await store.edit(
-            uid: "a", content: "new", attaching: [file],
-            using: client.handle, baseURL: Stub.baseURL
+            uid: "a", content: "new", using: client.handle, baseURL: Stub.baseURL
         )
         await store.owedReadsSettled()
 

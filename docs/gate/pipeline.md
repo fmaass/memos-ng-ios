@@ -49,6 +49,11 @@ picture-list forwarding rule (`scripts/picturelist-forwarding-rule.sh`: in each 
 and `MemoDetailView.swift` the literal `listing: submission.pictures` appears on exactly one
 uncommented line — neither save call site can be reached from a test, both being private functions
 behind a sheet that never presents — with the `attaching:` forwarding beside it as the control) → the
+no-foreground-edit-upload rule (`scripts/no-foreground-edit-upload-rule.sh`, MEMNG-954: files added to
+an existing memo go through the outbox edit job, so the deleted foreground uploader's two names appear
+in no Swift file under `Packages/` or `Sources/`, comments included, with `func enqueueEdit(` in
+`Outbox.swift`, the `memoEdit` field on `UploadJob` and `enqueueEdit(` in `TimelineStore.swift` as the
+controls; its selftest is `tests/gate/no-foreground-edit-upload-rule-test.sh`) → the
 main-bar freeze rule (`scripts/mainbar-freeze-rule.sh`, the executable half of ADR-0008: outside
 comments `LeadingMainBar(` is constructed on exactly one line of the Features sources and that line
 is in `Dock.swift`, no line ends in the bare name (a construction split across lines), `Dock.swift`

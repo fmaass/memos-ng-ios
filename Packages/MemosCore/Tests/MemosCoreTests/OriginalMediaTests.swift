@@ -386,11 +386,6 @@ struct OriginalMediaTests {
             ) == .unauthorized
         )
         #expect(StoreFailure.reportable(OriginalMediaError.refused(.unauthorized)) == .unauthorized)
-        // The BARE-TOKEN lane's shape, kept because that lane is real — a client with no credential
-        // behind it reports its 401 as a plain `APIError` inside this wrapper.
-        #expect(StoreFailure.reportable(MediaUploadError.refused(.unauthorized)) == .unauthorized)
-        // Something that is NOT the server's word keeps its own sentence instead.
-        #expect(StoreFailure.reportable(MediaUploadError.stalled) != .unauthorized)
     }
 }
 

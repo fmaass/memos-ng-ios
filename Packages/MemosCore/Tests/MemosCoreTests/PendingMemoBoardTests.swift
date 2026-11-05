@@ -40,6 +40,28 @@ struct PendingMemoBoardTests {
         #expect(card?.tiles.map(\.id) == capture.files.map(\.id))
     }
 
+    /// An edit job (MEMNG-954) names a memo that is ON the list from the start. Read as resolved,
+    /// its card would vanish at once and that memo's row would take the card's key; it stays a card
+    /// of its own while the job is queued, and the memo's row keeps its own key.
+    @Test("an edit adding files to a posted memo is a card of its own, not that memo's row")
+    func editJobIsItsOwnCard() {
+        var board = PendingMemoBoard()
+        var edit = job("the dock, later", files: 1)
+        edit.resolvedMemoUID = "m9"
+        edit.memoEdit = MemoEdit(statesDate: false, pictures: nil)
+        board.show([edit], resolved: [:])
+        let cards = board.visible(present: ["m9"])
+        #expect(cards.map(\.job.id) == [edit.id], "the edit's card was hidden by its memo")
+        #expect(cards.first?.resolvedUID == nil)
+        #expect(board.key(for: "m9") == "m9", "the posted memo's row took the card's key")
+        // The control: the same job without the edit marker IS read as that memo's card.
+        var capture = edit
+        capture.memoEdit = nil
+        var other = PendingMemoBoard()
+        other.show([capture], resolved: [:])
+        #expect(other.key(for: "m9") == PendingMemoBoard.key(for: capture.id))
+    }
+
     @Test("the newest capture is on top, and one taken back to the editor keeps its card")
     func orderAndCancelled() {
         var board = PendingMemoBoard()

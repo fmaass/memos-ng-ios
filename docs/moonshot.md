@@ -90,7 +90,9 @@ Two more facts shape the fix:
 - **Editing a memo uploads in the foreground, outside the outbox.** `ComposeView.swift:438-440`:
   *"The files an edit picks go up in the FOREGROUND and the memo is patched with them directly
   (`TimelineStore.edit(attaching:)`), rather than through the outbox."* Add thirty pictures to an
-  existing memo and the app must stay open until the last byte lands.
+  existing memo and the app must stay open until the last byte lands. *(Fixed by MEMNG-954: an
+  edit that adds files is now an outbox edit job with its own edit key, its files ride the whole
+  lane, and the PATCH naming them is its terminal action; the foreground path was deleted.)*
 - **After Post, there is no view of the job.** The memo does not appear on the timeline until the
   server has it, so between Post and arrival the person sees nothing: no card, no ring, no count.
 

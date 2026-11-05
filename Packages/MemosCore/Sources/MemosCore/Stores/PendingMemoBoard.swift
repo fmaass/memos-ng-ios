@@ -71,7 +71,10 @@ public struct PendingMemoBoard: Sendable, Equatable {
         var listed: Set<UUID> = []
         for job in jobs where !withdrawn.contains(job.id) {
             listed.insert(job.id)
-            let uid = job.resolvedMemoUID ?? resolved[job.id]
+            // An edit of a memo that already exists (MEMNG-954) is a card of its own until its job
+            // leaves the queue: its memo is on the list from the start, so taking it as resolved
+            // would hide the card at once and give that memo's row the card's key.
+            let uid = job.memoEdit != nil ? nil : job.resolvedMemoUID ?? resolved[job.id]
             next.append(PendingMemo(id: Self.key(for: job.id), job: job, resolvedUID: uid))
         }
         for card in cards where !listed.contains(card.job.id) {

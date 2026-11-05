@@ -140,22 +140,17 @@ struct TimelineMutationGateTests {
     @Test("two identical saves queued behind a different one are one request between them")
     func twoIdenticalSavesQueuedBehindADifferentOneAreOneRequest() async throws {
         let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer {
+            try? FileManager.default.removeItem(at: file.url)
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let store = TimelineStore()
         let patched = LockedValue<[String]>([])
-        let uploads = Counter()
         let release = LockedValue<Bool>(false)
         let client = Stub.client { _, body, operation in
             switch operation {
-            case startUploadOperation:
-                uploads.increment()
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case finalizeUploadOperation:
-                return Stub.empty(.ok)
             case patchMemoOperation:
                 let content = (try await Stub.body(body))["content"] as? String ?? ""
                 patched.set(patched.get() + [content])
@@ -179,14 +174,14 @@ struct TimelineMutationGateTests {
         // either of these calls awaits anything, so this is all they need to be queued in order.
         let queued = Task {
             await store.edit(
-                uid: "a", content: "queued", attaching: [file],
+                uid: "a", content: "queued", attaching: [file], through: outbox,
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
         await Task.yield()
         let identical = Task {
             await store.edit(
-                uid: "a", content: "queued", attaching: [file],
+                uid: "a", content: "queued", attaching: [file], through: outbox,
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
@@ -196,11 +191,13 @@ struct TimelineMutationGateTests {
         let queuedOutcome = await queued.value
         let identicalOutcome = await identical.value
 
-        #expect(patched.get() == ["first", "queued"], "a save queued twice was sent twice")
-        #expect(uploads.count == 1, "the joined save uploaded its file a second time")
+        // The saves with files are an outbox edit job (MEMNG-954): the store patches nothing for
+        // them, and the two identical ones are ONE job between them.
+        #expect(patched.get() == ["first"], "the store sent a save that carries files itself")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.count == 1, "a save queued twice was queued twice")
         #expect(queuedOutcome == identicalOutcome, "one request, two answers")
-        #expect(queuedOutcome.isSaved, "control: the queued save landed")
-        #expect(store.memos[0].content == "queued")
+        #expect(queuedOutcome.isSaved, "control: the queued save was written")
     }
 
     @Test("a save identical to an earlier one is a new save when another came between them")
@@ -335,90 +332,27 @@ struct TimelineMutationGateTests {
         #expect(store.memos[0].content == "new words")
     }
 
-    @Test("a save joined while it is still uploading uploads its files once")
-    func aJoinedSaveUploadsItsFilesOnce() async throws {
-        let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let uploads = Counter()
-        let patches = Counter()
-        let release = LockedValue<Bool>(false)
-        let client = Stub.client { _, body, operation in
-            switch operation {
-            case startUploadOperation:
-                uploads.increment()
-                // Held HERE rather than at the patch: the second save arrives while the first is
-                // still in its upload, which is the window a gate taken after the upload leaves
-                // open — and a file uploaded twice is an attachment posted twice.
-                try await hold(until: release)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case finalizeUploadOperation:
-                return Stub.empty(.ok)
-            case patchMemoOperation:
-                patches.increment()
-                return Stub.json(Stub.memo(uid: "a", content: "with a photo"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let first = Task {
-            await store.edit(
-                uid: "a", content: "with a photo", attaching: [file],
-                using: client.handle, baseURL: Stub.baseURL
-            )
-        }
-        while uploads.count == 0 {
-            await Task.yield()
-        }
-        let second = Task {
-            await store.edit(
-                uid: "a", content: "with a photo", attaching: [file],
-                using: client.handle, baseURL: Stub.baseURL
-            )
-        }
-        await timeForARequestToArrive()
-        release.set(true)
-        let firstOutcome = await first.value
-        let secondOutcome = await second.value
-
-        #expect(uploads.count == 1, "the joined save uploaded the same file a second time")
-        #expect(patches.count == 1, "the joined save patched the memo a second time")
-        #expect(firstOutcome == secondOutcome, "one request, two answers")
-        #expect(firstOutcome.isSaved, "control: the save landed")
-    }
-
     /// A place in line is an unbounded wait, and an account can end inside it.
     ///
     /// What the waiting save carries — words and a photograph — belongs to whoever typed it, and
     /// the client it would send them with is the one it captured. So the question is asked again
-    /// where the wait ENDS, against the handle that issued it: the upload is this lane's first
-    /// request, and a check made after it would already have posted the file.
+    /// where the wait ENDS, against the handle that issued it: writing the edit job to the outbox
+    /// is this lane's first effect, and a check made after it would already have queued the file.
     @Test("a save whose session ended while it waited its turn sends nothing")
     func aQueuedSaveWhoseSessionEndedSendsNothing() async throws {
         let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer {
+            try? FileManager.default.removeItem(at: file.url)
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let patched = LockedValue<[String]>([])
-        let uploads = Counter()
         let release = LockedValue<Bool>(false)
         let session = await signedIn { _, body, operation in
             switch operation {
             case whoamiOperation:
                 return Stub.json(Stub.user)
-            case startUploadOperation:
-                uploads.increment()
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case finalizeUploadOperation:
-                return Stub.empty(.ok)
             case patchMemoOperation:
                 let content = (try await Stub.body(body))["content"] as? String ?? ""
                 patched.set(patched.get() + [content])
@@ -441,7 +375,7 @@ struct TimelineMutationGateTests {
         }
         let second = Task {
             await store.edit(
-                uid: "a", content: "second", attaching: [file],
+                uid: "a", content: "second", attaching: [file], through: outbox,
                 using: underA, baseURL: Stub.baseURL
             )
         }
@@ -454,7 +388,8 @@ struct TimelineMutationGateTests {
         let firstOutcome = await first.value
         let secondOutcome = await second.value
 
-        #expect(uploads.count == 0, "a photograph was posted for an account that had gone")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.isEmpty, "a photograph was queued for an account that had gone")
         #expect(patched.get() == ["first"], "a save queued under an account that had gone was sent")
         #expect(!secondOutcome.isSaved, "and it was not reported as saved")
         // The control: the save that DID reach the wire is the one issued while A was current.
@@ -566,11 +501,14 @@ struct TimelineMutationGateTests {
     @Test("a save queued behind a delete the server confirmed sends nothing")
     func aQueuedSaveBehindAConfirmedDeleteSendsNothing() async throws {
         let file = try stagedFile()
-        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer {
+            try? FileManager.default.removeItem(at: file.url)
+            try? FileManager.default.removeItem(at: root)
+        }
 
         let store = TimelineStore()
         let deletes = Counter()
-        let uploads = Counter()
         let patches = Counter()
         let release = LockedValue<Bool>(false)
         let client = Stub.client { _, body, operation in
@@ -579,14 +517,6 @@ struct TimelineMutationGateTests {
                 deletes.increment()
                 try await hold(until: release)
                 return Stub.empty(.noContent)
-            case startUploadOperation:
-                uploads.increment()
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case finalizeUploadOperation:
-                return Stub.empty(.ok)
             case patchMemoOperation:
                 patches.increment()
                 return Stub.json(Stub.memo(uid: "a", content: "words"))
@@ -602,7 +532,7 @@ struct TimelineMutationGateTests {
         }
         let saving = Task {
             await store.edit(
-                uid: "a", content: "words", attaching: [file],
+                uid: "a", content: "words", attaching: [file], through: outbox,
                 using: client.handle, baseURL: Stub.baseURL
             )
         }
@@ -612,7 +542,8 @@ struct TimelineMutationGateTests {
         let outcome = await saving.value
 
         #expect(gone, "control: the delete landed")
-        #expect(uploads.count == 0, "a file was posted for a memo the server had confirmed gone")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.isEmpty, "a file was queued for a memo the server had confirmed gone")
         #expect(patches.count == 0, "a memo this app had already deleted was patched")
         #expect(!outcome.isSaved, "a save that nothing can keep was reported as saved")
     }

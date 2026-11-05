@@ -46,6 +46,9 @@ public enum ComposeFailure: Sendable, Equatable {
     /// "Default" was chosen and the account's own default is not known, so there is no value a
     /// memo could carry that means it. Nothing was asked of the queue.
     case defaultVisibilityUnknown
+    /// The outbox still owes this memo an edit that adds files (MEMNG-954): an edit saved now would
+    /// be undone by that one's PATCH, or undo it. Nothing was sent and nothing was queued.
+    case editPending
 }
 
 /// What a compose attempt did.
@@ -141,8 +144,8 @@ extension ComposeFailure {
     /// The `APIError` anywhere in an error's chain, or nil.
     ///
     /// `APIErrorCarrying` is checked as well as the type itself: the failures this app actually
-    /// meets are wrappers — `MediaUploadError.refused(.unauthorized)` is what an upload against an
-    /// ended session throws — and a wrapper read as an opaque error is a session failure reported
+    /// meets are wrappers — an error carrying an `APIError` it was handed by a lower layer — and a
+    /// wrapper read as an opaque error is a session failure reported
     /// as the server refusing somebody's words.
     fileprivate static func apiError(in error: any Error) -> APIError? {
         var current: (any Error)? = error

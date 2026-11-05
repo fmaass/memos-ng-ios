@@ -534,8 +534,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // capture that waits for its backoff before it re-stages waits for the upload too.
                 if clock() >= current.nextAttemptAt, current.files.allSatisfy(\.isComplete) {
                     // An edit is new work: it waits for the foreground, and nothing is claimed or
-                    // written for it here. The sender asks the same gate again (`applyEdit`).
-                    guard schedulingGate.isOpen else { return }
+                    // written for it here. The sender asks the same gate again (`applyEdit`). An
+                    // edit JOB (MEMNG-954) is not: its PATCH finishes a transfer that has already
+                    // happened, exactly as a create does, so a background wake may send it.
+                    guard schedulingGate.isOpen || current.memoEdit != nil else { return }
                     if let reason = networkWait(for: current) {
                         await waitForNetwork(current, reason)
                         return
@@ -959,6 +961,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         _ job: UploadJob,
         credentials: OutboxCredentials
     ) async -> UploadJob? {
+        // An edit job's memo already exists: a create would post its files as a second memo. Its
+        // terminal request is the edit branch's PATCH, so nothing is written or sent here.
+        guard job.memoEdit == nil else { return nil }
         // The value the disk holds from here on, and the snapshot every outcome below is judged
         // against. Matching the job as it stood BEFORE the create was recorded would reject the
         // create's own bookkeeping; matching the recovery candidate would judge each outcome
@@ -1091,7 +1096,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
         switch await completion.patch(
             job: claimed, request: request, credentials: credentials,
-            under: authority(under: credentials, for: .work)
+            under: authority(under: credentials, for: claimed.memoEdit == nil ? .work : .memoCreate)
         ) {
         case .applied:
             // Fenced on the manifest this pass wrote: an answer that outlived a cancel, or a
@@ -1530,6 +1535,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // Planned again, this row would only be created again: every file is on the server.
                 if next.pendingEdit != nil, next.resolvedMemoUID != nil { return .handBack(next) }
                 current = next
+            case .patchMemo:
+                // An edit job whose last file has landed since the caller's copy was read: its
+                // PATCH is the edit branch's, which takes the row handed back (MEMNG-954).
+                return .handBack(current)
             }
         }
         let backedOff = await save(

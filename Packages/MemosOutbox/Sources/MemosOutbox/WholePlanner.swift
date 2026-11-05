@@ -22,6 +22,10 @@ public enum WholeAction: Sendable, Equatable {
     case resume(UUID)
     /// Every file is on the server: create the memo that links them.
     case createMemo
+    /// Every file is on the server and the memo already exists: this is an edit job (MEMNG-954),
+    /// whose terminal request is the PATCH the engine's edit branch sends. Never a create — a
+    /// create here would post the edit's files as a second memo.
+    case patchMemo
 }
 
 /// How many whole-file uploads may be in flight at once, across every capture.
@@ -75,7 +79,7 @@ extension OutboxPlanner {
         )
         if schedulingOpen { return action }
         switch action {
-        case .createMemo, .wait:
+        case .createMemo, .patchMemo, .wait:
             return action
         case .hold, .upload, .resume:
             return .wait(until: .distantFuture)
@@ -101,7 +105,9 @@ extension OutboxPlanner {
         if needing.isEmpty {
             // Files are still arriving from the editor: the ones here upload meanwhile, and the
             // create waits for the last of them (`UploadJob.stagingLaunch`).
-            return job.stillArriving ? .wait(until: .distantFuture) : .createMemo
+            if job.stillArriving { return .wait(until: .distantFuture) }
+            // An edit of a memo already posted links its files with a PATCH, under its own key.
+            return job.memoEdit != nil ? .patchMemo : .createMemo
         }
         // Eligibility before the budget is counted, so a file waiting out its own deadline never
         // takes a place a sibling could have used.
