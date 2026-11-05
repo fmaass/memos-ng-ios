@@ -14,8 +14,10 @@ is deliberately absent from `keychain-access-groups` — a raw `group.…` entry
 profile's `TEAMID.*` pattern and breaks device signing, and the app's keychain access to it rides
 on the application-groups entitlement instead; the share extension declares no keychain group;
 both declare the app group as a positive control; and `scripts/applinks-rule.sh`, which reads both
-files as text and requires the app to claim `applinks:trip.discomarder.live` — the plain entry, not
-only its `?mode=developer` twin — and the share extension to claim no applinks host at all, with the
+files as text, XML comments removed first, and requires the app's applinks set to be exactly
+`applinks:trip.discomarder.live` and its `?mode=developer` twin, both as direct entries of the
+associated-domains array (a nested array is not the list) and no other applinks host at any depth
+(MEMNG-1177, MEMNG-1178), and the share extension to claim no applinks host at all, with the
 app group in both files and the associated-domains key in the app's as its positive control,
 MEMNG-1084) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild build-for-testing` on the generic simulator destination, outside the

@@ -111,21 +111,14 @@ targets:
       path: MemosNG.entitlements
       properties:
         com.apple.developer.associated-domains:
-          # applinks is what lets the server's own https callback OPEN this app. It is not
-          # implied by webcredentials: the old sign-in used an ASWebAuthenticationSession, whose
-          # .https callback rides on webcredentials, and that hid the omission for as long as it
-          # lasted. The app presents the browser view itself now, so the return trip is an
-          # ordinary universal link and needs the ordinary entitlement. The server's AASA already
-          # declares /ios/auth/callback* for this app id.
-          #
-          # It is not sufficient either, and in this deployment it is not even reachable: the
-          # association is published through Apple's CDN, and this server is on internal-only
-          # DNS, so the CDN can never fetch it. The universal-link lane is permanently inert
-          # here. That is what the custom URL scheme below is for. This entry stays because it
-          # is one line and it is what would make the better lane start working, with nothing to
-          # ship for it, if a publicly fetchable AASA is ever served for the domain.
-          - applinks:memos.discomarder.live
-          - applinks:memos.discomarder.live?mode=developer
+          # The home domain is claimed for webcredentials only: that is what offers the saved
+          # password at sign-in. It is NOT claimed as an applinks host. Its association is published
+          # through Apple's CDN, and this server is on internal-only DNS, so the CDN can never fetch
+          # it and a universal link to the home domain never opens the app. The home deep-link lane
+          # is the custom URL scheme below, the sign-in return included, and the home domain never
+          # serves universal links (owner, 2026-10-30). The entitlement states exactly what is
+          # served: scripts/applinks-rule.sh holds the app's applinks set to the trip-door pair
+          # below and refuses any other host (MEMNG-1177).
           - webcredentials:memos.discomarder.live
           - webcredentials:memos.discomarder.live?mode=developer
           # The trip door is the one host whose association IS publicly fetchable: it is the public

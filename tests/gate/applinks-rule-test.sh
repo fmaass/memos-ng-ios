@@ -7,8 +7,11 @@
 # app's plain trip-door entry is removed from a pair that was accepted a moment ago, and the rule
 # must go red on it (MEMNG-1084, the follow-up to MEMNG-1012 — before it, deleting that entry
 # passed every gate). The others pin the edges the matcher is built around: the developer twin
-# alone is not the entry, a commented-out entry is not the entry, the share extension may claim no
-# universal-link host at all, and a pair without the app group proves nothing.
+# alone is not the entry, a commented-out entry is not the entry (on one line or across several),
+# an entry inside a nested array is not the entry and a nested array does not end the list, the
+# app claims exactly the trip-door pair and no other applinks host (MEMNG-1177), the share
+# extension may claim no universal-link host at all, and a pair without the app group proves
+# nothing.
 #
 # The generated files are not in the tree (XcodeGen writes them on the build host), so there is no
 # real-repository case here; the full gate runs the same script on the real files.
@@ -60,11 +63,9 @@ app_body() {
     '$(AppIdentifierPrefix)live.discomarder.memosng.credentials'
 }
 
-# The app's list as project.yml generates it today: the home entries stay, and the rule neither
-# requires nor forbids them.
-APP_DOMAINS="<string>applinks:memos.discomarder.live</string>
-<string>applinks:memos.discomarder.live?mode=developer</string>
-<string>webcredentials:memos.discomarder.live</string>
+# The app's list as project.yml generates it today: the home host is claimed for webcredentials
+# only (password autofill), and the trip-door pair is the whole applinks set (MEMNG-1177).
+APP_DOMAINS="<string>webcredentials:memos.discomarder.live</string>
 <string>webcredentials:memos.discomarder.live?mode=developer</string>
 <string>$TRIP</string>
 <string>$TRIP?mode=developer</string>"
@@ -108,8 +109,8 @@ check() { # $1 label, $2 expected exit, $3 dir, $4 a fixed string the output mus
   fi
 }
 
-# The shape the build host generates today: the app claims the trip door (and the home entries),
-# the extension declares the app group and nothing else.
+# The shape the build host generates today: the app claims the trip-door pair (and the home
+# webcredentials), the extension declares the app group and nothing else.
 w="$(new_pair clean "$APP_DOMAINS" "$EXT_GROUP_ONLY")" || exit 1
 check "the pair as generated today" 0 "$w" "APPLINKS ok: MemosNG.entitlements claims $TRIP"
 
@@ -132,6 +133,70 @@ check "the app claiming a host that only starts with the trip host" 1 "$w" \
 w="$(new_pair commented "<!-- <string>$TRIP</string> -->" "$EXT_GROUP_ONLY")" || exit 1
 check "the trip entry inside an XML comment" 1 "$w" \
   "APPLINKS FAIL: MemosNG.entitlements does not claim $TRIP"
+
+# A comment that spans lines is still a comment: its middle line, trimmed, is exactly the entry,
+# and the app still does not claim the door (MEMNG-1178).
+w="$(new_pair commented-multiline "<string>$TRIP?mode=developer</string>
+<!--
+<string>$TRIP</string>
+-->" "$EXT_GROUP_ONLY")" || exit 1
+check "the trip entry inside a multiline XML comment" 1 "$w" \
+  "APPLINKS FAIL: MemosNG.entitlements does not claim $TRIP"
+
+# The other direction: an applinks host that is only commented out is not a claim either, so the
+# exact-set check must not refuse it.
+w="$(new_pair commented-home "$APP_DOMAINS
+<!-- the home host was dropped:
+<string>applinks:memos.discomarder.live</string>
+-->" "$EXT_GROUP_ONLY")" || exit 1
+check "another applinks host inside a multiline XML comment" 0 "$w" \
+  "APPLINKS ok: MemosNG.entitlements claims exactly the trip-door applinks set"
+
+# The entry one array too deep is not an entry of the associated-domains list (MEMNG-1178).
+w="$(new_pair nested-trip "<string>$TRIP?mode=developer</string>
+<array>
+<string>$TRIP</string>
+</array>" "$EXT_GROUP_ONLY")" || exit 1
+check "the trip entry only inside a nested array" 1 "$w" \
+  "APPLINKS FAIL: MemosNG.entitlements does not claim $TRIP"
+
+# A nested array's own </array> does not end the list: the direct entries after it still count.
+w="$(new_pair nested-first "<array>
+<string>webcredentials:memos.discomarder.live</string>
+</array>
+$APP_DOMAINS" "$EXT_GROUP_ONLY")" || exit 1
+check "a nested array before the direct entries" 0 "$w" \
+  "APPLINKS ok: MemosNG.entitlements claims $TRIP"
+
+# Exactly the trip-door pair: the home host back in the app's applinks set is refused (MEMNG-1177).
+w="$(new_pair home-applinks "<string>applinks:memos.discomarder.live</string>
+$APP_DOMAINS" "$EXT_GROUP_ONLY")" || exit 1
+check "the app claiming the home host as well" 1 "$w" \
+  "APPLINKS FAIL: MemosNG.entitlements claims an applinks entry outside the trip-door set: <string>applinks:memos.discomarder.live</string>"
+
+# The developer twin is half of the set; the plain entry alone is not the set.
+w="$(new_pair no-twin "$(printf '%s\n' "$APP_DOMAINS" | grep -vxF "<string>$TRIP?mode=developer</string>")" "$EXT_GROUP_ONLY")" || exit 1
+check "the app without the ?mode=developer twin" 1 "$w" \
+  "APPLINKS FAIL: MemosNG.entitlements does not claim $TRIP?mode=developer"
+
+# Another applinks host hidden one array deep is still refused: depth decides what counts as the
+# trip entry, never what may go unchecked.
+w="$(new_pair nested-home "$APP_DOMAINS
+<array>
+<string>applinks:memos.discomarder.live</string>
+</array>" "$EXT_GROUP_ONLY")" || exit 1
+check "another applinks host inside a nested array" 1 "$w" \
+  "APPLINKS FAIL: MemosNG.entitlements claims an applinks entry outside the trip-door set: <string>applinks:memos.discomarder.live</string>"
+
+# The exact-set check reads the associated-domains list and nothing else: an applinks string under
+# another key is not a claim, so it is not refused either.
+w="$tmp/pairs/other-key-home"
+mkdir -p "$w" || exit 1
+plist "$w/MemosNG.entitlements" "$(app_body "$APP_DOMAINS")
+$(printf '\t<key>com.example.unrelated</key>\n\t<array>\n\t\t<string>applinks:memos.discomarder.live</string>\n\t</array>')"
+plist "$w/MemosShare.entitlements" "$EXT_GROUP_ONLY"
+check "another applinks host under an unrelated key" 0 "$w" \
+  "APPLINKS ok: MemosNG.entitlements claims exactly the trip-door applinks set"
 
 # The string in the wrong array: the plain entry under the app group, only the twin under
 # associated-domains. The file holds the exact line, and the app still does not claim the door.
