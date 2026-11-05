@@ -1,6 +1,6 @@
 import Foundation
 
-/// The upload-only capture grant the app mints on every foreground and leaves beside the licence,
+/// The upload-only capture grant the app mints in the foreground and leaves beside the licence,
 /// so the share extension can open a capture's uploads itself (MEMNG-938).
 ///
 /// The extension holds no session token and never will — the device token lives in the app's own
@@ -32,8 +32,16 @@ public struct PublishedCaptureGrant: Sendable, Equatable, Codable {
 
     /// How long a grant must still have left to be handed to a capture. A grant that lapses while
     /// the bodies are on their way fails them half sent, and the app's lane would send them again;
-    /// a few minutes of margin costs nothing, because the app re-mints on every foreground.
+    /// a few minutes of margin costs nothing, because a foreground re-mints once less than
+    /// `remintBelow` is left.
     public static let minimumRemaining: TimeInterval = 5 * 60
+
+    /// How long a grant must still have left for a foreground to keep it rather than mint again.
+    ///
+    /// Every mint revokes the grant before it, and an extension upload still running under that
+    /// one is refused and falls back to the app. Half the server's 24 hours: a foreground leaves
+    /// the extension at least twelve hours of grant, and re-mints at most twice a day.
+    public static let remintBelow: TimeInterval = 12 * 60 * 60
 
     /// The credential a capture enqueued under `licence` may upload with, or nil.
     ///

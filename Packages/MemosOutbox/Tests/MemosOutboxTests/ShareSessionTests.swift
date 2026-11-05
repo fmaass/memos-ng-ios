@@ -367,6 +367,77 @@ struct ShareSessionTests {
         #expect(http.requests.isEmpty)
         #expect(registry.entries().isEmpty)
     }
+
+    /// MEMNG-1083 item 2: the app is alive in the background — it was in front, then left, so its
+    /// scheduling gate is CLOSED — when the extension's transfers finish, and the background
+    /// refresh runs in THIS process: `wake(holding:)` around adopt, reattach and start, exactly as
+    /// the app's `BGAppRefreshTask` handler. Whatever it does, it starts no new upload.
+    ///
+    /// The capture is NOT finalized today, and the known issue pins that: the reattached files
+    /// need the offset HEAD (`OutboxPlanner.nextWholeAction`'s `.resume`), which a closed gate
+    /// turns into a wait for the foreground. Letting it through is a new server question in the
+    /// background, a decision about the gate's meaning that MEMNG-1083 left open. Once a pass does
+    /// finalize here, the known issue stops occurring and this test fails: drop the wrapper then.
+    @MainActor
+    @Test("a live backgrounded process: the refresh pass and a share capture whose bytes landed")
+    func liveBackgroundedRefreshAndAFinishedShareCapture() async throws {
+        let rig = try await WholeRig.make(
+            withUploads: false, attached: false,
+            answerHead: { request in
+                let size = request.url?.lastPathComponent == "u1" ? "1000" : "3000"
+                return OutboxHTTPResponse(statusCode: 200, headers: ["Upload-Offset": size])
+            }
+        )
+        defer { rig.cleanUp() }
+        let sessions = SessionRegistry(root: rig.root)
+        let extensionPosts = Counter()
+        let extensionHTTP = ScriptedHTTP { _ in
+            extensionPosts.increment()
+            return ScriptedHTTP.session(
+                uid: "u\(extensionPosts.count)", chunkSize: 5 * 1024 * 1024, received: 0)
+        }
+        let shareSession = ScriptedUploadTaskSession()
+        let started = await ShareTransfer.start(
+            jobID: rig.job.id,
+            credential: ShareUploadCredential(token: "grant", epoch: 3, binding: Fixture.binding()),
+            registry: sessions, repository: rig.repository, http: extensionHTTP,
+            allowsMobileData: false, stillCurrent: { _ in true },
+            session: { @Sendable _ in shareSession })
+        let identifier = ShareSession.identifier(jobID: rig.job.id)
+        #expect(started == .started(identifier: identifier, tasks: 2))
+        let listing = shareSession.createdTasks.map {
+            WholeTaskListing(
+                taskIdentifier: $0.taskIdentifier, taskDescription: $0.description,
+                state: .completed)
+        }
+        let clock = MutableClock(Date(timeIntervalSince1970: 1_750_000_000))
+        let outbox = Outbox(
+            repository: rig.repository, credentials: rig.credentials, http: rig.http,
+            scheduler: ScriptedScheduler(), completion: rig.completion, network: rig.network,
+            preferences: rig.preferences,
+            uploads: BackgroundUploadScheduler(
+                session: ScriptedUploadTaskSession(), now: { clock.now },
+                pause: { clock.advance(11) }),
+            shareSessions: ShareSessions(registry: sessions) { _ in
+                ScriptedUploadTaskSession(listing: listing)
+            }
+        )
+        // The app left the front while the extension's transfers were still out.
+        outbox.appEnteredBackground()
+
+        let wake = OutboxBackgroundCompletion().enterWake()
+        await outbox.wake(holding: wake) {
+            await outbox.adopt()
+            await outbox.reattachShareSessions()
+            await outbox.start()
+        }
+
+        #expect(!sessions.contains(identifier: identifier), "the share session was retired")
+        #expect(rig.attemptedUploadPosts == 0, "a closed gate started a new upload")
+        withKnownIssue("a closed gate holds the offset HEAD, so the memo create waits") {
+            #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
+        }
+    }
 }
 
 /// Counts by key, from any thread.

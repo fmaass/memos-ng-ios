@@ -197,6 +197,11 @@ public final class SessionStore {
     /// Moved by every retirement of the grant (`retireCaptureGrant`), so a mint that was on the
     /// wire across a sign-out writes nothing when it lands, even before the epoch has moved.
     private var captureGrantRetirements = 0
+    /// The grant THIS process last wrote, with the authority epoch it was minted under: the only
+    /// one a foreground may keep. A file from an earlier launch can name a grant the server has
+    /// revoked — a renewal on an older build kept the file and lost the grant — and nothing on
+    /// disk says so, so the first foreground of every launch mints.
+    private var captureGrantKept: (epoch: Int, id: Int)?
     /// The session generations a sign-out is ending right now, one entry per sign-out in flight.
     /// While the current generation is listed, `mintCaptureGrant` REFUSES (it does not join): a
     /// mint started then would put a fresh grant on the server under a token that is being
@@ -1300,14 +1305,22 @@ public final class SessionStore {
     // MARK: - the capture grant (MEMNG-938)
 
     /// Mints the share extension's capture grant with the device token and leaves it beside the
-    /// licence, stamped with the licence issue it was asked under. Once per foreground: the server
-    /// rotates on every mint, so a device holds one live grant however often it comes back.
+    /// licence, stamped with the licence issue it was asked under. Only when the grant on file is
+    /// not this issue's and binding's, or has less than `PublishedCaptureGrant.remintBelow` left:
+    /// the server ROTATES on every mint, revoking the grant before it, so a foreground that minted
+    /// regardless would cut off an extension upload still running under that grant (MEMNG-1083).
     ///
     /// SINGLE-FLIGHT per authority: overlapping calls under the same epoch join the one request.
     /// The answer is judged against what ISSUED it — the authority epoch (a renewal destroys the
     /// token a grant dies with), the retirement count (a sign-out under way) and the licence on
     /// disk — synchronously, with nothing awaited between that judgement and the write.
     public func mintCaptureGrant() async {
+        await mintCaptureGrant(keepingAFreshGrant: true)
+    }
+
+    /// `keepingAFreshGrant: false` is the renewal's: the grant on file died with the token it
+    /// replaced, however much time the file says it has left.
+    private func mintCaptureGrant(keepingAFreshGrant: Bool) async {
         guard let captureGrants, let client, let configuration, let user = state.user,
             let licence = account?.currentLicence(), let issue = licence.incarnation,
             licence.binding
@@ -1317,7 +1330,15 @@ public final class SessionStore {
             MemosLog.session.info("no capture grant while this session is signing out")
             return
         }
+        if keepingAFreshGrant, let kept = captureGrantKept, kept.epoch == epoch.current,
+            let standing = captureGrants.current(), standing.id == kept.id,
+            standing.incarnation == issue, standing.binding == licence.binding,
+            standing.expiresAt.timeIntervalSince(now()) > PublishedCaptureGrant.remintBelow
+        {
+            return
+        }
         let issued = epoch.current
+        let generation = sessionGeneration
         let retirement = captureGrantRetirements
         if let flight = captureGrantMint, flight.epoch == issued, flight.retirement == retirement {
             return await flight.task.value
@@ -1325,7 +1346,7 @@ public final class SessionStore {
         let task = Task { @MainActor [self] in
             await performCaptureGrantMint(
                 client: client, into: captureGrants, licence: licence, issue: issue,
-                issued: issued, retirement: retirement)
+                issued: issued, retirement: retirement, generation: generation)
         }
         captureGrantMint = (issued, retirement, task)
         await task.value
@@ -1336,7 +1357,7 @@ public final class SessionStore {
 
     private func performCaptureGrantMint(
         client: any APIProtocol, into grants: CaptureGrantStore, licence: PublishedLicence,
-        issue: UUID, issued: Int, retirement: Int
+        issue: UUID, issued: Int, retirement: Int, generation: Int
     ) async {
         do {
             let response = try await client.mintCaptureGrantApiTokensCaptureGrantPost(.init())
@@ -1355,8 +1376,13 @@ public final class SessionStore {
                 PublishedCaptureGrant(
                     id: minted.id, token: minted.token, expiresAt: minted.expiresAt,
                     binding: licence.binding, incarnation: issue))
+            captureGrantKept = (issued, minted.id)
         } catch {
             if let refusal = StoreFailure.refusal(error) {
+                // A session that ended while the mint was out is not the one to judge it against:
+                // a new sign-in's credential counts its generations from the start again, so the
+                // epoch alone would take A's refusal for B's. The same guard as every other read.
+                guard owns(generation) else { return }
                 // The device token itself was turned down: the same rule as every other read,
                 // judged against the credential that earned it.
                 await handle(refusal)
@@ -2665,6 +2691,10 @@ public final class SessionStore {
         // point of `PresentedCredential` — so the incarnation does not move; only the authority
         // epoch does, which is what the outbox's next synchronous check reads.
         epoch.bump()
+        // The renewal revoked the capture grant with its token on the server, so the file names a
+        // dead grant: it goes in the same step, and no revoke is sent. Its successor is minted
+        // below, once the session is known to still be this one.
+        try? captureGrants?.clear()
         // The last-known identity is bound to a credential, and the credential has just MOVED. A
         // file still naming the predecessor would fail the next launch's fingerprint check and
         // take the offline launch away from a device that did everything right — and a file
@@ -2690,6 +2720,7 @@ public final class SessionStore {
         // the screen this renewal was started from draws the row and does not draw `lastError`,
         // so the warning would land nowhere the person pressing Renew can see it.
         if storageRefused, owns(generation) { deviceTokenNotice = Self.renewalStorageWarning }
+        if owns(generation) { await mintCaptureGrant(keepingAFreshGrant: false) }
         return .renewed
     }
 
