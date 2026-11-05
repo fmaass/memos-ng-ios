@@ -1776,12 +1776,21 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         // A deadline this write set that is already due (MEMNG-1183). The timer only arms one
         // strictly after now, so a deadline at this very instant is the write's to wake too. The
         // deadline was computed before the write's hop and kept on disk in whole seconds, so a
-        // write that landed late can leave a back-off due with nothing to wake it. Only a NEW deadline asks: one the row already carried was already somebody's,
-        // and `.distantPast` is a step's own "due now" that the pass writing it carries on with.
+        // write that landed late can leave a back-off due with nothing to wake it. Only a NEW
+        // deadline asks: one the row already carried was already somebody's, and `.distantPast` is
+        // a step's own "due now" that the pass writing it carries on with.
+        //
+        // And only a back-off's — a row that says it is retrying, which is what both a capture's
+        // and a file's back-off write. A released row (Try again, a re-submit) is due "now" too,
+        // but that now is its caller's: `Outbox.retry` and `resubmit` drain right after, and the
+        // sign-in scan runs inside a drain. A pass kicked off it races that drain, which then
+        // returns at once and leaves the work to a pass nobody awaited.
         let now = clock()
-        let lapsed = (wakeDeadlines[job.id] ?? []).contains {
-            $0 <= now && $0 != .distantPast && !before.contains($0)
-        }
+        let lapsed =
+            job.waitReason == .retrying
+            && (wakeDeadlines[job.id] ?? []).contains {
+                $0 <= now && $0 != .distantPast && !before.contains($0)
+            }
         if lapsed, schedulingGate.isOpen { requestDrain() }
     }
 
