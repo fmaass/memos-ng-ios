@@ -202,6 +202,11 @@ public final class SessionStore {
     /// revoked — a renewal on an older build kept the file and lost the grant — and nothing on
     /// disk says so, so the first foreground of every launch mints.
     private var captureGrantKept: (epoch: Int, id: Int)?
+    /// A renewal's removal of the dead grant's file that FAILED (MEMNG-1186). The epoch already
+    /// keeps this process from keeping that grant; the flag keeps the file from outliving it in
+    /// the extension's view: the next mint tries the removal again before anything else, and a
+    /// successor written over it settles the debt.
+    private var captureGrantClearOwed = false
     /// The session generations a sign-out is ending right now, one entry per sign-out in flight.
     /// While the current generation is listed, `mintCaptureGrant` REFUSES (it does not join): a
     /// mint started then would put a fresh grant on the server under a token that is being
@@ -1314,13 +1319,14 @@ public final class SessionStore {
     /// The answer is judged against what ISSUED it — the authority epoch (a renewal destroys the
     /// token a grant dies with), the retirement count (a sign-out under way) and the licence on
     /// disk — synchronously, with nothing awaited between that judgement and the write.
+    ///
+    /// A renewal asks this too, and needs no flag to mint past the grant on file: the grant kept
+    /// is stamped with the epoch it was minted under, and the renewal moved the epoch, so the
+    /// grant that died with the old token never passes the check below. One a foreground minted
+    /// under the SUCCESSOR while the renewal read its token back does, and is kept: minting again
+    /// would rotate — revoke — the grant the extension may be uploading under (MEMNG-1186).
     public func mintCaptureGrant() async {
-        await mintCaptureGrant(keepingAFreshGrant: true)
-    }
-
-    /// `keepingAFreshGrant: false` is the renewal's: the grant on file died with the token it
-    /// replaced, however much time the file says it has left.
-    private func mintCaptureGrant(keepingAFreshGrant: Bool) async {
+        if captureGrantClearOwed, let captureGrants { clearCaptureGrantFile(captureGrants) }
         guard let captureGrants, let client, let configuration, let user = state.user,
             let licence = account?.currentLicence(), let issue = licence.incarnation,
             licence.binding
@@ -1330,7 +1336,7 @@ public final class SessionStore {
             MemosLog.session.info("no capture grant while this session is signing out")
             return
         }
-        if keepingAFreshGrant, let kept = captureGrantKept, kept.epoch == epoch.current,
+        if let kept = captureGrantKept, kept.epoch == epoch.current,
             let standing = captureGrants.current(), standing.id == kept.id,
             standing.incarnation == issue, standing.binding == licence.binding,
             standing.expiresAt.timeIntervalSince(now()) > PublishedCaptureGrant.remintBelow
@@ -1377,6 +1383,8 @@ public final class SessionStore {
                     id: minted.id, token: minted.token, expiresAt: minted.expiresAt,
                     binding: licence.binding, incarnation: issue))
             captureGrantKept = (issued, minted.id)
+            // Written over whatever the file held, a removal still owed among it.
+            captureGrantClearOwed = false
         } catch {
             if let refusal = StoreFailure.refusal(error) {
                 // A session that ended while the mint was out is not the one to judge it against:
@@ -1390,6 +1398,20 @@ public final class SessionStore {
             }
             let detail = String(describing: error)
             MemosLog.session.info("no capture grant this time: \(detail, privacy: .public)")
+        }
+    }
+
+    /// Removes the grant's file, and REMEMBERS a failure to: `try?` here would leave a grant the
+    /// server has revoked on file for the extension, with nothing to try again (MEMNG-1186).
+    private func clearCaptureGrantFile(_ grants: CaptureGrantStore) {
+        do {
+            try grants.clear()
+            captureGrantClearOwed = false
+        } catch {
+            captureGrantClearOwed = true
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the dead capture grant could not be removed: \(detail, privacy: .public)")
         }
     }
 
@@ -2693,8 +2715,10 @@ public final class SessionStore {
         epoch.bump()
         // The renewal revoked the capture grant with its token on the server, so the file names a
         // dead grant: it goes in the same step, and no revoke is sent. Its successor is minted
-        // below, once the session is known to still be this one.
-        try? captureGrants?.clear()
+        // below, once the session is known to still be this one. In memory it is already dead —
+        // the epoch just moved past the one it was kept under — and a removal that fails is
+        // remembered and tried again by the next mint.
+        if let captureGrants { clearCaptureGrantFile(captureGrants) }
         // The last-known identity is bound to a credential, and the credential has just MOVED. A
         // file still naming the predecessor would fail the next launch's fingerprint check and
         // take the offline launch away from a device that did everything right — and a file
@@ -2720,7 +2744,9 @@ public final class SessionStore {
         // the screen this renewal was started from draws the row and does not draw `lastError`,
         // so the warning would land nowhere the person pressing Renew can see it.
         if storageRefused, owns(generation) { deviceTokenNotice = Self.renewalStorageWarning }
-        if owns(generation) { await mintCaptureGrant(keepingAFreshGrant: false) }
+        // Judged by the same check as a foreground's: a grant minted under the successor while
+        // the read above was out is kept, not rotated.
+        if owns(generation) { await mintCaptureGrant() }
         return .renewed
     }
 

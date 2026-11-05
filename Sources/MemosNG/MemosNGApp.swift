@@ -450,7 +450,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         // so it needs no session and waits for none.
         await outbox?.adopt()
         // Sends nothing either: a capture a share session no longer needs is handed back here, so
-        // the drain below can finish it.
+        // the drain below can finish it — in front. A launch the system made in the background
+        // keeps its gate closed, and the capture's offset question waits for the foreground.
         await outbox?.reattachShareSessions()
         if session.state.user == nil {
             await session.restore()

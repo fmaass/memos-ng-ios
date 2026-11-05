@@ -724,10 +724,12 @@ struct WholeLaneEngineTests {
     /// The same capture, finalized by the background REFRESH pass alone (MEMNG-945): no
     /// foreground, no `handleEventsForBackgroundURLSession`, no session's finished-events callback.
     /// What runs is exactly what the app's `BGAppRefreshTask` handler runs through the real
-    /// `Outbox` facade — `wake(holding:)` around adopt, reattach and start — in a process the
-    /// system launched for the refresh, so nothing has opened or closed its scheduling gate.
+    /// `Outbox` facade — `wake(holding:)` around adopt, reattach and start — over an outbox whose
+    /// scheduling gate is OPEN (the initializer's default). The app's composed outbox starts with
+    /// it closed, and a closed gate leaves this capture to the next foreground by decision
+    /// (MEMNG-1185): `ShareSessionTests.liveBackgroundedRefreshAndAFinishedShareCapture` pins that.
     @MainActor
-    @Test("finalize needs no app wake: the background refresh pass alone retires and creates")
+    @Test("finalize needs no app wake: a refresh pass with the gate open retires and creates")
     func finalizeThroughTheRefreshPass() async throws {
         let rig = try await WholeRig.make(
             withUploads: false, attached: false,

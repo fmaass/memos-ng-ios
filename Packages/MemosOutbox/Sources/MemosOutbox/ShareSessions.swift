@@ -53,7 +53,9 @@ public final class ShareSessions: Sendable {
 
     /// Attaches to every registered identifier, reconciles its tasks against the capture's
     /// manifest and retires the identifiers nothing needs. Sends nothing: a cancel is local, and a
-    /// capture handed back here is resumed by the app's lane from the server's own offset.
+    /// capture handed back here is resumed by the app's lane from the server's own offset — once
+    /// the scheduling gate is open. That offset question is new work, so a backgrounded pass
+    /// leaves the capture to the next foreground (MEMNG-1185).
     @discardableResult
     public func wake(repository: OutboxRepository) async -> [String: ShareSessionVerdict] {
         var verdicts: [String: ShareSessionVerdict] = [:]

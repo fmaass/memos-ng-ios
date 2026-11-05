@@ -619,6 +619,93 @@ struct CaptureGrantSessionTests {
         #expect(rig.wire.calls(revokeGrantOperation).isEmpty)
     }
 
+    // MARK: - a renewal around a foreground, and a clear that fails (MEMNG-1186)
+
+    @Test("a grant a foreground minted under the successor while the renewal read its token stays")
+    func renewalKeepsTheSuccessorGrantAForegroundMinted() async throws {
+        let renewed = LockedValue(false)
+        let readingBack = LockedValue(false)
+        let tokenReadHeld = Gate()
+        let successorMints = Counter()
+        let rig = rig(clock: LockedValue(hourOne)) { operation, request in
+            switch operation {
+            case renewOperation:
+                renewed.set(true)
+                return nil
+            case tokenReadOperation where renewed.get():
+                // The renewal's own read-back, held: the window a foreground lands in. The token
+                // has been swapped and the epoch moved by now.
+                readingBack.set(true)
+                await tokenReadHeld.wait()
+                return nil
+            case mintOperation where request.headerFields[.authorization] == "Bearer pat-next":
+                successorMints.increment()
+                return mintedGrant(id: 11 + successorMints.count, token: "memos_cap_next")
+            default:
+                return nil
+            }
+        }
+        defer { rig.cleanUp() }
+        // Never leaves the renewal parked, whichever expectation stops the test.
+        defer { tokenReadHeld.open() }
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "pat-a")
+        await rig.session.enteredForeground()
+        #expect(rig.grants.current()?.id == 9, "control: a fresh grant under the old token")
+
+        let renewal = Task { await rig.session.renewDeviceToken() }
+        for _ in 0..<1000 where !readingBack.get() { await Task.yield() }
+        try #require(readingBack.get(), "control: the renewal is reading its token back")
+        // The foreground mints under the successor and finishes while the renewal is still out.
+        await rig.session.enteredForeground()
+        let minted = try #require(rig.grants.current())
+        #expect(minted.id == 12, "control: the foreground minted under the successor")
+        tokenReadHeld.open()
+        #expect(await renewal.value == .renewed)
+
+        // One mint under the successor: a second would rotate — revoke — the grant the extension
+        // may be uploading under right now.
+        #expect(
+            rig.wire.calls(mintOperation).map(\.bearer) == ["Bearer pat-a", "Bearer pat-next"])
+        #expect(rig.grants.current() == minted)
+    }
+
+    @Test("a renewal whose clear failed: the dead grant is not kept and the clear is retried")
+    func renewalClearThatFailedIsRetried() async throws {
+        let rig = rig(clock: LockedValue(hourOne)) { operation, request in
+            // No mint under the successor lands, so nothing overwrites the dead grant's file.
+            guard operation == mintOperation,
+                request.headerFields[.authorization] == "Bearer pat-next"
+            else { return nil }
+            return Stub.empty(.internalServerError)
+        }
+        defer { rig.cleanUp() }
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "pat-a")
+        await rig.session.enteredForeground()
+        let dead = try #require(rig.grants.current())
+        #expect(dead.id == 9, "control: a fresh grant under the old token")
+
+        // The grant's directory takes no change while the renewal runs: its clear fails.
+        let manager = FileManager.default
+        // Runs before the clean-up, so the directory can be removed whatever stops the test.
+        defer {
+            try? manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: rig.root.path)
+        }
+        try manager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: rig.root.path)
+        let outcome = await rig.session.renewDeviceToken()
+        try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: rig.root.path)
+        #expect(outcome == .renewed)
+        #expect(rig.grants.current() == dead, "control: the renewal's clear failed")
+
+        await rig.session.enteredForeground()
+        // Not kept through the freshness check, though the file says it has 23 hours left.
+        #expect(
+            rig.wire.calls(mintOperation).map(\.bearer)
+                == ["Bearer pat-a", "Bearer pat-next", "Bearer pat-next"])
+        // And the clear the renewal owed is made, though no successor grant landed to replace it:
+        // the extension is not left presenting a grant the server revoked.
+        #expect(rig.grants.current() == nil)
+    }
+
     @Test("a renewal answered after the session ended mints nothing")
     func renewalForAnEndedSessionMintsNothing() async throws {
         let held = Gate()
