@@ -13,7 +13,11 @@ read by index because the first entry is the default an unqualified add lands in
 is deliberately absent from `keychain-access-groups` — a raw `group.…` entry can never match the
 profile's `TEAMID.*` pattern and breaks device signing, and the app's keychain access to it rides
 on the application-groups entitlement instead; the share extension declares no keychain group;
-both declare the app group as a positive control) → `swift format lint --strict --recursive .` → the dependency-pin
+both declare the app group as a positive control; and `scripts/applinks-rule.sh`, which reads both
+files as text and requires the app to claim `applinks:trip.discomarder.live` — the plain entry, not
+only its `?mode=developer` twin — and the share extension to claim no applinks host at all, with the
+app group in both files and the associated-domains key in the app's as its positive control,
+MEMNG-1084) → `swift format lint --strict --recursive .` → the dependency-pin
 check (below) → `xcodebuild build-for-testing` on the generic simulator destination, outside the
 host slot (`bin/mac-gate.sh:1752`) → `xcodebuild test-without-building` of all five test bundles on
 this run's private device, inside the host slot (`:1765`, `:1776`; the slot is below) → a read-back
