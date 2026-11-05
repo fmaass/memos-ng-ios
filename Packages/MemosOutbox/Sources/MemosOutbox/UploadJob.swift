@@ -305,6 +305,63 @@ public struct PendingEdit: Codable, Sendable, Equatable {
     }
 }
 
+/// What makes a job an EDIT of a memo that already exists rather than a capture that becomes one
+/// (MEMNG-954). The rest of the edit lives where a capture's owed edit already lives — the memo in
+/// `resolvedMemoUID`, the words, audience and date in `pendingEdit`, the key in `editKey` (minted
+/// once, when the job is written), the new files in `files` marked `stagedForEdit` — so the engine
+/// sends it through the branch that replays an owed edit. This carries only what an edit of an
+/// existing memo says differently.
+public struct MemoEdit: Codable, Sendable, Equatable {
+    /// False leaves `created_at` out of the PATCH: an edit that did not touch the date has no
+    /// business rewriting it.
+    public var statesDate: Bool
+    /// The memo's WHOLE picture list in the sheet's order, or nil to leave its pictures untouched
+    /// (`attachment_uids` omitted).
+    public var pictures: [Picture]?
+
+    public enum Picture: Codable, Sendable, Equatable {
+        /// A picture the memo already holds, by its attachment uid.
+        case kept(String)
+        /// One of this job's own files, by its id.
+        case added(UUID)
+    }
+
+    public init(statesDate: Bool, pictures: [Picture]?) {
+        self.statesDate = statesDate
+        self.pictures = pictures
+    }
+}
+
+/// What a caller asks of an existing memo when it adds files to it — the input `Outbox.enqueueEdit`
+/// turns into an edit job. An added picture is named by its place in the sources handed over beside
+/// this, since it has no identity until it is copied in.
+public struct MemoEditOrder: Sendable, Equatable {
+    public var memoUID: String
+    public var content: String
+    /// The audience's wire value, or nil to leave it.
+    public var visibility: String?
+    /// The display date, or nil to leave it.
+    public var createdAt: Date?
+    /// The memo's whole picture list, or nil to leave its pictures untouched.
+    public var pictures: [Picture]?
+
+    public enum Picture: Sendable, Equatable {
+        case kept(String)
+        case adding(Int)
+    }
+
+    public init(
+        memoUID: String, content: String, visibility: String?, createdAt: Date?,
+        pictures: [Picture]?
+    ) {
+        self.memoUID = memoUID
+        self.content = content
+        self.visibility = visibility
+        self.createdAt = createdAt
+        self.pictures = pictures
+    }
+}
+
 public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     public var id: UUID
     /// Generated once, at capture, and sent on every create attempt for this job. It is what makes
@@ -371,6 +428,10 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// is "nothing is left in Photos".
     public var staging: [StagingFile]?
 
+    /// Set on an edit of a memo that already exists (MEMNG-954), and only there: such a job never
+    /// sends a create. Absent on every manifest written before it, which is "a capture".
+    public var memoEdit: MemoEdit?
+
     /// The items `staging` still holds; empty when it is absent.
     public var stagingFiles: [StagingFile] { staging ?? [] }
 
@@ -416,7 +477,10 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
     /// one decision that hangs on it — whether "Remove" may be offered — reads it from here.
     /// Conservative on purpose: a failed attempt with every file up counts, whatever failed.
     public var createMayHaveBeenSent: Bool {
-        state == .creating || resolvedMemoUID != nil
+        // An edit of an existing memo has no create: whether ITS change may have landed is
+        // `editUnansweredSince`, which every caller of this asks beside it.
+        guard memoEdit == nil else { return false }
+        return state == .creating || resolvedMemoUID != nil
             || (attemptCount > 0 && files.allSatisfy(\.isComplete))
     }
 
@@ -431,6 +495,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         case stagingLaunch
         case notArrived
         case staging
+        case memoEdit
         case videoOverMobileAllowed
     }
 
@@ -458,6 +523,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         stagingLaunch: UUID? = nil,
         notArrived: Int? = nil,
         staging: [StagingFile]? = nil,
+        memoEdit: MemoEdit? = nil,
         videoOverMobileAllowed: Bool? = nil
     ) {
         self.id = id
@@ -483,6 +549,7 @@ public struct UploadJob: Codable, Sendable, Equatable, Identifiable {
         self.stagingLaunch = stagingLaunch
         self.notArrived = notArrived
         self.staging = staging
+        self.memoEdit = memoEdit
         self.videoOverMobileAllowed = videoOverMobileAllowed
     }
 

@@ -21,17 +21,10 @@ extension Stub {
         response.headerFields[.contentType] = "text/html"
         return (response, HTTPBody("<html><body>Service Unavailable</body></html>"))
     }
-
-    /// The same answer to a HEAD, which has no body to carry the detail in.
-    static func databaseBusyHead() -> (HTTPResponse, HTTPBody?) {
-        var answer = empty(.serviceUnavailable)
-        answer.0.headerFields[HTTPField.Name("Retry-After")!] = "1"
-        return answer
-    }
 }
 
 /// The v2.1.0 contract documents a 503 that every route below used to meet as an undocumented
-/// status, and a 429 on the chunk append. Each case holds one switch to the error the SAME status
+/// status. Each case holds one switch to the error the SAME status
 /// produced when it arrived as `.undocumented`: the re-vendor named the status, it did not change
 /// what the app does with it.
 @MainActor
@@ -41,47 +34,6 @@ struct ServiceUnavailableParityTests {
 
     private static func busy() -> any APIProtocol {
         Stub.client { _, _, _ in Stub.databaseBusy() }
-    }
-
-    private static let staged = StagedSource(
-        url: URL(filePath: "/tmp/never-read.jpg"),
-        filename: "never-read.jpg",
-        mime: "image/jpeg"
-    )
-
-    // MARK: - media upload
-
-    @Test("a 503 to the upload start is the refusal its undocumented 503 was")
-    func uploadStart() async {
-        await #expect(throws: MediaUploadError.refused(Self.unavailable)) {
-            try await MediaUpload.start(Self.staged, size: 1, using: Self.busy())
-        }
-    }
-
-    @Test("a 503 to the offset HEAD is the refusal its undocumented 503 was")
-    func uploadOffset() async {
-        let client = Stub.client { _, _, _ in Stub.databaseBusyHead() }
-        await #expect(throws: MediaUploadError.refused(Self.unavailable)) {
-            try await MediaUpload.offset(of: "u1", using: client)
-        }
-    }
-
-    @Test("a 503 to a chunk is the refusal its undocumented 503 was")
-    func chunkUnavailable() async {
-        await #expect(throws: MediaUploadError.refused(Self.unavailable)) {
-            try await MediaUpload.append(Data([1]), to: "u1", at: 0, using: Self.busy())
-        }
-    }
-
-    /// The one route with two new statuses: each keeps its own number.
-    @Test("a 429 to a chunk is the refusal its undocumented 429 was, not a 503")
-    func chunkTooMany() async {
-        let client = Stub.client { _, _, _ in
-            Stub.json(#"{"detail":"too_many_uploads"}"#, status: .tooManyRequests)
-        }
-        await #expect(throws: MediaUploadError.refused(.server(status: 429))) {
-            try await MediaUpload.append(Data([1]), to: "u1", at: 0, using: client)
-        }
     }
 
     // MARK: - library, places, memo list
@@ -262,14 +214,6 @@ struct ServiceUnavailableParityTests {
         }
     }
 
-    @Test("a proxy's HTML 429 to a chunk is the refusal its undocumented 429 was")
-    func proxyPageTooMany() async {
-        let client = Stub.client { _, _, _ in Stub.proxyPage(.tooManyRequests) }
-        await #expect(throws: MediaUploadError.refused(.server(status: 429))) {
-            try await MediaUpload.append(Data([1]), to: "u1", at: 0, using: client)
-        }
-    }
-
     // MARK: - decided by the status, not the body
 
     /// The first of `work` and a deadline, so a call that never returns fails the case instead of
@@ -305,14 +249,14 @@ struct ServiceUnavailableParityTests {
 
         let answer = await Self.firstOf(deadline: .seconds(10)) {
             do {
-                _ = try await MediaUpload.append(Data([1]), to: "u1", at: 0, using: client)
+                _ = try await SessionStore.settings(client)
                 return "accepted"
             } catch {
                 return "\(error)"
             }
         }
 
-        #expect(answer == "\(MediaUploadError.refused(Self.unavailable))")
+        #expect(answer == "\(Self.unavailable)")
     }
 
     @Test("the management client built by the factory answers an HTML 503 from its status")

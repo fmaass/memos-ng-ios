@@ -7,6 +7,10 @@ import MemosCore
 /// you wrote. The sentence a raw error would have produced is deliberately not shown — an
 /// `NSURLErrorDomain -1009` on a sheet is not information, it is an apology in a foreign language.
 nonisolated public enum ComposeFailurePresentation {
+    /// An edit refused while the memo's last change that adds files is still in the queue.
+    public static let editPendingMessage =
+        "This memo is still sending your last change. Edit it once it's in."
+
     public static func sentence(for failure: ComposeFailure) -> String {
         switch failure {
         case .transport(let sent):
@@ -56,6 +60,8 @@ nonisolated public enum ComposeFailurePresentation {
         case .defaultVisibilityUnknown:
             return "Your account's default visibility isn't known yet — choose one,"
                 + " or try again once you're online."
+        case .editPending:
+            return Self.editPendingMessage
         }
     }
 
@@ -72,7 +78,7 @@ nonisolated public enum ComposeFailurePresentation {
         // A refusal is not the FILES' business either: nothing was sent, and `pictureMissing`
         // names ONE file, so marking every tile would point at the wrong pictures.
         case .authorization, .rejection, .serverFailure, .captureUnchanged,
-            .defaultVisibilityUnknown:
+            .defaultVisibilityUnknown, .editPending:
             return nil
         }
     }

@@ -1,5 +1,6 @@
 import Foundation
 import MemosCore
+import MemosOutbox
 
 /// The Info sheet's Visibility chip (MEMNG-970): what it draws, and where a change from it goes.
 extension MediaInfoRows {
@@ -37,12 +38,13 @@ extension MediaInfoSheet {
         _ change: VisibilityChange,
         uid: String,
         through timeline: TimelineStore,
+        owing queue: (any MemoEditQueue)? = nil,
         holding store: MediaContextStore,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
         let answer = await timeline.setVisibilityAnswering(
-            change, uid: uid, using: handle, baseURL: baseURL)
+            change, uid: uid, through: queue, using: handle, baseURL: baseURL)
         if let memo = answer.memo { store.adoptAnswer(memo, issuedUnder: handle) }
         return answer.outcome
     }

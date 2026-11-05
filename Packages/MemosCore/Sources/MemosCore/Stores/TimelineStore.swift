@@ -1066,12 +1066,12 @@ public final class TimelineStore {
     /// on every edit would be a field the server has to ignore rather than a statement about this
     /// one.
     ///
-    /// The files go up FIRST, in the foreground, and the memo is patched only once every one of
-    /// them has landed. That order is the rollback: an upload that fails means no patch is sent at
-    /// all, so a media edit either happens whole or does not happen — the memo keeps its text, its
-    /// date and its attachments, and the sheet stays open with the words still in it. Uploads that
-    /// did land before the failure are pending sessions the server expires; nothing links them, so
-    /// nothing appears half-attached.
+    /// An edit that attaches files is not sent from here at all (MEMNG-954): it is written to
+    /// `queue` as an edit job and answered `.saved` once it is persisted, so the sheet closes at
+    /// once. The outbox mints the job's edit key, uploads the files on the lane new captures use
+    /// and patches the memo with them as the job's terminal action — a retry presents the same key,
+    /// so the server applies it once. No queue, or a write the device refused, is `.storage`, with
+    /// nothing sent. An edit without files is the direct PATCH.
     ///
     /// `listing` is the third of these absences and the sharpest one. `attachment_uids` REPLACES a
     /// memo's picture list with what it names, so the key is left out entirely when the caller has
@@ -1087,6 +1087,8 @@ public final class TimelineStore {
         attaching files: [StagedSource] = [],
         listing pictures: [MemoPictureEntry]? = nil,
         visibility change: VisibilityChange? = nil,
+        through queue: (any MemoEditQueue)? = nil,
+        composedUnder account: AccountBinding? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
@@ -1100,7 +1102,8 @@ public final class TimelineStore {
         return await claimMutation(.edit(attempt), on: uid) { [self] claim in
             MemoMutationAnswer(
                 await performEdit(
-                    attempt, attaching: files, claim: claim, using: handle, baseURL: baseURL
+                    attempt, attaching: files, through: queue, composedUnder: account,
+                    claim: claim, using: handle, baseURL: baseURL
                 ))
         }.value.outcome
     }
@@ -1109,6 +1112,8 @@ public final class TimelineStore {
     private func performEdit(
         _ attempt: MemoEditAttempt,
         attaching files: [StagedSource],
+        through queue: (any MemoEditQueue)?,
+        composedUnder account: AccountBinding?,
         claim: Int,
         using handle: SessionHandle,
         baseURL: URL
@@ -1137,54 +1142,58 @@ public final class TimelineStore {
             return .ask(question)
         }
 
-        // The client and the incarnation it belongs to arrive as ONE value and are carried
-        // through every request and every apply point below. Nothing here re-samples the session:
-        // re-sampling is what let a request rejected as one session's reissue itself under the
-        // next one's number, with the first one's client still in hand.
-        let client = handle.client
-        // No authority is taken here: this method issues no request that changes the LIST. The
-        // uploads write nothing down, and the patch below is issued inside `patch`, which takes
-        // its own at the moment it sends.
-        let key = editKey(for: attempt)
-        var uploadUIDs: [String]?
+        // One change owed to a memo at a time (MEMNG-954). An edit job freezes the memo's words and
+        // its whole picture list when it is written and patches them later, so an edit saved
+        // beside it — words only, or more files — would be undone by its PATCH or undo it. Asked
+        // here, inside this memo's line: the next edit of it waits for this one's enqueue to land
+        // before it asks, and the outbox refuses a second job in the same call that would write it.
+        if let queue, await queue.hasUnfinishedEdit(memoUID: attempt.uid) {
+            mutationChangedNothing(claim, on: attempt.uid)
+            return .failed(.editPending)
+        }
+
+        // Files make the edit a JOB (MEMNG-954): it is written to the outbox, which mints its edit
+        // key, uploads the files on the lane new captures use and sends the PATCH that names them
+        // as its terminal action — after this sheet has closed, and after a relaunch. Nothing is
+        // sent from here, so nothing on the server changed: the reads this claim held off know the
+        // row as well as it does.
         if !files.isEmpty {
-            do {
-                uploadUIDs = try await MediaUpload.uploadAll(
-                    files, using: client, under: sendAuthority()
-                )
-            } catch {
-                // This invocation is over, and it failed: the key stays behind for the retry.
-                finishEdit(key: key, saved: false)
-                // No patch was sent, so the memo on the server is the one every read already on
-                // its way is carrying.
-                mutationChangedNothing(claim, on: attempt.uid)
-                await report(error, issuedUnder: handle)
-                // Nothing was patched, so nothing on the server changed — `sent: false` is what
-                // licenses the sheet to say so.
-                return .failed(ComposeFailure.classify(error, sent: false))
+            defer { mutationChangedNothing(claim, on: attempt.uid) }
+            guard let queue else { return .failed(.storage) }
+            let order = MemoEditOrder(
+                memoUID: attempt.uid,
+                content: attempt.content,
+                visibility: attempt.visibility?.to.rawValue,
+                createdAt: attempt.createdAt,
+                pictures: attempt.pictures?.map { entry in
+                    switch entry {
+                    case .kept(let uid): .kept(uid)
+                    case .uploading(let index): .adding(index)
+                    }
+                }
+            )
+            // Bound to the account the sheet was saved under: a job written after a switch would
+            // send these words into the next account's memo (`Outbox.enqueueEdit` refuses it).
+            switch await queue.enqueueEdit(order, sources: files, composedUnder: account) {
+            case .queued: return .saved
+            case .editPending: return .failed(.editPending)
+            case .notWritten: return .failed(.storage)
             }
         }
-        // The upload above is the longest await this store makes, and the patch below is a SEND.
-        // A session that ended inside the upload must not have a memo edited under its name.
-        guard sessionStillCurrent(handle) else {
-            finishEdit(key: key, saved: false)
-            mutationChangedNothing(claim, on: attempt.uid)
-            return .failed(.authorization)
-        }
-        // The sheet's list, with each picked picture standing in for the upload uid the server has
-        // just issued for it — the only name the patch can use, since a picture picked a moment ago
-        // has no attachment uid yet. `attachment_uids` is the COMPLETE list and the server unlinks
-        // what it omits, so an entry that cannot be resolved takes the whole key out of the request:
-        // a partial list would delete a picture nobody removed.
+
+        // No authority is taken here: the patch below is issued inside `patch`, which takes its
+        // own at the moment it sends.
+        let key = editKey(for: attempt)
+        // The sheet's list. `attachment_uids` is the COMPLETE list and the server unlinks what it
+        // omits, so an entry that cannot be resolved takes the whole key out of the request: a
+        // partial list would delete a picture nobody removed. A direct edit carries no files, so
+        // an entry naming one has nothing to resolve to.
         let listed: [String]? = attempt.pictures.flatMap { entries in
             var resolved: [String] = []
             for entry in entries {
                 switch entry {
-                case .kept(let uid):
-                    resolved.append(uid)
-                case .uploading(let index):
-                    guard let uploadUIDs, uploadUIDs.indices.contains(index) else { return nil }
-                    resolved.append(uploadUIDs[index])
+                case .kept(let uid): resolved.append(uid)
+                case .uploading: return nil
                 }
             }
             return resolved
@@ -1193,7 +1202,7 @@ public final class TimelineStore {
             uid: attempt.uid,
             .init(
                 attachmentUids: listed, content: attempt.content, createdAt: attempt.createdAt,
-                editKey: key, uploadUids: uploadUIDs, visibility: attempt.visibility?.generated
+                editKey: key, uploadUids: nil, visibility: attempt.visibility?.generated
             ),
             claim: claim,
             using: handle,
@@ -1615,10 +1624,13 @@ public final class TimelineStore {
     public func setVisibility(
         _ change: VisibilityChange,
         uid: String,
+        through queue: (any MemoEditQueue)? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
-        await setVisibilityAnswering(change, uid: uid, using: handle, baseURL: baseURL).outcome
+        await setVisibilityAnswering(
+            change, uid: uid, through: queue, using: handle, baseURL: baseURL
+        ).outcome
     }
 
     /// `setVisibility`, handing back the memo the server answered with as well (MEMNG-970): the
@@ -1629,11 +1641,19 @@ public final class TimelineStore {
     public func setVisibilityAnswering(
         _ change: VisibilityChange,
         uid: String,
+        through queue: (any MemoEditQueue)? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> MemoMutationAnswer {
         let identity = MemoMutationIdentity.visibility(change.to, confirmed: change.confirmed)
         return await claimMutation(identity, on: uid) { [self] claim in
+            // The edit job's PATCH carries the audience its sheet stated (MEMNG-954), so a change
+            // sent beside it would be put back by it: refused inside this memo's line, as
+            // `performEdit` refuses an edit, and asked before the request's own session check.
+            if let queue, await queue.hasUnfinishedEdit(memoUID: uid) {
+                mutationChangedNothing(claim, on: uid)
+                return MemoMutationAnswer(.failed(.editPending))
+            }
             if let question = visibilityReask(change, on: uid) {
                 mutationChangedNothing(claim, on: uid)
                 return MemoMutationAnswer(.ask(question))
@@ -2627,6 +2647,7 @@ public final class TimelineStore {
     public func toggleTask(
         at index: Int,
         in uid: String,
+        through queue: (any MemoEditQueue)? = nil,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> Bool {
@@ -2671,8 +2692,8 @@ public final class TimelineStore {
         return await claimMutation(.task(index: index), on: uid) { [self] gate in
             MemoMutationAnswer(
                 await performToggle(
-                    toggled, restoring: original, in: uid, claim: claim, gate: gate,
-                    using: handle, baseURL: baseURL
+                    toggled, restoring: original, in: uid, through: queue, claim: claim,
+                    gate: gate, using: handle, baseURL: baseURL
                 ))
         }.value.isSaved
     }
@@ -2682,11 +2703,32 @@ public final class TimelineStore {
         _ toggled: String,
         restoring original: Memo,
         in uid: String,
+        through queue: (any MemoEditQueue)?,
         claim: Int,
         gate: Int,
         using handle: SessionHandle,
         baseURL: URL
     ) async -> ComposeOutcome {
+        // A tick is a whole content PATCH, and an edit job owed to this memo froze its words
+        // (MEMNG-954): its later PATCH would undo the tick. Refused inside this memo's line, as
+        // `performEdit` refuses an edit, before the session question below so nothing is awaited
+        // between that question and the request. Nothing was sent; the tick goes back.
+        if let queue, await queue.hasUnfinishedEdit(memoUID: uid) {
+            mutationChangedNothing(gate, on: uid)
+            guard sessionStillCurrent(handle) else {
+                release(uid, claim: claim)
+                finishMutation(gate, on: uid)
+                return .failed(.authorization)
+            }
+            let authority = issuedAuthority()
+            if let current = memos.firstIndex(where: { $0.uid == uid }) {
+                var restored = memos
+                restored[current] = admitted(original)
+                await commit(restored, under: authority)
+            }
+            await settle(uid, claim: claim, gate: gate, under: authority)
+            return .failed(.editPending)
+        }
         // Before the first request and AFTER whatever this memo's line made it wait for, for the
         // reason `performEdit` asks before its uploads. Nothing has been sent, so nothing is
         // written to the row either: a write for a session that has ended belongs to nobody, and

@@ -208,7 +208,8 @@ struct PatchCompletionTests {
         clock: MutableClock? = nil,
         completion: (@Sendable (any MemoCompleting) -> any MemoCompleting)? = nil,
         uploads: (any OutboxUploadScheduling)? = nil,
-        sessionUID: (@Sendable (URLRequest) -> String)? = nil
+        sessionUID: (@Sendable (URLRequest) -> String)? = nil,
+        performer wrap: ((ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil
     ) throws -> Patching {
         let root = try existing ?? Fixture.temporaryDirectory()
         let provider = StaticCredentials(credentials: Fixture.credentials())
@@ -237,7 +238,10 @@ struct PatchCompletionTests {
             }
         }
         let preferences = Fixture.preferences()
-        let endpoint = MemoCompletionEndpoint(http: http)
+        // What the outbox sends through: the scripted server itself, or a wrapper a case hands
+        // over around it — the requests are recorded by the scripted server either way.
+        let performer = wrap?(http) ?? http
+        let endpoint = MemoCompletionEndpoint(http: performer)
         // Only when a case hands one over: the facade's own stamps come from the real clock, so a
         // default of anything but `Date.init` would put the queue behind itself.
         let tick: @Sendable () -> Date
@@ -249,7 +253,7 @@ struct PatchCompletionTests {
         let outbox = Outbox(
             repository: repository,
             credentials: provider,
-            http: http,
+            http: performer,
             scheduler: ScriptedScheduler(),
             completion: completion?(endpoint) ?? endpoint,
             network: StubNetworkPath(),
@@ -1523,4 +1527,290 @@ private final class IssuedUploads: @unchecked Sendable {
     func filename(of attachment: String) -> String? {
         lock.withLock { files[String(attachment.dropFirst("att-".count))] }
     }
+}
+
+// MARK: - An edit job: files added to an existing memo (MEMNG-954)
+
+extension KeyedMemoServer {
+    /// A memo the server already holds, as an existing memo an edit job is owed to.
+    func seed(uid: String, attachmentUIDs: [String], content: String = "the dock") {
+        lock.withLock {
+            memos[uid] = Memo(
+                uid: uid, attachmentUIDs: attachmentUIDs, content: content, createdAt: nil,
+                visibility: "PRIVATE")
+            order.append(uid)
+        }
+    }
+}
+
+/// The edit job end to end against the keyed server: its file goes up on the whole lane, and the
+/// PATCH that names it is the terminal action, under the ONE key minted when the job was written.
+extension PatchCompletionTests {
+    private static let editedMemo = "m9"
+
+    private func editOrder() -> MemoEditOrder {
+        MemoEditOrder(
+            memoUID: Self.editedMemo, content: "the dock, later", visibility: nil, createdAt: nil,
+            pictures: [.kept("att-old"), .adding(0)])
+    }
+
+    /// Queues the edit through the facade, lets its one file arrive on the whole lane, and waits
+    /// for the first PATCH. Returns the harness, the job and the key it was written with.
+    private func editJobSent(
+        server: KeyedMemoServer, clock: MutableClock
+    ) async throws -> (Patching, UploadJob, String) {
+        let session = ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1))
+        let delegate = UploadSessionDelegate()
+        server.seed(uid: Self.editedMemo, attachmentUIDs: ["att-old"])
+        let harness = try harness(
+            server: server, clock: clock,
+            uploads: BackgroundUploadScheduler(session: session, delegate: delegate))
+        let url = try Fixture.file(in: harness.root, named: "dock.heic", bytes: 1000)
+        let source = StagedSource(url: url, filename: "dock.heic", mime: "image/heic")
+        #expect(await harness.outbox.enqueueEdit(editOrder(), sources: [source]) == .queued)
+        let job = try #require(try await harness.repository.loadJobs().first)
+        let minted = try #require(job.editKey, "the edit job was written without a key")
+        #expect(job.memoEdit != nil)
+        #expect(harness.memoPatches.isEmpty, "the PATCH went out before its file was up")
+        if session.createdTasks.isEmpty { await harness.outbox.drain() }
+        #expect(harness.memoPosts.isEmpty, "an edit job asked for a new memo")
+        let created = try #require(session.createdTasks.last, "the file never went up")
+        delegate.deliver(try wholeArrival(of: created))
+        var waited = 0
+        while harness.memoPatches.isEmpty, waited < 300 {
+            try await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        return (harness, job, minted)
+    }
+
+    @Test("an edit job patches the memo with its upload and its key, and a retry is one change")
+    func anEditJobsRetryPresentsTheSameKey() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        // The first PATCH is APPLIED and its answer lost: the ambiguous case a key exists for.
+        let server = KeyedMemoServer(losingPatchResponses: 1)
+        let (harness, job, minted) = try await editJobSent(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        #expect(harness.memoPatches.count == 1)
+        let backingOff = try #require(await harness.repository.job(job.id))
+        #expect(backingOff.editKey == minted, "a lost answer re-keyed the edit")
+
+        clock.advance(backingOff.nextAttemptAt.timeIntervalSince(clock.now) + 1)
+        await settle(harness, job.id)
+
+        let transmissions = harness.memoPatches
+        #expect(transmissions.count == 2, "the edit was not retried after its answer was lost")
+        for transmission in transmissions {
+            #expect(transmission.url?.path() == "/api/memos/\(Self.editedMemo)")
+            let body = try sent(transmission)
+            #expect(body["edit_key"] as? String == minted)
+            #expect(body["upload_uids"] as? [String] == ["uC"])
+            #expect(body["attachment_uids"] as? [String] == ["att-old", "uC"])
+            #expect(body["content"] as? String == "the dock, later")
+            // Neither stated by this edit, so neither is sent: a PATCH is a partial update.
+            #expect(body["created_at"] == nil)
+            #expect(body["visibility"] == nil)
+        }
+        #expect(server.editApplications == 1, "the retried PATCH was applied a second time")
+        #expect(server.memoCount == 1)
+        #expect(server.memo(Self.editedMemo)?.content == "the dock, later")
+        #expect(server.memo(Self.editedMemo)?.attachmentUIDs == ["att-old", "att-uC"])
+        #expect(await harness.repository.job(job.id) == nil)
+    }
+
+    @Test("a 409 on an edit job's PATCH holds it visibly under the key it was minted with")
+    func anEditKeyConflictHoldsTheJob() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = KeyedMemoServer(refusingPatchesWith: [409])
+        let (harness, job, minted) = try await editJobSent(server: server, clock: clock)
+        defer { harness.cleanUp() }
+        #expect(harness.memoPatches.count == 1)
+
+        let held = try #require(await harness.repository.job(job.id), "the refused edit vanished")
+        #expect(held.holdReason == .serverRefused)
+        #expect(held.editKey == minted, "a conflict re-keyed the edit")
+
+        // Held, not backing off: no later pass sends it again, under this key or a new one.
+        clock.advance(3600)
+        await harness.outbox.drain()
+        await harness.outbox.drain()
+        #expect(harness.memoPatches.count == 1, "a held edit was sent again by itself")
+        #expect(server.editApplications == 0)
+        #expect(await harness.repository.job(job.id)?.editKey == minted)
+    }
+
+    @Test("an edit job survives a reopen of its repository with its key, memo and files")
+    func anEditJobSurvivesAKill() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try OutboxRepository(root: root.appending(path: "outbox"))
+        let url = try Fixture.file(in: root, named: "dock.heic", bytes: 1000)
+        let written = try await first.enqueue(
+            content: "ignored", visibility: "PUBLIC", capturedAt: Date(timeIntervalSince1970: 0),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: url, filename: "dock.heic", mime: "image/heic")],
+            editing: editOrder())
+
+        // A second repository on the same directory: what a relaunch after a kill reads.
+        let reopened = try OutboxRepository(root: root.appending(path: "outbox"))
+        let read = try #require(try await reopened.loadJobs().first)
+        #expect(read == written)
+        #expect(read.resolvedMemoUID == Self.editedMemo)
+        #expect(read.content == "the dock, later")
+        #expect(read.visibility == nil)
+        #expect(read.editKey?.isEmpty == false)
+        #expect(read.editKey == written.editKey)
+        let expected = MemoEdit(
+            statesDate: false, pictures: [.kept("att-old"), .added(written.files[0].id)])
+        #expect(read.memoEdit == expected)
+        #expect(read.files.count == 1)
+        #expect(read.files.allSatisfy { $0.stagedForEdit == true })
+        #expect(read.transport == .whole)
+    }
+}
+
+// MARK: - An edit job never becomes a create (review round 1, MEMNG-954)
+
+/// Around the scripted server: the FIRST reachability probe waits for `onProbe` before it is
+/// answered. The engine probes after it has read the rows it will drive and before it drives
+/// them, so a write made here is one the pass's own copies do not know — the instant a file's
+/// answer lands while a pass is already under way.
+final class ProbeHookHTTP: OutboxHTTPPerforming, @unchecked Sendable {
+    private let inner: ScriptedHTTP
+    private let onProbe: @Sendable () async -> Void
+    private let lock = NSLock()
+    private var fired = false
+
+    init(_ inner: ScriptedHTTP, onProbe: @escaping @Sendable () async -> Void) {
+        self.inner = inner
+        self.onProbe = onProbe
+    }
+
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        if request.url?.path() == "/health" {
+            let first = lock.withLock {
+                defer { fired = true }
+                return !fired
+            }
+            if first { await onProbe() }
+        }
+        return try await inner.perform(request, under: authority)
+    }
+}
+
+extension PatchCompletionTests {
+    /// The whole planner asked about an edit job whose every file is up answers the PATCH, open or
+    /// closed — never a create, which would post the edit's files as a second memo.
+    @Test("the whole planner answers a finished edit job with its PATCH, never a memo create")
+    func plannerNeverCreatesForAnEditJob() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let url = try Fixture.file(in: root, named: "dock.heic", bytes: 1000)
+        var job = try await repository.enqueue(
+            content: "ignored", visibility: nil, capturedAt: Date(timeIntervalSince1970: 0),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: url, filename: "dock.heic", mime: "image/heic")],
+            editing: editOrderForReview())
+        job.files[0].uploadUID = "uC"
+        job.files[0].bytesConfirmed = job.files[0].byteSize
+        for open in [true, false] {
+            let action = OutboxPlanner.nextWholeAction(
+                for: job, credentials: Fixture.credentials(), now: Date(), schedulingOpen: open)
+            #expect(action == .patchMemo, "open=\(open) answered \(action)")
+        }
+        // And the request builder refuses it outright, so no path can post it.
+        #expect(throws: OutboxRequests.Failure.editIsNotACreate) {
+            try OutboxRequests.createMemo(
+                baseURL: Fixture.credentials().serverBaseURL, token: "t", job: job)
+        }
+    }
+
+    /// The race the review found: the pass reads the edit job while its file is still going up,
+    /// the file's answer lands before the pass drives it, and the whole lane re-reads the row with
+    /// every file up. That row is handed back to the edit branch and PATCHed under its key — never
+    /// created as a second memo.
+    @Test("an edit job whose last file lands mid-pass is PATCHed from its re-read row, not created")
+    func anEditJobFinishedMidPassIsPatchedNotCreated() async throws {
+        let clock = MutableClock(Date().addingTimeInterval(60))
+        let server = KeyedMemoServer()
+        server.seed(uid: "m9", attachmentUIDs: ["att-old"])
+        let session = ScriptedUploadTaskSession(onCancel: .leavesListing(after: 1))
+        let box = EditJobRepositoryBox()
+        let harness = try harness(
+            server: server, clock: clock,
+            uploads: BackgroundUploadScheduler(session: session, delegate: UploadSessionDelegate()),
+            performer: { inner in
+                ProbeHookHTTP(inner) {
+                    // The file's answer, landing after the pass read the row.
+                    guard let repository = box.repository,
+                        var row = try? await repository.loadJobs().first
+                    else { return }
+                    row.files[0].uploadUID = "uC"
+                    row.files[0].bytesConfirmed = row.files[0].byteSize
+                    try? await repository.save(row)
+                }
+            })
+        defer { harness.cleanUp() }
+        box.repository = harness.repository
+        let url = try Fixture.file(in: harness.root, named: "dock.heic", bytes: 1000)
+        let written = try await harness.repository.enqueue(
+            content: "ignored", visibility: nil, capturedAt: clock.now,
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: url, filename: "dock.heic", mime: "image/heic")],
+            editing: editOrderForReview())
+        let minted = try #require(written.editKey)
+
+        await harness.outbox.drain()
+        await settle(harness, written.id)
+
+        #expect(harness.memoPosts.isEmpty, "an edit job was posted as a new memo")
+        #expect(server.memoCount == 1, "a second memo was created")
+        #expect(harness.memoPatches.count == 1)
+        let body = try sent(try #require(harness.memoPatches.first))
+        #expect(body["edit_key"] as? String == minted)
+        #expect(body["upload_uids"] as? [String] == ["uC"])
+        #expect(server.memo("m9")?.attachmentUIDs == ["att-old", "att-uC"])
+    }
+
+    /// The repository's own guard, pinned apart from the store's question: a second edit job for
+    /// a memo that still owes one is refused in the call that would write it, so one memo never
+    /// owes two frozen PATCHes that would undo each other (review round 2).
+    @Test("the repository writes one edit job per memo: a second enqueue for it is refused")
+    func repositoryRefusesASecondEditJobForOneMemo() async throws {
+        let root = try Fixture.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try OutboxRepository(root: root.appending(path: "outbox"))
+        let first = try Fixture.file(in: root, named: "dock.heic", bytes: 1000)
+        let second = try Fixture.file(in: root, named: "pier.heic", bytes: 1200)
+        let written = try await repository.enqueue(
+            content: "ignored", visibility: nil, capturedAt: Date(timeIntervalSince1970: 0),
+            binding: Fixture.binding(),
+            sources: [StagedSource(url: first, filename: "dock.heic", mime: "image/heic")],
+            editing: editOrderForReview())
+
+        await #expect(throws: OutboxStorageError.editPending) {
+            try await repository.enqueue(
+                content: "ignored", visibility: nil, capturedAt: Date(timeIntervalSince1970: 1),
+                binding: Fixture.binding(),
+                sources: [StagedSource(url: second, filename: "pier.heic", mime: "image/heic")],
+                editing: editOrderForReview())
+        }
+
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.map(\.id) == [written.id], "the second edit was written beside the first")
+    }
+
+    private func editOrderForReview() -> MemoEditOrder {
+        MemoEditOrder(
+            memoUID: "m9", content: "the dock, later", visibility: nil, createdAt: nil,
+            pictures: [.kept("att-old"), .adding(0)])
+    }
+}
+
+/// Set once the harness exists; read by the probe hook, which is built before it.
+final class EditJobRepositoryBox: @unchecked Sendable {
+    var repository: OutboxRepository?
 }

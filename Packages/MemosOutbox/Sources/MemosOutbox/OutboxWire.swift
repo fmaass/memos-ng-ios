@@ -99,7 +99,8 @@ public enum OutboxWire {
     public struct MemoPatch: Encodable, Sendable {
         public var content: String
         public var visibility: String?
-        public var createdAt: String
+        /// Absent where the edit leaves the memo's date alone (an edit job that states none).
+        public var createdAt: String?
         public var editKey: String
         public var uploadUIDs: [String]
         /// Absent where the edit cannot name the memo's pictures: the synthesized encoder leaves
@@ -109,7 +110,7 @@ public enum OutboxWire {
         public init(
             content: String,
             visibility: String?,
-            createdAt: String,
+            createdAt: String?,
             editKey: String,
             uploadUIDs: [String],
             attachmentUIDs: [String]?

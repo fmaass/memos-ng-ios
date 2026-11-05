@@ -3437,6 +3437,26 @@ s_picturelist() {
   return 1
 }
 
+s_noforegroundedit() {
+  # Files added to an existing memo go through the outbox as an edit job (MEMNG-954): the job mints
+  # its edit key, its files ride the whole lane and the PATCH that names them is its terminal
+  # action, so leaving the sheet or a killed app loses nothing. The foreground uploader it replaced
+  # was deleted, not flagged off, and nothing in the test suites notices it coming back, because a
+  # second way of sending an edit's files "works" too. So it is held as a literal absence over every
+  # Swift file, comments included, with the outbox edit job as the positive control in the same
+  # run, in a script of its own whose text may carry the literals it looks for.
+  echo "--- no-foreground-edit-upload rule (an edit's files go through the outbox edit job) ---"
+  local noforegroundedit_rule="$GATE_TARGET/scripts/no-foreground-edit-upload-rule.sh"
+  if [ -x "$noforegroundedit_rule" ]; then
+    "$noforegroundedit_rule" "$GATE_TARGET"
+    return $?
+  fi
+  echo "FOREGROUND-EDIT FAIL: $noforegroundedit_rule is missing or not executable, so the"
+  echo "                      foreground uploader's absence was never checked and this step"
+  echo "                      proves nothing"
+  return 1
+}
+
 s_mainbar() {
   # The owner froze the main bottom bar as built on 2.2.1 (41) (ADR-0008, MEMNG-690): one app-drawn
   # capsule hosted once over the tab view, the system bar hidden. Each variant it replaced is one
@@ -4002,6 +4022,7 @@ step sharelink  s_sharelink
 step textsel    s_textsel
 step buttonstyle s_buttonstyle
 step picturelist s_picturelist
+step noforegroundedit s_noforegroundedit
 step mainbar    s_mainbar
 step apicover   s_apicover
 step notes      s_notes

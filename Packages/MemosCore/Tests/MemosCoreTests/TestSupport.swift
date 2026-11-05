@@ -264,14 +264,15 @@ enum Stub {
         credential.install()
         let client = client(token: credential) { _, _, _ in Stub.empty(.unauthorized) }
         do {
-            _ = try await MediaUpload.start(
-                StagedSource(
-                    url: URL(filePath: "/tmp/never-read.jpg"),
-                    filename: "never-read.jpg",
-                    mime: "image/jpeg"
-                ),
-                size: 1,
-                using: client
+            _ = try await client.startUploadApiUploadsPost(
+                .init(
+                    body: .json(
+                        .init(
+                            filename: "never-read.jpg", lastModified: nil, mime: "image/jpeg",
+                            size: 1
+                        )
+                    )
+                )
             )
             return nil
         } catch {

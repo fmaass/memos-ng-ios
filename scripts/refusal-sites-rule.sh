@@ -351,7 +351,15 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # 58-60: the chunk-lane retirement witnesses in MemosOutboxTests (MEMNG-546) — a plain and a
 # retiring repository over one root, and the whole-lane rig's root reopened as retiring; none
 # drains, so none takes a credential predicate.
-pin "'OutboxRepository(' constructions" 60 \
+# 61: the edit-job witness in MemosCoreTests (MEMNG-954) writes the store's edit into a real
+# outbox, fed its signed-in test provider's predicate. 62-63: the edit-job reopen witness in
+# MemosOutboxTests (MEMNG-954) — a repository and the same root reopened as a relaunch, both with
+# no credential predicate (it enqueues straight into the repository and sends nothing). 64: the
+# edit-job planner witness in MemosOutboxTests (MEMNG-954) writes one job to ask the planner and
+# the request builder about it; it drains nothing, so it takes no credential predicate. 65: the
+# one-edit-job-per-memo witness in MemosOutboxTests (MEMNG-954) enqueues twice into a repository to
+# prove the second is refused; it drains nothing, so it takes no credential predicate.
+pin "'OutboxRepository(' constructions" 65 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

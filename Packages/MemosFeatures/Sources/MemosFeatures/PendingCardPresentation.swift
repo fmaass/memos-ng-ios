@@ -125,6 +125,12 @@ public enum PendingMemoActions {
     static let editOnTheWire = "A change is being sent. Edit it again once it has arrived."
     static let mayBeOnServer =
         "It may already be on the server. Delete the memo once it appears."
+    /// An edit that adds files to a memo already posted (MEMNG-954): the memo is the server's, so
+    /// its words and audience are changed from the memo itself once the files are in.
+    static let addingToPosted =
+        "Files are being added to a posted memo. Change it once they are in."
+    static let addingOnTheWire =
+        "The files are being added now. Wait until they have arrived."
 
     /// Every action, in the order the card lists them, with the reason for each one that is not
     /// applied to this capture.
@@ -137,14 +143,23 @@ public enum PendingMemoActions {
     private static func reason(_ action: PendingMemoAction, _ job: UploadJob) -> String? {
         switch action {
         case .edit:
+            // An edit job's words are already the edit; taking it back into a new-memo editor
+            // would post a second memo (`Outbox.cancel` refuses it too).
+            if job.memoEdit != nil { return addingToPosted }
             // Taken back while files are still arriving, the late ones would have nowhere to go.
             if job.stillArriving { return stillArriving }
             if job.hasNothingToSend { return nothingToSend }
             if job.editUnansweredSince != nil { return editOnTheWire }
             return nil
         case .remove:
+            // An edit job's PATCH on the wire may already have added the files: the queue refuses
+            // the withdraw (`Outbox.withdraw`), and this is its sentence.
+            if job.memoEdit != nil, job.editUnansweredSince != nil { return addingOnTheWire }
             return job.createMayHaveBeenSent ? mayBeOnServer : nil
         case .visibility:
+            // The edit job carries the audience its sheet chose; the posted memo's own menu
+            // changes it afterwards.
+            if job.memoEdit != nil { return addingToPosted }
             // The manifest's visibility is edited until the memo lands (MEMNG-971); only a change
             // already on the wire freezes it, exactly as it freezes Edit.
             return job.editUnansweredSince != nil ? visibilityOnTheWire : nil

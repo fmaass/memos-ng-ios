@@ -1,4 +1,5 @@
 import MemosCore
+import MemosOutbox
 import SwiftUI
 
 /// One memo, in full — and since Phase 4, the place its checkboxes are ticked.
@@ -17,6 +18,8 @@ public struct MemoDetailView: View {
     // Edit affordance is a toolbar item, and the only way to assert that one is really there is to
     // put the whole screen up and read it back (`MemoEditWiringTests`).
     @Environment(SessionStore.self) private var session: SessionStore?
+    // Where an edit that adds files is queued (MEMNG-954); without one such an edit is refused.
+    @Environment(Outbox.self) private var outbox: Outbox?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.dismiss) private var dismiss
     @State private var viewing: MediaViewerSelection?
@@ -343,10 +346,8 @@ public struct MemoDetailView: View {
 
     /// The same edit the timeline submits, from the screen the memo is already open on.
     ///
-    /// Files picked in the sheet ride along: they are uploaded in the foreground and the memo is
-    /// patched with them, whole or not at all (`TimelineStore.edit(attaching:)`). Deliberately not
-    /// the outbox, which owns new captures — a queued edit needs an edit key to be retryable, and
-    /// that is a separate piece of work.
+    /// Files picked in the sheet make the edit an outbox job (MEMNG-954): the sheet closes once it
+    /// is written, and the outbox uploads them and patches the memo under the job's own edit key.
     private func save(_ mode: ComposeView.Mode, _ submission: ComposeSubmission) async
         -> ComposeOutcome
     {
@@ -363,6 +364,12 @@ public struct MemoDetailView: View {
             attaching: submission.attachments.map(\.stagedSource),
             listing: submission.pictures,
             visibility: submission.visibilityChange,
+            through: outbox,
+            // The account the save was made under, read beside the handle: the edit job is bound
+            // to it, as a new capture is (`composed?.account`).
+            composedUnder: session?.snapshotIdentity.map {
+                AccountBinding(serverBaseURL: $0.server, ownerSubject: $0.subject)
+            },
             using: handle,
             baseURL: baseURL
         )
@@ -447,7 +454,11 @@ public struct MemoDetailView: View {
     private func toggle(_ index: Int, to checked: Bool) async {
         guard let handle = session?.activeHandle, let baseURL = session?.serverBaseURL
         else { return }
-        guard await timeline.toggleTask(at: index, in: uid, using: handle, baseURL: baseURL)
+        // Through the outbox: a tick while this memo still owes an edit job is refused by the
+        // store, because the job's PATCH would put back the words it froze (MEMNG-954).
+        guard
+            await timeline.toggleTask(
+                at: index, in: uid, through: outbox, using: handle, baseURL: baseURL)
         else { return }
         feedback.fire(checked ? .taskChecked : .taskUnchecked)
     }

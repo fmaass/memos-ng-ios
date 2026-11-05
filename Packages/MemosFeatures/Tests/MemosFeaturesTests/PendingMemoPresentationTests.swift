@@ -349,6 +349,55 @@ struct PendingMemoPresentationTests {
             "and still counts its bytes")
     }
 
+    /// An edit that adds files to a posted memo (MEMNG-954): never Cancel or Reopen — its words
+    /// handed to the new-memo editor would post a second memo — and the card's Edit and Visibility
+    /// are drawn disabled with their sentence, because the memo is changed from the memo itself.
+    /// Remove withdraws the edit only while its PATCH is not on the wire.
+    @Test("an edit adding files to a posted memo never offers Cancel, and its Edit is disabled")
+    func anEditJobOffersNoCancel() {
+        func editJob(_ state: JobState, _ reason: HoldReason? = nil, onWire: Bool = false)
+            -> UploadJob
+        {
+            var edit = job(files: [file(size: 100, confirmed: 0)], state: state, holdReason: reason)
+            edit.resolvedMemoUID = "m9"
+            edit.editKey = "edit-key-1"
+            edit.memoEdit = MemoEdit(statesDate: false, pictures: nil)
+            edit.editUnansweredSince = onWire ? capture : nil
+            return edit
+        }
+        func actions(_ job: UploadJob) -> [PendingAction] {
+            PendingMemoPresentation.action(for: job)
+        }
+        func reason(_ action: PendingMemoAction, _ job: UploadJob) -> String? {
+            PendingMemoActions.offers(for: job).first { $0.action == action }?.disabledReason
+        }
+
+        #expect(actions(editJob(.uploading)) == [.remove, .retry])
+        #expect(actions(editJob(.waiting)) == [.remove, .retry])
+        #expect(actions(editJob(.held, .editIncomplete)) == [.retry, .remove], "Reopen offered")
+        #expect(actions(editJob(.held, .serverRefused)) == [.retry, .remove])
+        #expect(actions(editJob(.held, .unreadableManifest)) == [.remove])
+        #expect(actions(editJob(.creating)) == [])
+        #expect(actions(editJob(.uploading, onWire: true)) == [])
+        #expect(actions(editJob(.held, .serverRefused, onWire: true)) == [.retry])
+        // The control: the same rows as a new capture DO offer Cancel and Reopen.
+        #expect(actions(job(state: .uploading)) == [.cancel, .retry])
+        #expect(actions(job(state: .held, holdReason: .editIncomplete)) == [.reopen, .retry])
+
+        let edit = editJob(.uploading)
+        #expect(reason(.edit, edit) == PendingMemoActions.addingToPosted)
+        #expect(reason(.visibility, edit) == PendingMemoActions.addingToPosted)
+        #expect(!PendingVisibility.isEditable(edit))
+        #expect(reason(.remove, edit) == nil)
+        #expect(
+            reason(.remove, editJob(.uploading, onWire: true)) == PendingMemoActions.addingOnTheWire
+        )
+        // The control: a new capture's card leaves Edit, Visibility and Remove pressable.
+        #expect(reason(.edit, job(state: .uploading)) == nil)
+        #expect(reason(.visibility, job(state: .uploading)) == nil)
+        #expect(reason(.remove, job(state: .uploading)) == nil)
+    }
+
     /// The backoff is part of an unanswered change, not a pause from it: nothing is on the wire
     /// while the queue waits, yet the change stands and the next replay sends it again under the
     /// same key. So the row says the change is unanswered — never that it is being sent, and never

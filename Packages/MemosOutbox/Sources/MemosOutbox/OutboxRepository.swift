@@ -11,6 +11,12 @@ public enum OutboxStorageError: Error, Equatable {
     /// A trip pass's capture with no file in it. The guest door takes photos and videos only, so
     /// such a capture would complete as sent with nothing received: its words would be lost.
     case guestCaptureWithoutFiles
+    /// An edit's picture list named an added file that was not handed over (MEMNG-954): nothing is
+    /// written, because a list missing an entry deletes that picture on the server.
+    case editPictureUnknown
+    /// An edit job for the same memo is still in the queue (MEMNG-954): nothing is written, because
+    /// two jobs each freezing the memo's text and picture list would undo each other.
+    case editPending
 }
 
 extension OutboxStorageError: LocalizedError {
@@ -398,6 +404,12 @@ public actor OutboxRepository {
     /// One job, or nil when nothing actionable stands under that id.
     public func job(_ id: UUID) -> UploadJob? { presence(id).job }
 
+    /// Whether an edit job for this memo is still on disk (MEMNG-954). A finished one is removed,
+    /// so any row naming the memo — waiting, uploading, held — is a change still owed to it.
+    public func unfinishedEdit(for memoUID: String) throws -> Bool {
+        try loadJobs().contains { $0.memoEdit != nil && $0.resolvedMemoUID == memoUID }
+    }
+
     public func save(_ job: UploadJob) throws {
         _ = try persist(job)
     }
@@ -765,6 +777,7 @@ public actor OutboxRepository {
         stagingLaunch: UUID? = nil,
         arriving: Int = 0,
         staging: [StagingFile] = [],
+        editing order: MemoEditOrder? = nil,
         under authority: SendAuthority = .unfenced
     ) throws -> UploadJob {
         // The guest door takes files only, and a guest job with none would be completed as sent
@@ -772,6 +785,12 @@ public actor OutboxRepository {
         // anything is leased or copied.
         if binding.credentialKind == .guest, sources.isEmpty {
             throw OutboxStorageError.guestCaptureWithoutFiles
+        }
+        // One edit job per memo (MEMNG-954), asked and written in this one call on this actor with
+        // no suspension between, so two overlapping edits of one memo are one job: the second is
+        // refused, never queued beside the first.
+        if let order, try unfinishedEdit(for: order.memoUID) {
+            throw OutboxStorageError.editPending
         }
         let lease: OutboxLease
         switch lock.acquire(.shared) {
@@ -790,7 +809,7 @@ public actor OutboxRepository {
             for source in sources {
                 files.append(try copy(source, into: directory))
             }
-            let job = UploadJob(
+            var job = UploadJob(
                 id: id,
                 idempotencyKey: idempotencyKey,
                 content: content,
@@ -804,6 +823,9 @@ public actor OutboxRepository {
                 notArrived: stagingLaunch != nil && arriving > 0 ? arriving : nil,
                 staging: staging.isEmpty ? nil : staging
             )
+            if let order {
+                job = try Self.editJob(job, for: order)
+            }
             // The LAST word, on this executor, immediately before the manifest is committed.
             // Copying the files above is the slow part of a capture and the caller's check was
             // before it: an account switch landing in that interval would otherwise commit a job
@@ -816,6 +838,42 @@ public actor OutboxRepository {
             try? FileManager.default.removeItem(at: directory)
             throw error
         }
+    }
+
+    /// The capture just built, made into an edit of the existing memo `order` names (MEMNG-954).
+    ///
+    /// The key is minted HERE, once, and written in the same manifest as everything it covers: every
+    /// transmission of this edit — a retry, a relaunch's replay — presents it, so the server applies
+    /// the edit once and answers the rest from the key. Its files are the edit's, marked so no create
+    /// ever names them, and they go on the whole lane. A picture list naming a file that is not here
+    /// is refused rather than written: a list missing an entry would delete a picture on the server.
+    static func editJob(_ job: UploadJob, for order: MemoEditOrder) throws -> UploadJob {
+        var edit = job
+        for index in edit.files.indices { edit.files[index].stagedForEdit = true }
+        let ids = edit.files.map(\.id)
+        let pictures = try order.pictures?.map { picture -> MemoEdit.Picture in
+            switch picture {
+            case .kept(let uid):
+                return .kept(uid)
+            case .adding(let index):
+                guard ids.indices.contains(index) else {
+                    throw OutboxStorageError.editPictureUnknown
+                }
+                return .added(ids[index])
+            }
+        }
+        edit.content = order.content
+        edit.visibility = nil
+        edit.capturedAt = order.createdAt ?? job.capturedAt
+        edit.resolvedMemoUID = order.memoUID
+        edit.editKey = UUID().uuidString
+        edit.pendingEdit = PendingEdit(
+            content: order.content, visibility: order.visibility, capturedAt: edit.capturedAt,
+            fileIDs: ids
+        )
+        edit.memoEdit = MemoEdit(statesDate: order.createdAt != nil, pictures: pictures)
+        edit.transport = .whole
+        return edit
     }
 
     // MARK: - files still arriving (MEMNG-951)

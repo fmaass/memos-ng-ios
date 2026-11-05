@@ -115,6 +115,7 @@ public enum PendingMemoPresentation {
         // Nothing in it to send — a Post whose every picked item failed: Reopen would lead to a
         // re-post the queue refuses (`Outbox.resubmit`), so the one way out is the one offered.
         if job.hasNothingToSend { return [.remove] }
+        if job.memoEdit != nil { return editJobActions(job) }
         if job.cancelledAt != nil { return [.reopen, .remove] }
         switch job.state {
         case .held:
@@ -149,6 +150,17 @@ public enum PendingMemoPresentation {
         case .creating:
             return []
         }
+    }
+
+    /// An edit that adds files to a posted memo (MEMNG-954). Never Cancel or Reopen: its words
+    /// handed back to the editor would post as a second memo (`Outbox.cancel` refuses it). Remove
+    /// withdraws the edit while its PATCH is not on the wire; once it is, the row leaves the answer
+    /// to the queue, which replays the edit under the key it was minted with.
+    static func editJobActions(_ job: UploadJob) -> [PendingAction] {
+        if job.state == .creating { return [] }
+        if job.state == .held, job.holdReason == .unreadableManifest { return [.remove] }
+        if job.editUnansweredSince != nil { return job.state == .held ? [.retry] : [] }
+        return job.state == .held ? [.retry, .remove] : [.remove, .retry]
     }
 
     /// Why an action the row draws cannot be pressed now, or nil when it can.

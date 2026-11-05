@@ -371,57 +371,6 @@ struct SessionNoiseTests {
         #expect(route.count == 0, "a request went out for a session nobody is signed in to")
     }
 
-    /// B3. A chunked upload is the longest-lived thing this app sends and it runs off the main
-    /// actor. Handed only a client, it kept starting sessions and appending chunks for an account
-    /// the device had left — the check has to travel with it and be asked before every send.
-    @Test("an upload whose session ended sends no further chunk")
-    func anUploadStopsWhenTheSessionEnds() async throws {
-        let sends = Counter()
-        let box = LockedValue<SessionStore?>(nil)
-        let session = await signedIn(
-            handler: { _, _, operation in
-                guard operation != whoamiOperation else { return Stub.json(Stub.user) }
-                sends.increment()
-                if operation == "start_upload_api_uploads_post" {
-                    // The session ends while the upload session is being opened, so the FIRST
-                    // send is legitimate and every one after it is not. 201 is what this route
-                    // answers with; a 200 here would fail to decode and the upload would stop for
-                    // a reason that has nothing to do with the fence.
-                    if let session = box.get() { await session.signOutWithoutRevoking() }
-                    return Stub.json(
-                        #"{"upload_uid":"u1","chunk_size":8,"bytes_received":0}"#,
-                        status: .created
-                    )
-                }
-                return Stub.json(#"{"upload_uid":"u1","chunk_size":8,"bytes_received":8}"#)
-            }
-        )
-        box.set(session)
-        let timeline = TimelineStore()
-        timeline.reports(to: session)
-        let handle = try #require(session.activeHandle)
-        let root = FileManager.default.temporaryDirectory
-            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appending(path: "one.bin")
-        try Data(repeating: 7, count: 64).write(to: file)
-
-        let saved = await timeline.edit(
-            uid: "m1",
-            content: "with a picture",
-            attaching: [StagedSource(url: file, filename: "one.bin", mime: "image/jpeg")],
-            using: handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved, "an edit for a session that ended did not save")
-        #expect(
-            sends.count == 1,
-            "it opened one upload session and then went on sending chunks for a session that ended"
-        )
-    }
-
     /// The PATCH family — `save`, `setVisibility`, `setArchived` are all one method — across a
     /// session end. It is the apply point with the most entry points behind it, and the one that
     /// had no fence: an edit issued under A and answered after a switch to B would land in B,

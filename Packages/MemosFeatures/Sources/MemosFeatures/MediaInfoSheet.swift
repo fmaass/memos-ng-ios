@@ -1,6 +1,7 @@
 import Foundation
 import MapKit
 import MemosCore
+import MemosOutbox
 import SwiftUI
 
 /// What the Info sheet says about one page, row by row.
@@ -258,6 +259,8 @@ struct MediaInfoSheet: View {
     var openInPlaces: ((PlacesFocus.Request) -> Void)? = nil
     /// The one question a widening from the chip asks before anything is sent (`WideningAsk`).
     @State private var widening = WideningAsk()
+    /// The queue a change of audience asks first: refused while the memo owes an edit job.
+    @Environment(Outbox.self) private var outbox: Outbox?
     /// What the sheet says under the chip when a change from it failed (MEMNG-1034): the failure
     /// would otherwise land only in the timeline's error line, behind the viewer.
     @State private var chipLine = ChipLine()
@@ -347,8 +350,8 @@ struct MediaInfoSheet: View {
         let ticket = chipLine.sending()
         Task {
             let outcome = await Self.sendVisibility(
-                change, uid: uid, through: timeline, holding: store, using: handle,
-                baseURL: baseURL)
+                change, uid: uid, through: timeline, owing: outbox, holding: store,
+                using: handle, baseURL: baseURL)
             // A change that became a widening while it queued comes back as its question
             // (MEMNG-981), and is asked like any widening.
             widening.heard(outcome, on: uid)

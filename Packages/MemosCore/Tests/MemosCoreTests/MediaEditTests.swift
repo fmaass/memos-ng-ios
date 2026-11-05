@@ -10,29 +10,6 @@ import Testing
 private let listMemosOperation = "list_memos_api_memos_get"
 private let patchMemoOperation = "patch_memo_api_memos__uid__patch"
 private let startUploadOperation = "start_upload_api_uploads_post"
-private let appendChunkOperation = "append_chunk_api_uploads__upload_uid__patch"
-private let uploadOffsetOperation = "upload_offset_api_uploads__upload_uid__head"
-
-/// What the server answers a `HEAD /api/uploads/{uid}` with: a status, the offset in a HEADER, and
-/// NO body at all. Built by hand rather than through `Stub.json` because the shape is the point —
-/// the generated client is asked to read a header off a response that carries nothing else, which
-/// is exactly what the contract now publishes and what the server has always sent.
-private func offsetAnswer(_ offset: Int) -> (HTTPResponse, HTTPBody?) {
-    offsetAnswer(raw: String(offset))
-}
-
-/// The same answer with a header that is not a number — a session whose position cannot be read.
-private func offsetAnswer(raw: String) -> (HTTPResponse, HTTPBody?) {
-    var response = HTTPResponse(status: .ok)
-    response.headerFields[HTTPField.Name("Upload-Offset")!] = raw
-    return (response, nil)
-}
-
-/// The server refusing a chunk that does not start where it holds: the 409 the contract answers an
-/// offset gap with, body and all.
-private func offsetGap() -> (HTTPResponse, HTTPBody?) {
-    Stub.json(#"{"detail":"Offset gap; re-sync via HEAD"}"#, status: .conflict)
-}
 
 /// Keeps a request open until the test lets it go. `nonisolated`, because it is called from inside
 /// the scripted transport, which the client runs off the main actor.
@@ -40,12 +17,6 @@ private func hold(until release: LockedValue<Bool>) async throws {
     while !release.get() {
         try await Task.sleep(for: .milliseconds(1))
     }
-}
-
-/// The offset a chunk request declared, as the server reads it.
-private func sentOffset(_ request: HTTPRequest) -> Int {
-    let field = request.headerFields.first { $0.name.canonicalName == "upload-offset" }
-    return Int(field?.value ?? "-1") ?? -1
 }
 
 /// One upload session's answer, in the shape the server sends it.
@@ -63,13 +34,11 @@ private func stagedFile(bytes: Int, named name: String = "picked.jpg") throws ->
     return StagedSource(url: url, filename: name, mime: "image/jpeg")
 }
 
-/// Editing a memo and attaching media to it in the same breath — the FOREGROUND lane, which is
-/// deliberately not the outbox.
+/// Editing a memo, with and without media.
 ///
-/// Two things are being held here. The request shape: files become upload sessions, and the memo
-/// patch names those sessions in `upload_uids` (the server finalizes them as part of the write, so
-/// nothing here calls `/finalize`). And the rollback: an edit with media either happens whole or
-/// does not happen at all, because half of it is a memo somebody has to repair by hand.
+/// An edit without files is the direct PATCH, keyed per Save so a retry is one edit. An edit that
+/// adds files is not sent from here at all (MEMNG-954): it is written to the outbox as an edit job,
+/// whose own suite (MemosOutboxTests) holds the uploads and the PATCH that names them.
 @MainActor
 @Suite("Editing a memo with media")
 struct MediaEditTests {
@@ -105,192 +74,305 @@ struct MediaEditTests {
         #expect(store.memos[0].content == "edited")
     }
 
-    @Test("a picked file becomes an upload session the memo patch names")
-    func editWithOneFile() async throws {
+    /// An edit that adds files is not sent from the timeline (MEMNG-954): the store writes it to
+    /// the outbox as an edit job and answers once it is persisted. Pinned on BOTH sides: the
+    /// generated client sees no upload and no patch, and the real repository holds one job naming
+    /// the memo, carrying the edit's words, its file, a minted edit key and the picture list with
+    /// the added file resolved to that file.
+    @Test("an edit with files becomes an outbox edit job, and the store sends nothing itself")
+    func editWithFilesIsQueued() async throws {
         let file = try stagedFile(bytes: 12)
         defer { try? FileManager.default.removeItem(at: file.url) }
-
+        let (root, repository, outbox) = try editOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
         let store = TimelineStore()
-        let sent = LockedValue<[String: Any]>([:])
-        let started = LockedValue<[String: Any]>([:])
-        let chunkBytes = LockedValue<Int>(0)
-        let finalizes = Counter()
-        let client = Stub.client { _, body, operation in
-            switch operation {
-            case startUploadOperation:
-                started.set(try await Stub.body(body))
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                chunkBytes.set(chunkBytes.get() + data.count)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case patchMemoOperation:
-                sent.set(try await Stub.body(body))
-                return Stub.json(Stub.memo(uid: "a", content: "with a photo"))
-            case "finalize_upload_api_uploads__upload_uid__finalize_post":
-                finalizes.increment()
-                return Stub.empty(.ok)
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "with a photo",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(saved)
-        #expect(started.get()["filename"] as? String == "picked.jpg")
-        #expect(started.get()["mime"] as? String == "image/jpeg")
-        #expect(started.get()["size"] as? Int == 12)
-        #expect(chunkBytes.get() == 12)
-        #expect(sent.get()["upload_uids"] as? [String] == ["u1"])
-        // The memo write is what finalizes a pending upload (memos-ng "finalize-on-post"); a
-        // client that finalized for itself would produce an attachment belonging to no memo.
-        #expect(finalizes.count == 0)
-    }
-
-    @Test("a file larger than one chunk is sent in the pieces the server asks for")
-    func chunksFollowTheServer() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let offsets = LockedValue<[Int]>([])
-        let received = LockedValue<Int>(0)
-        let client = Stub.client { request, body, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case appendChunkOperation:
-                offsets.set(offsets.get() + [sentOffset(request)])
-                let data = try await Stub.bytes(body)
-                received.set(received.get() + data.count)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: received.get()))
-            case patchMemoOperation:
-                return Stub.json(Stub.memo(uid: "a"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a", content: "big", attaching: [file], using: client.handle, baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(saved)
-        // Three chunks: 4, 4, 2 — each starting where the SERVER said it now holds up to, which is
-        // the only number a resume could ever agree with.
-        #expect(offsets.get() == [0, 4, 8])
-        #expect(received.get() == 10)
-    }
-
-    @Test("an upload that fails leaves the memo untouched and never patches it")
-    func failedUploadDoesNotPatch() async throws {
-        let file = try stagedFile(bytes: 8)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let patches = Counter()
+        let sent = LockedValue<[String]>([])
         let client = Stub.client { _, _, operation in
+            sent.set(sent.get() + [operation])
             switch operation {
             case startUploadOperation:
                 return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                return Stub.empty(.internalServerError)
             case patchMemoOperation:
-                patches.increment()
-                return Stub.json(Stub.memo(uid: "a", content: "never"))
+                return Stub.json(Stub.memo(uid: "a", content: "edited"))
             default:
                 return Stub.json(Stub.memoList(["a"], nextCursor: nil))
             }
         }
-
         await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "never",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
+        sent.set([])
 
-        #expect(!saved)
-        // THE rollback: no patch was ever sent, so the memo still says what it said. Half an edit
-        // — new text with the photo missing — is the state nobody can repair from the app.
-        #expect(patches.count == 0)
-        #expect(store.memos[0].content == "hello")
-        #expect(store.lastError != nil)
-    }
-
-    @Test("a patch refused after the uploads leaves the memo as it was")
-    func refusedPatchLeavesTheMemo() async throws {
-        let file = try stagedFile(bytes: 4)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let client = Stub.client { _, body, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: 0), status: .created)
-            case appendChunkOperation:
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 64, received: data.count))
-            case patchMemoOperation:
-                return Stub.empty(.conflict)
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "refused",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved)
-        #expect(store.memos[0].content == "hello")
-        #expect(store.memos[0].attachments.isEmpty)
-        #expect(store.lastError != nil)
-    }
-
-    @Test("a 401 during an upload ends the session")
-    func unauthorizedUploadEndsTheSession() async throws {
-        let file = try stagedFile(bytes: 4)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let ended = Counter()
-        let store = TimelineStore(onUnauthorized: { _ in
-            ended.increment()
-            return .endedSession
-        })
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.empty(.unauthorized)
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        await store.edit(
-            uid: "a", content: "no", attaching: [file], using: client.handle, baseURL: Stub.baseURL
+        let outcome = await store.edit(
+            uid: "a", content: "edited", attaching: [file],
+            listing: [.kept("p1"), .uploading(0)], through: outbox,
+            using: client.handle, baseURL: Stub.baseURL
         )
 
-        // The upload lane wraps the API's own error to say which step failed; the wrapping must
-        // not cost a 401 its identity, or a dead credential never ends the session.
-        #expect(ended.count == 1)
+        #expect(outcome.isSaved)
+        #expect(sent.get().isEmpty, "the store sent \(sent.get()) itself")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.count == 1)
+        let job = try #require(jobs.first)
+        #expect(job.resolvedMemoUID == "a")
+        #expect(job.content == "edited")
+        #expect(job.files.count == 1)
+        #expect(job.files.allSatisfy { $0.stagedForEdit == true })
+        #expect(job.editKey?.isEmpty == false, "the job was written without an edit key")
+        #expect(job.memoEdit?.pictures == [.kept("p1"), .added(job.files[0].id)])
+        #expect(job.memoEdit?.statesDate == false)
+    }
+
+    /// A store with one memo, a real outbox, and an edit job for that memo already written by the
+    /// store itself. Answers the store, the client's log of operations (cleared after the
+    /// enqueue), the repository, the outbox and the cleanup.
+    private func storeOwingAnEdit(listing memos: [String] = [Stub.memo(uid: "a")]) async throws
+        -> (
+            TimelineStore, any APIProtocol, LockedValue<[String]>, OutboxRepository, Outbox,
+            () -> Void
+        )
+    {
+        let file = try stagedFile(bytes: 12)
+        let (root, repository, outbox) = try editOutbox()
+        let store = TimelineStore()
+        let sent = LockedValue<[String]>([])
+        let client = Stub.client { _, _, operation in
+            sent.set(sent.get() + [operation])
+            switch operation {
+            case patchMemoOperation:
+                return Stub.json(Stub.memo(uid: "a", content: "typo fixed"))
+            default:
+                return Stub.json(Stub.page(memos))
+            }
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let queued = await store.edit(
+            uid: "a", content: "edited", attaching: [file],
+            listing: [.kept("p1"), .uploading(0)], through: outbox,
+            composedUnder: alice, using: client.handle, baseURL: Stub.baseURL
+        )
+        #expect(queued == .saved, "the first edit job was not written: \(queued)")
+        sent.set([])
+        return (
+            store, client, sent, repository, outbox,
+            {
+                try? FileManager.default.removeItem(at: file.url)
+                try? FileManager.default.removeItem(at: root)
+            }
+        )
+    }
+
+    private var alice: AccountBinding {
+        AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "alice")
+    }
+
+    /// Invariant 1 on the edit job (MEMNG-954): the job froze the memo's words and its whole
+    /// picture list when it was written, so a words-only edit sent beside it would be undone by its
+    /// PATCH, or undo it. The STORE refuses it — not a button — and nothing goes on the wire.
+    @Test("a direct edit while the memo's edit job is still queued is refused and sends nothing")
+    func directEditBehindAnEditJobIsRefused() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit()
+        defer { cleanUp() }
+
+        let outcome = await store.edit(
+            uid: "a", content: "typo fixed", through: outbox, composedUnder: alice,
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .failed(.editPending))
+        #expect(sent.get().isEmpty, "a refused edit sent \(sent.get())")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.content == "edited", "the refused edit reached the queued job")
+    }
+
+    /// Two overlapping edits that both add files are ONE job: the second is refused, never queued
+    /// beside the first (whose PATCH would drop the second one's picture, or the other way round).
+    @Test("two overlapping edits with files of one memo are one job: the second is refused")
+    func overlappingFileEditsAreOneJob() async throws {
+        let first = try stagedFile(bytes: 12)
+        let second = try stagedFile(bytes: 14)
+        defer {
+            try? FileManager.default.removeItem(at: first.url)
+            try? FileManager.default.removeItem(at: second.url)
+        }
+        let (root, repository, outbox) = try editOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineStore()
+        let sent = LockedValue<[String]>([])
+        let client = Stub.client { _, _, operation in
+            sent.set(sent.get() + [operation])
+            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        sent.set([])
+
+        async let one = store.edit(
+            uid: "a", content: "one", attaching: [first], listing: [.uploading(0)],
+            through: outbox, composedUnder: alice, using: client.handle, baseURL: Stub.baseURL)
+        async let two = store.edit(
+            uid: "a", content: "two", attaching: [second], listing: [.uploading(0)],
+            through: outbox, composedUnder: alice, using: client.handle, baseURL: Stub.baseURL)
+        let outcomes = await [one, two]
+
+        #expect(outcomes.filter { $0 == .saved }.count == 1, "\(outcomes)")
+        #expect(outcomes.filter { $0 == .failed(.editPending) }.count == 1, "\(outcomes)")
+        #expect(try await repository.loadJobs().count == 1)
+        #expect(sent.get().isEmpty, "the store sent \(sent.get()) itself")
+    }
+
+    /// The refusal lasts exactly as long as the job: a finished job is removed from the queue, and
+    /// the memo takes an edit again — the direct PATCH, sent once.
+    @Test("once the memo's edit job has finished, the memo can be edited again")
+    func editAllowedAfterTheJobFinished() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit()
+        defer { cleanUp() }
+        let job = try #require(try await repository.loadJobs().first)
+        #expect(await repository.delete(job, ifStillCurrent: job))
+
+        let outcome = await store.edit(
+            uid: "a", content: "typo fixed", through: outbox, composedUnder: alice,
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .saved)
+        #expect(sent.get().filter { $0 == patchMemoOperation }.count == 1)
+    }
+
+    /// A task tick is a whole content PATCH, and the edit job froze the memo's words: a tick sent
+    /// beside it would be undone by the job's later PATCH. The STORE refuses it inside the memo's
+    /// line, nothing goes on the wire, and the optimistic tick goes back (review round 2).
+    @Test("a task tick while the memo's edit job is still queued is refused and sends nothing")
+    func tickBehindAnEditJobIsRefused() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit(
+            listing: [Stub.memo(uid: "a", content: "- [ ] milk")])
+        defer { cleanUp() }
+
+        let ticked = await store.toggleTask(
+            at: 0, in: "a", through: outbox, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(!ticked)
+        #expect(sent.get().isEmpty, "a refused tick sent \(sent.get())")
+        #expect(store.memos.first?.content == "- [ ] milk", "the refused tick stayed on the row")
+        let jobs = try await repository.loadJobs()
+        #expect(jobs.count == 1)
+        #expect(jobs.first?.content == "edited")
+    }
+
+    /// The control: once the job is gone the same tick goes out, once.
+    @Test("a task tick once the memo's edit job has finished sends one PATCH")
+    func tickAllowedAfterTheJobFinished() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit(
+            listing: [Stub.memo(uid: "a", content: "- [ ] milk")])
+        defer { cleanUp() }
+        let job = try #require(try await repository.loadJobs().first)
+        #expect(await repository.delete(job, ifStillCurrent: job))
+
+        let ticked = await store.toggleTask(
+            at: 0, in: "a", through: outbox, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(ticked)
+        #expect(sent.get().filter { $0 == patchMemoOperation }.count == 1, "\(sent.get())")
+    }
+
+    /// The refusal is the memo's that owes the job, no other's: a tick on a second memo goes out
+    /// while the first one's job is still queued.
+    @Test("a task tick on another memo is not held by this memo's edit job")
+    func tickOnAnotherMemoIsNotHeld() async throws {
+        let (store, client, sent, _, outbox, cleanUp) = try await storeOwingAnEdit(
+            listing: [
+                Stub.memo(uid: "a", content: "- [ ] milk"),
+                Stub.memo(uid: "b", content: "- [ ] eggs"),
+            ])
+        defer { cleanUp() }
+
+        let ticked = await store.toggleTask(
+            at: 0, in: "b", through: outbox, using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(ticked)
+        #expect(sent.get().filter { $0 == patchMemoOperation }.count == 1, "\(sent.get())")
+    }
+
+    /// The job's PATCH carries the audience its sheet stated, so a change of audience made
+    /// beside it could be put back by it: refused the same way, with nothing sent.
+    @Test("a visibility change while the memo's edit job is still queued is refused")
+    func visibilityBehindAnEditJobIsRefused() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit(
+            listing: [Stub.memo(uid: "a", visibility: "PUBLIC")])
+        defer { cleanUp() }
+
+        let outcome = await store.setVisibility(
+            VisibilityChange.cleared(.private, from: .public), uid: "a", through: outbox,
+            using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(outcome == .failed(.editPending))
+        #expect(sent.get().isEmpty, "a refused visibility change sent \(sent.get())")
+        #expect(store.memos.first?.visibility == .public)
+        #expect(try await repository.loadJobs().count == 1)
+    }
+
+    /// The control: once the job is gone the same change goes out, once.
+    @Test("a visibility change once the memo's edit job has finished sends one PATCH")
+    func visibilityAllowedAfterTheJobFinished() async throws {
+        let (store, client, sent, repository, outbox, cleanUp) = try await storeOwingAnEdit(
+            listing: [Stub.memo(uid: "a", visibility: "PUBLIC")])
+        defer { cleanUp() }
+        let job = try #require(try await repository.loadJobs().first)
+        #expect(await repository.delete(job, ifStillCurrent: job))
+
+        let outcome = await store.setVisibility(
+            VisibilityChange.cleared(.private, from: .public), uid: "a", through: outbox,
+            using: client.handle, baseURL: Stub.baseURL)
+
+        #expect(outcome == .saved)
+        #expect(sent.get().filter { $0 == patchMemoOperation }.count == 1, "\(sent.get())")
+    }
+
+    /// The job is bound to the account the sheet was saved under (review: never `nil`): saved
+    /// after the device moved to another account, it is refused and nothing is persisted, so these
+    /// words can never be sent into the other account's memo.
+    @Test("an edit with files saved under an account no longer signed in persists nothing")
+    func editJobUnderAStaleAccountPersistsNothing() async throws {
+        let file = try stagedFile(bytes: 12)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+        let (root, repository, outbox) = try editOutbox()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineStore()
+        let client = Stub.client { _, _, _ in Stub.json(Stub.memoList(["a"], nextCursor: nil)) }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+
+        let outcome = await store.edit(
+            uid: "a", content: "edited", attaching: [file], listing: [.uploading(0)],
+            through: outbox,
+            composedUnder: AccountBinding(serverBaseURL: Stub.baseURL, ownerSubject: "bob"),
+            using: client.handle, baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .failed(.storage))
+        #expect(try await repository.loadJobs().isEmpty)
+    }
+
+    /// The other half of the same line: with nowhere to queue the edit, it is refused as a storage
+    /// failure and nothing goes up from here instead — there is no foreground fallback any more.
+    @Test("an edit with files and no queue is refused as storage, with nothing sent")
+    func editWithFilesAndNoQueueSendsNothing() async throws {
+        let file = try stagedFile(bytes: 12)
+        defer { try? FileManager.default.removeItem(at: file.url) }
+        let store = TimelineStore()
+        let sent = LockedValue<[String]>([])
+        let client = Stub.client { _, _, operation in
+            sent.set(sent.get() + [operation])
+            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
+        }
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        sent.set([])
+
+        let outcome = await store.edit(
+            uid: "a", content: "edited", attaching: [file], using: client.handle,
+            baseURL: Stub.baseURL
+        )
+
+        #expect(outcome == .failed(.storage))
+        #expect(sent.get().isEmpty)
+        #expect(store.memos[0].content != "edited")
     }
 
     // MARK: - the retry token
@@ -500,542 +582,59 @@ struct MediaEditTests {
         #expect(keys.get().count == 2)
         #expect(keys.get()[0] != keys.get()[1])
     }
+}
 
-    // MARK: - the offset gap
+// MARK: - A real outbox for the edit job
 
-    /// The one question a resume turns on: where does the session say it stands.
-    ///
-    /// The answer is a HEADER on a response with no body at all, which is what the server sends
-    /// and what the contract now publishes. Nothing else in this file matters if this cannot be
-    /// read, so it is asserted on its own rather than inferred from an upload that finished.
-    @Test("the session's own offset is read back off the header of a bodyless answer")
-    func theOffsetRouteIsReadFromItsHeader() async throws {
-        let client = Stub.client { _, _, operation in
-            operation == uploadOffsetOperation ? offsetAnswer(4) : Stub.empty(.ok)
-        }
-        let read = try await MediaUpload.offset(of: "u1", using: client)
-        #expect(read == 4)
+/// A real repository on a scratch directory behind a real outbox, signed in so the edit can be
+/// written. Its network answers 500 and moves no file, so whatever it tries is never the store's.
+@MainActor
+func editOutbox() throws -> (URL, OutboxRepository, Outbox) {
+    let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    let credentials = EditSignedIn()
+    let repository = try OutboxRepository(
+        root: root, stillCurrent: { credentials.stillCurrent(epoch: $0) })
+    let defaults = UserDefaults(suiteName: "media-edit-\(UUID().uuidString)") ?? .standard
+    let outbox = Outbox(
+        repository: repository, credentials: credentials, http: EditUnsent(),
+        scheduler: EditNoChunks(), completion: MemoCompletionEndpoint(http: EditUnsent()),
+        network: EditPath(), preferences: UploadPreferences(defaults: defaults))
+    return (root, repository, outbox)
+}
+
+/// Signed in as alice on the stub server, for the whole test.
+private struct EditSignedIn: OutboxCredentialsProviding {
+    func currentCredentials() async -> OutboxCredentials? {
+        OutboxCredentials(serverBaseURL: Stub.baseURL, ownerSubject: "alice", token: "t")
     }
+    func isCurrent(_ credentials: OutboxCredentials) -> Bool { true }
+    func stillCurrent(epoch: Int) -> Bool { true }
+}
 
-    /// A session that does not answer is bounded by the DEADLINE, not by the URL loading system.
-    ///
-    /// The unreadable answer above fails as soon as it is parsed. A session that simply says
-    /// nothing is the other half of the same case, and it used to be bounded only by the request
-    /// timeout — around a minute of a Save frozen on a screen somebody is waiting at, at the end of
-    /// which the upload is abandoned anyway. The stub answers eventually so this test cannot hang;
-    /// what is asserted is that nothing waited for it.
-    @Test("a session that will not say where it stands is given up on within the deadline")
-    func theOffsetAskIsBounded() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let asks = LockedValue<Int>(0)
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                asks.set(asks.get() + 1)
-                // Far longer than any deadline worth waiting: the answer that never comes in time.
-                try await Task.sleep(for: .seconds(10))
-                return offsetAnswer(4)
-            default:
-                return offsetGap()
-            }
-        }
-
-        let clock = ContinuousClock()
-        let started = clock.now
-        await #expect(throws: MediaUploadError.refused(.server(status: 409))) {
-            try await MediaUpload.upload(
-                file, using: client, offsetDeadline: .milliseconds(50)
-            )
-        }
-        let elapsed = clock.now - started
-
-        #expect(asks.get() == 1, "control: the session really was asked")
-        // Generous, and still nowhere near the ten seconds the stub would have taken, let alone
-        // the request timeout that used to be the only bound.
-        #expect(elapsed < .seconds(3), "the upload waited for an answer that was not coming")
-    }
-
-    /// A position that cannot be read is not guessed at: the gap ends the edit, and ends it whole.
-    ///
-    /// Guessing would resend into the very gap the ask exists to close. The header here is not a
-    /// number, which is the one way a session that DOES answer can still leave the client with
-    /// nowhere to resume from.
-    @Test("an offset gap the session cannot answer abandons the edit without patching the memo")
-    func offsetGapAbortsWhenTheSessionCannotBeRead() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let offsets = LockedValue<[Int]>([])
-        let heads = LockedValue<Int>(0)
-        let patches = LockedValue<Int>(0)
-        let client = Stub.client { request, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                heads.set(heads.get() + 1)
-                return offsetAnswer(raw: "nearly four")
-            case appendChunkOperation:
-                offsets.set(offsets.get() + [sentOffset(request)])
-                return offsetGap()
-            case patchMemoOperation:
-                patches.set(patches.get() + 1)
-                return Stub.json(Stub.memo(uid: "a"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "gapped",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved)
-        // The session IS asked where it stands: the contract's answer is attempted, not skipped.
-        #expect(heads.get() == 1, "the gap was abandoned without asking the session anything")
-        #expect(offsets.get() == [0], "the same chunk was resent into a gap nobody had resolved")
-        // Whole, not half: no patch, so nothing is attached and the retry the person makes
-        // carries the same edit key (`aRetryAfterAnAbortCannotDoubleApply`).
-        #expect(patches.get() == 0)
-        #expect(store.lastError != nil)
-    }
-
-    /// The resume itself, against a session that CAN answer — the shape the contract describes and
-    /// the one this lane runs on the moment memos-ng sends it. Without this the resume would be
-    /// code nothing exercises.
-    @Test("a session that answers is re-synced, and the upload carries on from where it stands")
-    func offsetGapIsResyncedWhenTheSessionAnswers() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let offsets = LockedValue<[Int]>([])
-        let heads = LockedValue<Int>(0)
-        let patches = LockedValue<Int>(0)
-        let client = Stub.client { request, body, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                heads.set(heads.get() + 1)
-                // The server holds the first four bytes after all — the state the gap was about.
-                return offsetAnswer(4)
-            case appendChunkOperation:
-                let offset = sentOffset(request)
-                offsets.set(offsets.get() + [offset])
-                guard offset != 0 else { return offsetGap() }
-                let data = try await Stub.bytes(body)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: offset + data.count))
-            case patchMemoOperation:
-                patches.set(patches.get() + 1)
-                return Stub.json(Stub.memo(uid: "a"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "gapped",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(saved, "an offset gap abandoned an edit the session had answered")
-        #expect(heads.get() == 1, "the session was never asked where it stands")
-        // 0 was refused; the re-sync said 4; the upload carried on from there to the end.
-        #expect(offsets.get() == [0, 4, 8])
-        // And the memo is patched ONCE, after the last byte landed — a resume that patched per
-        // attempt would attach the file twice over.
-        #expect(patches.get() == 1)
-    }
-
-    /// The other direction, and the dangerous one: a session claiming a position this upload has
-    /// never reached.
-    ///
-    /// Resuming there would send the tail, call the upload whole and patch the memo to an
-    /// attachment with a hole in the middle — bytes nobody ever sent and nobody would notice
-    /// missing. The fence is what the client has actually put on the wire, so a re-sync may land
-    /// anywhere up to the end of the chunk that was refused and nowhere beyond it.
-    @Test("an offset past what was ever sent abandons the edit instead of skipping the bytes")
-    func anOffsetPastWhatWasSentIsRefused() async throws {
-        let file = try stagedFile(bytes: 12)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let offsets = LockedValue<[Int]>([])
-        let patches = LockedValue<Int>(0)
-        let client = Stub.client { request, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                // Four bytes were sent and refused; the session says it holds eight.
-                return offsetAnswer(8)
-            case appendChunkOperation:
-                offsets.set(offsets.get() + [sentOffset(request)])
-                return offsetGap()
-            case patchMemoOperation:
-                patches.set(patches.get() + 1)
-                return Stub.json(Stub.memo(uid: "a"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "skipped",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved)
-        #expect(offsets.get() == [0], "the upload resumed at a position it had never sent")
-        #expect(patches.get() == 0, "a memo was patched over bytes that were never sent")
-        #expect(store.lastError != nil)
-    }
-
-    /// A dead credential is not a conflict, wherever it is met.
-    ///
-    /// The offset ask is the one request on this lane whose failure the loop answers itself, and
-    /// answering a 401 with its own sentence would leave the session running on a token the server
-    /// has already rejected: the refusal has to reach the store carrying what it is
-    /// (`StoreFailure.reportable`).
-    @Test("a rejected credential on the offset ask keeps its identity instead of becoming a 409")
-    func aRefusedOffsetAskKeepsItsIdentity() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                return Stub.empty(.unauthorized)
-            default:
-                return offsetGap()
-            }
-        }
-
-        await #expect(throws: MediaUploadError.refused(.unauthorized)) {
-            try await MediaUpload.upload(file, using: client)
-        }
-    }
-
-    @Test("a gap the server keeps reporting at the same place stops rather than spinning")
-    func aGapThatDoesNotMoveStops() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let chunks = LockedValue<Int>(0)
-        let patches = LockedValue<Int>(0)
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                // The offset it just refused — a server that is not converging. Answered in the
-                // shape the contract describes, so the guard being tested is the one about
-                // PROGRESS rather than the one about a session that cannot be read.
-                return offsetAnswer(0)
-            case appendChunkOperation:
-                chunks.set(chunks.get() + 1)
-                return offsetGap()
-            case patchMemoOperation:
-                patches.set(patches.get() + 1)
-                return Stub.json(Stub.memo(uid: "a"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "stuck",
-            attaching: [file],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved)
-        #expect(chunks.get() == 1, "the same chunk was resent into a gap that had not moved")
-        // And the edit is refused WHOLE: no patch, so nothing is half-applied and the retry the
-        // person makes carries the same edit key.
-        #expect(patches.get() == 0)
-        #expect(store.lastError != nil)
-    }
-
-    /// What makes the abort above safe, and the one property the reviewer's alternative was
-    /// protecting: a failed media edit leaves nothing attached, and the retry cannot apply twice.
-    @Test("an edit abandoned mid-upload attaches nothing, and its retry carries the same key")
-    func aRetryAfterAnAbortCannotDoubleApply() async throws {
-        let file = try stagedFile(bytes: 8)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let store = TimelineStore()
-        let keys = LockedValue<[String]>([])
-        let uploads = LockedValue<Int>(0)
-        let chunkFails = LockedValue<Bool>(true)
-        let client = Stub.client { _, body, operation in
-            switch operation {
-            case startUploadOperation:
-                uploads.set(uploads.get() + 1)
-                return Stub.json(
-                    uploadOut(uid: "u\(uploads.get())", chunkSize: 64, received: 0),
-                    status: .created
-                )
-            case appendChunkOperation:
-                guard !chunkFails.get() else { return Stub.empty(.internalServerError) }
-                let data = try await Stub.bytes(body)
-                return Stub.json(
-                    uploadOut(uid: "u\(uploads.get())", chunkSize: 64, received: data.count)
-                )
-            case patchMemoOperation:
-                keys.set(keys.get() + [(try await Stub.body(body))["edit_key"] as? String ?? ""])
-                return Stub.json(Stub.memo(uid: "a", content: "with a photo"))
-            default:
-                return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-            }
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let first = await store.edit(
-            uid: "a", content: "with a photo", attaching: [file], using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-        #expect(!first)
-        #expect(keys.get().isEmpty, "an edit whose upload failed still patched the memo")
-
-        // The person taps Save again on the sheet that stayed open.
-        chunkFails.set(false)
-        let second = await store.edit(
-            uid: "a", content: "with a photo", attaching: [file], using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(second)
-        // Exactly one patch, and it carries the key the abandoned attempt would have used — so a
-        // third attempt after a lost response replays rather than attaching the file twice.
-        #expect(keys.get().count == 1)
-        #expect(!keys.get()[0].isEmpty)
-        #expect(uploads.get() == 2, "control: the retry really did upload the file again")
-    }
-
-    @Test("a server that names no chunk size gets one, not a loop that sends nothing")
-    func chunkSizeFallback() {
-        #expect(MediaUpload.usableChunkSize(0) == MediaUpload.fallbackChunkSize)
-        #expect(MediaUpload.usableChunkSize(-1) == MediaUpload.fallbackChunkSize)
-        // The control: a size the server DID name is the one used, so the fallback above is a
-        // fallback rather than the only answer.
-        #expect(MediaUpload.usableChunkSize(64) == 64)
-    }
-
-    @Test("a file that cannot be read is reported and nothing is sent")
-    func unreadableFileIsReported() async {
-        let missing = StagedSource(
-            url: FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).jpg"),
-            filename: "gone.jpg",
-            mime: "image/jpeg"
-        )
-        let store = TimelineStore()
-        let requests = Counter()
-        let client = Stub.client { _, _, operation in
-            if operation != listMemosOperation { requests.increment() }
-            return Stub.json(Stub.memoList(["a"], nextCursor: nil))
-        }
-
-        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
-        let saved = await store.edit(
-            uid: "a",
-            content: "no",
-            attaching: [missing],
-            using: client.handle,
-            baseURL: Stub.baseURL
-        ).isSaved
-
-        #expect(!saved)
-        #expect(requests.count == 0)
-        #expect(store.lastError != nil)
-    }
-
-    /// The shape production actually meets on the offset ask, which the bare-token test above
-    /// cannot reach: an INSTALLED credential, so its 401 is minted by `BearerAuthMiddleware` as a
-    /// `CredentialRefusal` carrying the epoch the request presented, inside the generated client's
-    /// envelope — never a `MediaUploadError`.
-    ///
-    /// The expectation is READ OFF the two lanes that already work, in the same setup and with the
-    /// same credential, rather than constructed here: whatever `start` and `append` hand a caller
-    /// for a 401, the offset ask must hand it the same thing. Renamed a 409, the refusal reaches
-    /// no store, the epoch is lost, and the app carries on presenting a token the server is done
-    /// with.
-    @Test("an installed credential refused on the offset ask arrives as the refusal it is")
-    func anInstalledCredentialsOffsetRefusalKeepsItsEpoch() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let credential = PresentedCredential("memos_pat_a")
-        credential.install()
-
-        func failure(of client: any APIProtocol) async -> (any Error)? {
-            do {
-                _ = try await MediaUpload.upload(file, using: client)
-                return nil
-            } catch {
-                return error
-            }
-        }
-
-        let refusedStart = Stub.client(token: credential) { _, _, _ in Stub.empty(.unauthorized) }
-        let byStart = try #require(await failure(of: refusedStart), "the start was not refused")
-        let onStart = try #require(StoreFailure.refusal(byStart))
-
-        let refusedAppend = Stub.client(token: credential) { _, _, operation in
-            operation == startUploadOperation
-                ? Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-                : Stub.empty(.unauthorized)
-        }
-        let byAppend = try #require(await failure(of: refusedAppend), "the chunk was not refused")
-        let onAppend = try #require(StoreFailure.refusal(byAppend))
-
-        let heads = LockedValue<Int>(0)
-        let refusedAsk = Stub.client(token: credential) { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                heads.set(heads.get() + 1)
-                return Stub.empty(.unauthorized)
-            default:
-                return offsetGap()
-            }
-        }
-        let thrownByAsk = try #require(await failure(of: refusedAsk), "the ask was not refused")
-
-        #expect(heads.get() == 1, "control: the session really was asked where it stands")
-        #expect(onStart == onAppend, "control: the two lanes that work disagree with each other")
-        #expect(
-            StoreFailure.refusal(thrownByAsk) == onStart,
-            "the offset ask lost the refusal the start and append lanes keep: \(thrownByAsk)"
-        )
-    }
-
-    /// A session that opens by claiming more of the file than the file has.
-    ///
-    /// Taken at its word the loop never runs — the position is already past the end — and the
-    /// upload reports success over a file of which nothing was ever sent, which the memo patch
-    /// then names.
-    @Test("a start that claims more than the whole file is not taken at its word")
-    func aStartPositionBeyondTheFileAbandonsTheUpload() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let chunks = LockedValue<Int>(0)
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(
-                    uploadOut(uid: "u1", chunkSize: 4, received: 999), status: .created)
-            case appendChunkOperation:
-                chunks.set(chunks.get() + 1)
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 4))
-            default:
-                return offsetGap()
-            }
-        }
-
-        await #expect(throws: MediaUploadError.stalled) {
-            try await MediaUpload.upload(file, using: client)
-        }
-        #expect(chunks.get() == 0, "control: nothing was sent from a position past the file")
-    }
-
-    /// The same number one step later: a chunk answered with more bytes than that chunk carried.
-    ///
-    /// Four went out and the session says it holds ninety-nine. Adopted, that ends the loop with
-    /// most of the file never sent and the upload called whole.
-    @Test("a chunk answered with more bytes than were sent abandons the upload")
-    func anAppendAnswerBeyondWhatWasSentAbandonsTheUpload() async throws {
-        let file = try stagedFile(bytes: 12)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case appendChunkOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 99))
-            default:
-                return offsetGap()
-            }
-        }
-
-        await #expect(throws: MediaUploadError.stalled) {
-            try await MediaUpload.upload(file, using: client)
-        }
+/// The outbox's network: a server error for anything it tries.
+private struct EditUnsent: OutboxHTTPPerforming {
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        OutboxHTTPResponse(statusCode: 500)
     }
 }
 
-/// The positions whose cost is not a failed upload but a dead process.
-///
-/// `Upload-Offset` and `bytes_received` are plain `integer` in the contract, with no minimum, and
-/// the loop feeds the position it adopts to `FileHandle.seek(toOffset:)` — a `UInt64`. A negative
-/// one TRAPS: the editor dies with the words somebody was in the middle of writing. Kept in their
-/// own suite because a trap is a crash rather than a failed expectation, so each is meant to be
-/// run on its own where the crash can be attributed.
-@MainActor
-@Suite("Upload positions that would take the app down")
-struct UploadPositionTrapTests {
-    @Test("a session answering the offset ask with a negative position is not resumed from")
-    func aNegativeSyncedOffsetAbandonsTheUpload() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
+/// No background transfers.
+private struct EditNoChunks: OutboxChunkScheduling {
+    func inFlight() async -> [OutboxTaskIdentity] { [] }
+    func upload(
+        _ request: URLRequest, fromFile file: URL, identity: OutboxTaskIdentity,
+        under authority: SendAuthority, issuedUnder epoch: Int
+    ) async {}
+    func cancel(_ identities: [OutboxTaskIdentity]) async {}
+    func cancelEveryTask() async {}
+}
 
-        let client = Stub.client { _, _, operation in
-            switch operation {
-            case startUploadOperation:
-                return Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: 0), status: .created)
-            case uploadOffsetOperation:
-                return offsetAnswer(-1)
-            default:
-                return offsetGap()
-            }
-        }
-
-        await #expect(throws: MediaUploadError.stalled) {
-            try await MediaUpload.upload(file, using: client)
-        }
+/// A usable path, never changing.
+private struct EditPath: NetworkPathProviding {
+    func currentPath() -> NetworkPath {
+        NetworkPath(usesCellular: false, isExpensive: false, isConstrained: false)
     }
-
-    @Test("a start reporting a negative position is not resumed from")
-    func aNegativeStartPositionAbandonsTheUpload() async throws {
-        let file = try stagedFile(bytes: 10)
-        defer { try? FileManager.default.removeItem(at: file.url) }
-
-        let client = Stub.client { _, _, operation in
-            operation == startUploadOperation
-                ? Stub.json(uploadOut(uid: "u1", chunkSize: 4, received: -1), status: .created)
-                : offsetGap()
-        }
-
-        await #expect(throws: MediaUploadError.stalled) {
-            try await MediaUpload.upload(file, using: client)
-        }
-    }
+    func onPathChange(_ handler: @escaping OutboxTrigger) {}
 }

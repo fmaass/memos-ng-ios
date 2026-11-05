@@ -779,7 +779,7 @@ public struct TimelineView: View {
             // A change that became a widening while it queued comes back as its question, and is
             // asked like any widening (MEMNG-981).
             let outcome = await timeline.setVisibility(
-                change, uid: uid, using: handle, baseURL: baseURL)
+                change, uid: uid, through: outbox, using: handle, baseURL: baseURL)
             widening.heard(outcome, on: uid)
         }
     }
@@ -945,12 +945,17 @@ public struct TimelineView: View {
                 createdAt: MemoDetailPresentation.editedDate(
                     chosen: submission.createdAt, original: createdAt
                 ),
-                // Files added to an EXISTING memo go up in the FOREGROUND: the outbox above owns
-                // new captures, and an edit that failed is answered honestly on the sheet that is
-                // still open rather than queued (outbox-backed edits are MEMNG-124's line).
+                // Files added to an EXISTING memo make the edit an outbox job (MEMNG-954): the
+                // sheet closes once it is written, and the queue sends it under its own edit key.
                 attaching: submission.attachments.map(\.stagedSource),
                 listing: submission.pictures,
                 visibility: submission.visibilityChange,
+                through: outbox,
+                // The account the save was made under, read beside the handle: the edit job is
+                // bound to it, as a new capture is (`composed?.account`).
+                composedUnder: session.snapshotIdentity.map {
+                    AccountBinding(serverBaseURL: $0.server, ownerSubject: $0.subject)
+                },
                 using: handle,
                 baseURL: baseURL
             )

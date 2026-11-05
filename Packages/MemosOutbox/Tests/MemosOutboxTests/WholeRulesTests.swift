@@ -174,7 +174,7 @@ struct WholePlannerTests {
     func closedGate(_ situation: ClosedGateCase) {
         let action = next(situation.job, open: false)
         switch action {
-        case .createMemo, .wait:
+        case .createMemo, .patchMemo, .wait:
             break
         case .hold, .upload, .resume:
             Issue.record("a closed gate answered \(action) for \(situation)")
