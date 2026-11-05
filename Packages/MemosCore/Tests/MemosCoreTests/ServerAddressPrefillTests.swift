@@ -98,6 +98,26 @@ struct ServerAddressPrefillTests {
         #expect(session.suggestedServerAddress == "memos.example.invalid")
     }
 
+    /// The sign-in screen is already showing the remembered server when the launch read returns
+    /// another one: the suggestion has to move to the vault's server, refused or not, because the
+    /// field follows it until somebody types.
+    @Test("a launch that restores another stored server, then refuses it, suggests that server")
+    func refusedRestoreOverRememberedServer() async throws {
+        let memory = ServerAddressMemory()
+        memory.remember(try #require(ServerConfiguration(serverAddress: "other.example.invalid")))
+        let credentials = storedAccount()
+        let session = session(credentials: credentials, memory: memory) { _, _, _ in
+            Stub.empty(.unauthorized)
+        }
+        #expect(session.suggestedServerAddress == "other.example.invalid", "control: A on appear")
+
+        await session.restore()
+
+        #expect(session.state == .signedOut, "control: the refusal ended the session")
+        #expect(credentials.isEmpty, "control: the refusal emptied the vault")
+        #expect(session.suggestedServerAddress == "memos.example.invalid")
+    }
+
     @Test("a sign-in the server refused remembers nothing")
     func refusedSignInRemembersNothing() async {
         let memory = ServerAddressMemory()

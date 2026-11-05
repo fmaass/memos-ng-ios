@@ -23,6 +23,9 @@ public struct SignInView: View {
     @Environment(GuestSessionStore.self) private var guest: GuestSessionStore?
     @State private var joiningTrip = false
     @State private var serverAddress = ""
+    /// Set by a person typing into either server field, never cleared: from then on the field is
+    /// theirs, and no later suggestion writes over it.
+    @State private var serverAddressEdited = false
     @State private var token = ""
     @State private var showAdvanced = false
     @State private var showLicenses = false
@@ -75,17 +78,20 @@ public struct SignInView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .tint(DesignTokens.accent)
-        // Only into an empty field: a screen that comes back while somebody is typing keeps what
-        // they typed.
-        .onAppear {
-            if serverAddress.isEmpty { serverAddress = session.suggestedServerAddress }
+        // On EVERY change of the suggestion, not only on appearance: this view stays on screen
+        // across `.signedOut` and `.signingIn`, so the launch restore resolving underneath it
+        // (another stored server, an empty memory filled) has to reach the field too.
+        .onChange(of: session.suggestedServerAddress, initial: true) { _, suggestion in
+            serverAddress = SignInPrefill.field(
+                serverAddress, suggestion: suggestion, edited: serverAddressEdited
+            )
         }
         .sheet(isPresented: $showLicenses) {
             LicensesSheet(packages: OpenSourceLicenses.bundled)
         }
         .sheet(isPresented: $showAdvanced) {
             AdvancedSignInSheet(
-                serverAddress: $serverAddress,
+                serverAddress: typedServerAddress,
                 token: $token,
                 isSigningIn: isSigningIn
             ) {
@@ -121,8 +127,20 @@ public struct SignInView: View {
         UIApplication.shared.open(url)
     }
 
+    /// The binding both server fields type through. Only a person's typing comes this way; the
+    /// suggestion writes the state directly, so it never marks the field as edited.
+    private var typedServerAddress: Binding<String> {
+        Binding(
+            get: { serverAddress },
+            set: { typed in
+                serverAddress = typed
+                serverAddressEdited = true
+            }
+        )
+    }
+
     private var serverField: some View {
-        TextField("memos.example.com", text: $serverAddress)
+        TextField("memos.example.com", text: typedServerAddress)
             .textContentType(.URL)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
@@ -270,5 +288,13 @@ struct AdvancedSignInSheet: View {
         }
         .tint(DesignTokens.accent)
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// What the sign-in field holds when the suggestion moves: the suggestion, until somebody has typed
+/// into the field; after that, what they typed.
+enum SignInPrefill {
+    static func field(_ current: String, suggestion: String, edited: Bool) -> String {
+        edited ? current : suggestion
     }
 }
