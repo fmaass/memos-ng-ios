@@ -1,3 +1,4 @@
+import MemosCore
 import SwiftUI
 
 /// What the phone should say with its Taptic Engine about something that just happened.
@@ -49,6 +50,19 @@ extension MemoAct {
     }
 
     public var feedback: SensoryFeedback { kind.feedback }
+}
+
+extension MemoAct {
+    /// The act a save's answer is felt as, or nil for none. A question (`.ask`) is not a failure:
+    /// nothing went, the sheet asks it as it asks any widening, and an error buzz under that
+    /// question would say the opposite (MEMNG-1033).
+    public static func of(_ outcome: ComposeOutcome) -> MemoAct? {
+        switch outcome {
+        case .saved: .posted
+        case .failed: .postFailed
+        case .ask: nil
+        }
+    }
 }
 
 extension FeedbackKind {

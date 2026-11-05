@@ -142,6 +142,29 @@ struct WideningAskTests {
         #expect(store.memos.first?.visibility == .public)
     }
 
+    @Test("a yes from a dismissed presentation does not answer the same question asked again")
+    func staleYesAnswersNothing() async throws {
+        let server = AudienceServer(start: "PRIVATE")
+        let store = await Self.loaded(server)
+        var ask = WideningAsk()
+        #expect(ask.pick(.public, from: .private, on: "m1") == .asking)
+        let dismissed = try #require(ask.pending)
+        #expect(ask.answer(dismissed, confirmed: false) == nil, "control: dismissal sends nothing")
+        // The same memo's store answer puts the identical question up again (MEMNG-1033).
+        let question = dismissed.question
+        ask.heard(.ask(question), on: "m1")
+        let shown = try #require(ask.pending)
+        // The dismissed alert's yes arrives late: it is not an answer to the one now up.
+        let stale = ask.answer(dismissed, confirmed: true)
+        #expect(stale == nil, "a dismissed presentation's yes answered the question re-asked")
+        #expect(ask.pending == shown, "a stale yes took the question on screen down")
+        let yes = ask.answer(shown, confirmed: true)
+        await Self.act(on: stale, &ask, in: store, server: server)
+        await Self.act(on: yes, &ask, in: store, server: server)
+        #expect(yes == WideningAsk.Send(uid: "m1", change: question.confirmed()))
+        #expect(server.visibilities == ["PUBLIC"], "the yes went \(server.visibilities.count)×")
+    }
+
     @Test("a change that became a widening while it queued is asked again; its yes is one PATCH")
     func queuedWideningIsReasked() async throws {
         let server = AudienceServer(start: "PUBLIC")

@@ -366,7 +366,7 @@ public struct MemoDetailView: View {
             using: handle,
             baseURL: baseURL
         )
-        feedback.fire(outcome.isSaved ? .posted : .postFailed)
+        if let act = MemoAct.of(outcome) { feedback.fire(act) }
         return outcome
     }
 

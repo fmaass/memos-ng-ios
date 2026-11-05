@@ -955,7 +955,7 @@ public struct TimelineView: View {
                 baseURL: baseURL
             )
         }
-        feedback.fire(outcome.isSaved ? .posted : .postFailed)
+        if let act = MemoAct.of(outcome) { feedback.fire(act) }
         return outcome
     }
 

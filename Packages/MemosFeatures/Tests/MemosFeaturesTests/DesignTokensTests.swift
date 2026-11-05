@@ -1,4 +1,5 @@
 import Foundation
+import MemosCore
 import SwiftUI
 import Testing
 import UIKit
@@ -117,6 +118,24 @@ struct HapticSignalTests {
         for act in MemoAct.allCases {
             #expect(FeedbackKind.allCases.contains(act.kind))
         }
+    }
+
+    @Test("a save's answer feels like what it was: saved success, failed error, a question nothing")
+    func outcomeFeel() {
+        #expect(MemoAct.of(.saved) == .posted)
+        let failures: [ComposeFailure] = [
+            .transport(sent: true), .transport(sent: false), .authorization, .storage, .rejection,
+            .serverFailure,
+        ]
+        for failure in failures {
+            #expect(MemoAct.of(.failed(failure)) == .postFailed, "\(failure)")
+        }
+        // A question is not a failure: the sheet asks it, and nothing went (MEMNG-1033).
+        guard case .ask(let question) = VisibilityChange.propose(.protected, from: .private) else {
+            Issue.record("Private → Just us did not ask")
+            return
+        }
+        #expect(MemoAct.of(.ask(question)) == nil, "a widening question played a feel")
     }
 
     @Test("the same act twice is two events")

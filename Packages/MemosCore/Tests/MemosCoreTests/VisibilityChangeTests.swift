@@ -25,6 +25,23 @@ private final class PatchLog: @unchecked Sendable {
     var all: [[String: Any]] { lock.withLock { bodies } }
 }
 
+/// The ways a server says a PATCH left the memo as it was (MEMNG-1033): two refusals the catch
+/// classifies, and the keyed-edit race the 503 branch retires itself.
+enum DefiniteNothing: String, CaseIterable, Sendable {
+    case notFound, invalid, raced
+
+    var answer: (HTTPResponse, HTTPBody?) {
+        switch self {
+        case .notFound: Stub.detail("Memo not found", status: .notFound)
+        case .invalid: Stub.validationError("visibility")
+        case .raced:
+            Stub.json(
+                #"{"detail":{"code":"edit_raced","message":"raced"}}"#,
+                status: .serviceUnavailable)
+        }
+    }
+}
+
 /// MEMNG-969: narrowing goes on Save, widening asks once, an untouched audience is not restated,
 /// and the rule lives in `VisibilityChange` for every store that sends one.
 @MainActor
@@ -356,6 +373,195 @@ struct VisibilityChangeTests {
             createdAt: ISO8601DateFormatter().date(from: "2026-08-23T09:00:00Z")!,
             updatedAt: ISO8601DateFormatter().date(from: updatedAt)!
         )
+    }
+
+    // MARK: - the record of what was sent (MEMNG-1033)
+
+    @Test(
+        "a change the server refused is not what the memo was sent: the next narrowing goes",
+        arguments: DefiniteNothing.allCases)
+    func refusedChangeIsNotRecorded(_ refusal: DefiniteNothing) async throws {
+        let log = PatchLog()
+        // "a" is outside the loaded list, so nothing but the record can stand for its audience.
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.page([Stub.memo(uid: "b", visibility: "PUBLIC")]))
+            }
+            let sent = Stub.object(try await Stub.bytes(body))
+            log.record(sent)
+            if sent["visibility"] as? String == "PRIVATE" { return refusal.answer }
+            return Stub.json(Stub.memo(uid: "a", visibility: "PROTECTED"))
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let refused = await store.setVisibility(
+            .cleared(.private, from: .public), uid: "a", using: client.handle,
+            baseURL: Stub.baseURL)
+        #expect(refused.failure != nil, "control: the server refused the first change")
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let outcome = await store.setVisibility(
+            toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        #expect(outcome.isSaved, "a refused Private was judged as the memo's audience: \(outcome)")
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE", "PROTECTED"])
+    }
+
+    @Test("an unconfirmed narrowing after a LOST change is judged over what may have landed")
+    func lostChangeKeepsTheNarrowerAudience() async throws {
+        let log = PatchLog()
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                // Every read still says Public: the server's answer to the first change never came.
+                return Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+            }
+            let sent = Stub.object(try await Stub.bytes(body))
+            log.record(sent)
+            if sent["visibility"] as? String == "PRIVATE" { throw URLError(.networkConnectionLost) }
+            return Stub.json(Stub.memo(uid: "a", visibility: "PROTECTED"))
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let lost = await store.setVisibility(
+            .cleared(.private, from: .public), uid: "a", using: client.handle,
+            baseURL: Stub.baseURL)
+        #expect(!lost.isSaved, "control: the first change's answer was lost")
+        #expect(store.memos.first?.visibility == .public, "control: the row kept its old audience")
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let outcome = await store.setVisibility(
+            toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        // The server may hold Private, and Private → Just us widens.
+        #expect(outcome == .ask(VisibilityChange.Question(from: .private, to: .protected)))
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE"])
+
+        // A read issued after the loss is the server's word: Public, so the narrowing goes.
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let settled = await store.setVisibility(
+            toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        #expect(settled.isSaved, "a fresh read did not settle the lost change: \(settled)")
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE", "PROTECTED"])
+    }
+
+    @Test("a read that left while a lost change was in line does not settle it")
+    func readIssuedDuringLostChangeDoesNotSettle() async throws {
+        let releasePatch = LockedValue<Bool>(false)
+        let holdReads = LockedValue<Bool>(false)
+        let releaseRead = LockedValue<Bool>(false)
+        let reads = LockedValue<Int>(0)
+        let log = PatchLog()
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                // Every read says Public: the held one was answered before the change was applied.
+                reads.set(reads.get() + 1)
+                if holdReads.get() { try await held(until: releaseRead) }
+                return Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+            }
+            let sent = Stub.object(try await Stub.bytes(body))
+            log.record(sent)
+            if sent["visibility"] as? String == "PRIVATE" {
+                try await held(until: releasePatch)
+                throw URLError(.networkConnectionLost)
+            }
+            return Stub.json(Stub.memo(uid: "a", visibility: "PROTECTED"))
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let lost = Task {
+            await store.setVisibility(
+                .cleared(.private, from: .public), uid: "a", using: client.handle,
+                baseURL: Stub.baseURL)
+        }
+        while log.all.isEmpty { await Task.yield() }
+        holdReads.set(true)
+        let early = Task { await store.refresh(using: client.handle, baseURL: Stub.baseURL) }
+        while reads.get() < 2 { await Task.yield() }
+        releasePatch.set(true)
+        let lostAnswer = await lost.value
+        #expect(!lostAnswer.isSaved, "control: the change's answer was lost")
+        holdReads.set(false)
+        releaseRead.set(true)
+        await early.value
+        #expect(store.memos.first?.visibility == .public, "control: the early read was applied")
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let outcome = await store.setVisibility(
+            toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        #expect(
+            outcome == .ask(VisibilityChange.Question(from: .private, to: .protected)),
+            "a read older than the loss settled it: \(outcome)")
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE"])
+
+        // Companion: a read that left AFTER the loss is the server's word, and settles it.
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        let settled = await store.setVisibility(
+            toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        #expect(settled.isSaved, "a read issued after the loss did not settle it: \(settled)")
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE", "PROTECTED"])
+    }
+
+    @Test("a yes queued behind the same unconfirmed change is its own change, not a join")
+    func confirmedDoesNotJoinUnconfirmed() async throws {
+        let release = LockedValue<Bool>(false)
+        let log = PatchLog()
+        let client = Stub.client { _, body, operation in
+            guard operation == patchMemoOperation else {
+                return Stub.json(Stub.page([Stub.memo(uid: "a", visibility: "PUBLIC")]))
+            }
+            let sent = Stub.object(try await Stub.bytes(body))
+            log.record(sent)
+            try await held(until: release)
+            return Stub.json(
+                Stub.memo(uid: "a", visibility: sent["visibility"] as? String ?? "PUBLIC"))
+        }
+        let store = TimelineStore()
+        await store.refresh(using: client.handle, baseURL: Stub.baseURL)
+        guard case .ready(let toUs) = VisibilityChange.propose(.protected, from: .public) else {
+            Issue.record("Public → Just us asked")
+            return
+        }
+        let yes = VisibilityChange.Question(from: .private, to: .protected).confirmed()
+        let first = Task {
+            await store.setVisibility(
+                .cleared(.private, from: .public), uid: "a", using: client.handle,
+                baseURL: Stub.baseURL)
+        }
+        while log.all.isEmpty { await Task.yield() }
+        let unconfirmed = Task {
+            await store.setVisibility(toUs, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        let confirmed = Task {
+            await store.setVisibility(yes, uid: "a", using: client.handle, baseURL: Stub.baseURL)
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+        release.set(true)
+        #expect(await first.value.isSaved, "control: the narrowing landed")
+        let asked = await unconfirmed.value
+        #expect(
+            asked == .ask(VisibilityChange.Question(from: .private, to: .protected)),
+            "control: the unconfirmed change became a widening and was asked")
+        let answer = await confirmed.value
+        #expect(answer.isSaved, "the yes inherited the unconfirmed change's question: \(answer)")
+        #expect(log.all.map { $0["visibility"] as? String } == ["PRIVATE", "PROTECTED"])
+        #expect(store.memos.first?.visibility == .protected)
+    }
+
+    @Test("the narrower of two audiences, for every pair")
+    func narrowerOfEveryPair() {
+        let order: [MemoVisibility] = [.private, .protected, .public]
+        for (i, a) in order.enumerated() {
+            for (j, b) in order.enumerated() {
+                #expect(
+                    VisibilityChange.narrower(a, b) == order[min(i, j)],
+                    "narrower(\(a), \(b))")
+            }
+        }
     }
 
     // MARK: - the batch

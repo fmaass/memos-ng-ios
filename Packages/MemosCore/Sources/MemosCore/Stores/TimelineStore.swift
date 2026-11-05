@@ -287,6 +287,7 @@ public final class TimelineStore {
         // themselves on arrival; their places are not the incoming identity's to wait behind.
         mutations.removeAll()
         sentVisibility.removeAll()
+        unsettledVisibility.removeAll()
         // And so do the fences and the debts they left: they hold one account's rows against one
         // account's reads, and there are no rows left here to hold. The sequence itself is a
         // counter like `mutationClaim` and is never reset — a stamp from the line that has gone
@@ -1311,7 +1312,9 @@ public final class TimelineStore {
     private enum MemoMutationIdentity: Equatable {
         case edit(MemoEditAttempt)
         case delete
-        case visibility(MemoVisibility)
+        /// The yes is part of it: a confirmed change queued behind an identical unconfirmed one is
+        /// the answer to that one's question, and joining it would hand the question back.
+        case visibility(MemoVisibility, confirmed: Bool)
         case archived(Bool)
         case pinned(Bool)
         case task(index: Int)
@@ -1407,8 +1410,16 @@ public final class TimelineStore {
     /// fenced read is the opposite case and retires nothing: it was asked before the delete
     /// landed, and a state the delete left must not be resurrectable by an answer that outlived
     /// it. `fenced` stays a pure question; this is the one place the answer is acted on.
-    private func serverStillHolds(_ uid: String) {
-        confirmedDeletions.remove(uid)
+    private func serverStillHolds(_ memo: Memo, issuedAt issued: Int) {
+        confirmedDeletions.remove(memo.uid)
+        // Its audience as well — but not past a mutation still in line for the memo, which may yet
+        // move it: that one's own answer is the word that settles the record (`patchAnswer`). Nor
+        // from a read that left before a lost answer was recorded: unfenced as it is, it may have
+        // been answered before the server applied the change whose answer was lost.
+        guard fences[memo.uid]?.claims.isEmpty ?? true,
+            issued >= unsettledVisibility[memo.uid] ?? 0
+        else { return }
+        recordServerAudience(memo)
     }
 
     /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
@@ -1505,7 +1516,12 @@ public final class TimelineStore {
     /// — the request left and no answer vouches for what became of it — leaves the row unknown, and
     /// a read issued before it cannot be the thing that decides.
     private func mutationFailed(_ claim: Int, on uid: String, with error: any Error) {
-        switch MemoMutationEffect.of(error) {
+        mutationEnded(claim, on: uid, MemoMutationEffect.of(error))
+    }
+
+    /// `mutationFailed` for a caller that has already read the error once and acts on it twice.
+    private func mutationEnded(_ claim: Int, on uid: String, _ effect: MemoMutationEffect) {
+        switch effect {
         case .changedNothing: mutationChangedNothing(claim, on: uid)
         case .outcomeUnknown: mutationOutcomeUnknown(claim, on: uid)
         }
@@ -1616,7 +1632,8 @@ public final class TimelineStore {
         using handle: SessionHandle,
         baseURL: URL
     ) async -> MemoMutationAnswer {
-        await claimMutation(.visibility(change.to), on: uid) { [self] claim in
+        let identity = MemoMutationIdentity.visibility(change.to, confirmed: change.confirmed)
+        return await claimMutation(identity, on: uid) { [self] claim in
             if let question = visibilityReask(change, on: uid) {
                 mutationChangedNothing(claim, on: uid)
                 return MemoMutationAnswer(.ask(question))
@@ -1633,19 +1650,67 @@ public final class TimelineStore {
     /// archive between two changes takes the row away, and the change behind it must not then be
     /// judged against the audience it was proposed over (MEMNG-981). An absent row with nothing
     /// sent is not "unknown": a narrowing from a memo outside the loaded list goes as it is.
+    ///
+    /// While the memo's last visibility PATCH is unanswered (`unsettledVisibility`) the row is what
+    /// the memo was before it and the record what it asked for, and the server may hold either: the
+    /// change is judged over the narrower of the two, so it is asked whenever it widens from either
+    /// (MEMNG-1033).
     private func visibilityReask(_ change: VisibilityChange?, on uid: String)
         -> VisibilityChange.Question?
     {
         guard let change else { return nil }
-        let current = memos.first { $0.uid == uid }?.visibility ?? sentVisibility[uid]
-        return change.reask(over: current)
+        let row = memos.first { $0.uid == uid }?.visibility
+        let sent = sentVisibility[uid]
+        if unsettledVisibility[uid] != nil, let row, let sent {
+            return change.reask(over: VisibilityChange.narrower(row, sent))
+        }
+        return change.reask(over: row ?? sent)
     }
 
     /// The audience each memo was last asked to have by a request this store SENT, written the
-    /// moment the PATCH goes (`patchAnswer`), whatever its answer turns out to be: a request that
-    /// went may have been applied, so it is the memo's last known audience until a row says
-    /// otherwise. One account's memos, so it goes with the identity (`sessionIdentityChanged`).
+    /// moment the PATCH goes (`patchAnswer`): a request that went may have been applied, so it is
+    /// the memo's last known audience until the server says otherwise. It says so three ways
+    /// (MEMNG-1033): a refusal of that request puts back what was recorded before it, and its
+    /// confirmation, or a read no mutation of the memo was in line for, replaces the entry with the
+    /// server's own word — a change made on the web or by another store included. One account's
+    /// memos, so it goes with the identity (`sessionIdentityChanged`).
     private var sentVisibility: [String: MemoVisibility] = [:]
+
+    /// The memos whose last PATCH naming an audience went and was never answered, so the server
+    /// may hold either the row's audience or the one sent (`visibilityReask`). Cleared by the next
+    /// statement of the server's about the memo (`recordServerAudience`); a refusal of a LATER
+    /// request says nothing about what became of this one, so it clears nothing.
+    ///
+    /// Each holds the sequence stamp taken the moment the loss was recorded. The fence alone cannot
+    /// tell a read issued after the loss from one issued while the request was in line — both are
+    /// unfenced once its claim is gone — and only the first can say what became of it.
+    private var unsettledVisibility: [String: Int] = [:]
+
+    /// What `sentVisibility` held for a memo before a PATCH naming its audience overwrote it.
+    private struct PriorRecord {
+        let visibility: MemoVisibility?
+    }
+
+    /// What one PATCH's end says about the record it wrote. Only while its claim is still in line:
+    /// an identity change empties both the claims and the record, and putting the outgoing
+    /// identity's entry back would resurrect it under the incoming one.
+    private func settleRecord(
+        _ prior: PriorRecord?, of claim: Int, on uid: String, _ effect: MemoMutationEffect
+    ) {
+        guard let prior, fences[uid]?.claims[claim] != nil else { return }
+        switch effect {
+        case .changedNothing: sentVisibility[uid] = prior.visibility
+        case .outcomeUnknown: unsettledVisibility[uid] = nextMutationSequence()
+        }
+    }
+
+    /// The server's own word about a memo's audience. An entry only where one exists: an absent
+    /// entry already lets the asking screen's `from` stand, and a read of every page would
+    /// otherwise copy the whole list in here.
+    private func recordServerAudience(_ memo: Memo) {
+        if sentVisibility[memo.uid] != nil { sentVisibility[memo.uid] = memo.visibility }
+        unsettledVisibility[memo.uid] = nil
+    }
 
     /// Archives a memo, or takes it back out of the archive.
     ///
@@ -2016,7 +2081,7 @@ public final class TimelineStore {
     ) -> [Memo] {
         page.compactMap { memo in
             guard fenced(memo.uid, issuedAt: issued) else {
-                serverStillHolds(memo.uid)
+                serverStillHolds(memo, issuedAt: issued)
                 return memo
             }
             guard let loaded = memos.first(where: { $0.uid == memo.uid }) else { return nil }
@@ -2046,7 +2111,7 @@ public final class TimelineStore {
         baseURL: URL
     ) -> Memo? {
         guard fenced(merged.uid, issuedAt: issued) else {
-            serverStillHolds(merged.uid)
+            serverStillHolds(merged, issuedAt: issued)
             return merged
         }
         guard let loaded = memos.first(where: { $0.uid == merged.uid }) else { return nil }
@@ -2314,7 +2379,7 @@ public final class TimelineStore {
                 // a FENCED read with no loaded row lands, and that read is too old to say the
                 // memo exists.
                 if !heldBack {
-                    serverStillHolds(memo.uid)
+                    serverStillHolds(memo, issuedAt: issued)
                 }
                 await apply(memo, under: authority)
                 // AGAIN, after the apply: it awaits its way to the disk, and the memo below is
@@ -2775,6 +2840,7 @@ public final class TimelineStore {
         // The authority any picture this operation takes is stamped with, read ONCE here —
         // see `issuedAuthority()`.
         let authority = issuedAuthority()
+        let prior = body.visibility.map { _ in PriorRecord(visibility: sentVisibility[uid]) }
         if let visibility = body.visibility { sentVisibility[uid] = MemoVisibility(visibility) }
         do {
             let response = try await client.patchMemoApiMemosUidPatch(
@@ -2796,6 +2862,7 @@ public final class TimelineStore {
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 let answered = Memo(try ok.body.json, baseURL: baseURL)
+                recordServerAudience(answered)
                 await apply(answered, under: authority, confirming: claim)
                 return MemoMutationAnswer(.saved, memo: answered)
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
@@ -2819,6 +2886,7 @@ public final class TimelineStore {
                 // Read here rather than from the thrown value: this is the ONE 503 the contract
                 // says left nothing behind, and a 503 arriving any other way says no such thing.
                 // The claim goes now, which makes the classifier below a no-op for it.
+                settleRecord(prior, of: claim, on: uid, .changedNothing)
                 mutationChangedNothing(claim, on: uid)
                 throw APIError.server(status: 503)
             case .unprocessableContent:
@@ -2827,7 +2895,11 @@ public final class TimelineStore {
                 throw APIError.fromStatus(statusCode)
             }
         } catch {
-            mutationFailed(claim, on: uid, with: error)
+            let effect = MemoMutationEffect.of(error)
+            // Before the claim goes, which is what tells this request's record from one an identity
+            // change has already taken — and a no-op after the 503 above, which settled its own.
+            settleRecord(prior, of: claim, on: uid, effect)
+            mutationEnded(claim, on: uid, effect)
             await report(error, issuedUnder: handle)
             return MemoMutationAnswer(.failed(ComposeFailure.classify(error, sent: true)))
         }

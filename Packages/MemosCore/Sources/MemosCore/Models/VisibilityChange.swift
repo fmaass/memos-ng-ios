@@ -84,6 +84,13 @@ public struct VisibilityChange: Hashable, Sendable {
         return breadth(to) > breadth(from)
     }
 
+    /// The audience of the two that reaches fewer people: where a memo may stand when the store
+    /// cannot tell which of two it holds, so that a change widening from either is asked
+    /// (MEMNG-1033).
+    static func narrower(_ a: MemoVisibility, _ b: MemoVisibility) -> MemoVisibility {
+        breadth(b) < breadth(a) ? b : a
+    }
+
     /// How many people an audience reaches, as an order.
     private static func breadth(_ visibility: MemoVisibility) -> Int {
         switch visibility {

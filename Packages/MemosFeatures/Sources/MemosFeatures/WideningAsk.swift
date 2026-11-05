@@ -11,10 +11,18 @@ import MemosCore
 /// a copy of the decision to drift.
 struct WideningAsk: Equatable {
     /// A question waiting for its answer, and the memo it is about.
+    ///
+    /// `id` is the presentation: the same question put up again — a dismissal, then the store
+    /// answering that memo with the identical question — is a new one, so a yes still on its way
+    /// from the alert that was dismissed matches nothing (MEMNG-1033).
     struct Pending: Equatable {
+        let id: Int
         let uid: String
         let question: VisibilityChange.Question
     }
+
+    /// The last presentation's id; never reset, so no two presentations share one.
+    private var presented = 0
 
     /// What a pick asks the screen to do next.
     enum Next: Equatable {
@@ -43,7 +51,7 @@ struct WideningAsk: Equatable {
         case .unchanged: return .send(nil)
         case .ready(let change): return .send(change)
         case .ask(let question):
-            pending = Pending(uid: uid, question: question)
+            present(question, on: uid)
             return .asking
         }
     }
@@ -52,7 +60,12 @@ struct WideningAsk: Equatable {
     /// one asked at the pick; anything else leaves this as it was.
     mutating func heard(_ outcome: ComposeOutcome, on uid: String) {
         guard case .ask(let question) = outcome else { return }
-        pending = Pending(uid: uid, question: question)
+        present(question, on: uid)
+    }
+
+    private mutating func present(_ question: VisibilityChange.Question, on uid: String) {
+        presented += 1
+        pending = Pending(id: presented, uid: uid, question: question)
     }
 
     /// The answer to the question `shown`: what to send, or nil when nothing goes.
