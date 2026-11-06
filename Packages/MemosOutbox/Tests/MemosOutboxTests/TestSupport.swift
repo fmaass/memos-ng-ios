@@ -52,9 +52,12 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
         let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
         let entries = (object?["entries"] as? [[String: Any]]) ?? []
         var results: [[String: Any]] = []
+        // The single create's own path, exactly: `deletingLastPathComponent()` would answer
+        // `/api/uploads/`, which no handler's `/api/uploads` matches.
+        let singleURL = URL(string: "/api/uploads", relativeTo: request.url)?.absoluteURL
         for entry in entries {
             var single = request
-            single.url = request.url?.deletingLastPathComponent()
+            single.url = singleURL
             single.httpBody = try JSONSerialization.data(withJSONObject: entry)
             lock.withLock { asks.append(single) }
             let answer = try handler(single)
