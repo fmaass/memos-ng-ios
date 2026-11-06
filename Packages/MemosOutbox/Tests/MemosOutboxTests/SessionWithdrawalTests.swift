@@ -15,12 +15,51 @@ struct SessionWithdrawalTests {
         let engine: OutboxEngine
     }
 
-    private static func compose(_ rig: WholeRig) async throws -> Composed {
+    /// An entry of the withdraw queue as it is written on disk, read and written here by path so
+    /// that what a test asserts about the queue is the file, not an API of the code under test.
+    private struct OwedEntry: Codable, Equatable {
+        var uploadUID: String
+        var binding: AccountBinding
+    }
+
+    private static func queueFile(_ rig: WholeRig) -> URL {
+        rig.root.appending(path: "outbox/session-withdrawals.json")
+    }
+
+    private static func queued(_ rig: WholeRig) throws -> [OwedEntry] {
+        guard let data = try? Data(contentsOf: queueFile(rig)) else { return [] }
+        return try JSONDecoder().decode([OwedEntry].self, from: data)
+    }
+
+    /// A withdraw an earlier Remove queued and the server never answered.
+    private static func owe(_ uid: String, in rig: WholeRig) throws {
+        let entry = OwedEntry(uploadUID: uid, binding: rig.job.binding)
+        try JSONEncoder().encode([entry]).write(to: queueFile(rig), options: .atomic)
+    }
+
+    /// Holds every DELETE in the transport until the test opens the gate.
+    private struct DeleteGate: OutboxHTTPPerforming {
+        let inner: ScriptedHTTP
+        let gate: TestGate
+
+        func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+            -> OutboxHTTPResponse
+        {
+            if request.httpMethod == "DELETE" { await gate.pass() }
+            return try await inner.perform(request, under: authority)
+        }
+    }
+
+    private static func compose(
+        _ rig: WholeRig,
+        repository: OutboxRepository? = nil,
+        http: (any OutboxHTTPPerforming)? = nil
+    ) async throws -> Composed {
         let box = AttemptHandlerBox()
         let outbox = Outbox(
-            repository: rig.repository,
+            repository: repository ?? rig.repository,
             credentials: rig.credentials,
-            http: rig.http,
+            http: http ?? rig.http,
             scheduler: rig.chunks,
             completion: MemoCompletionEndpoint(http: rig.http),
             network: rig.network,
@@ -85,6 +124,12 @@ struct SessionWithdrawalTests {
         #expect(rig.completion.idempotencyKeys.isEmpty, "a removed capture became a memo")
     }
 
+    /// The body is the server's own: its PATCH answers a withdrawn session with
+    /// `HTTPException(409, detail="upload_withdrawn")` (memos-ng v2.14.0 `app/routers/uploads.py`).
+    /// The `UploadWithdrawnError` object body belongs to the finalize route, which this client
+    /// never calls: its finalize is the memo create, and a create naming a withdrawn session
+    /// answers with it as missing, never 409. That create cannot follow a Remove — see
+    /// `refusedRemoveWithdrawsNothing`.
     @Test("A transfer answering 409 upload_withdrawn for a removed capture is terminal")
     func withdrawnAnswerForRemovedCaptureIsTerminal() async throws {
         let rig = try await WholeRig.make(attached: false)
@@ -223,7 +268,7 @@ struct SessionWithdrawalTests {
         #expect(await rig.repository.job(id) == nil)
     }
 
-    @Test("A capture with no session open yet is removed without a DELETE")
+    @Test("A capture with no session open queues nothing, and its Remove sends what is owed")
     func removeWithNoOpenSessionSendsNoDelete() async throws {
         let rig = try await WholeRig.make(attached: false)
         defer { rig.cleanUp() }
@@ -231,20 +276,28 @@ struct SessionWithdrawalTests {
         let composed = try await Self.compose(rig)
         let pending = try await rig.reload()
         #expect(pending.files.allSatisfy { $0.uploadUID == nil }, "the premise: nothing is open")
+        try Self.owe("u-earlier", in: rig)
 
         #expect(await composed.outbox.withdraw(rig.job.id))
         try await settled(composed.engine)
 
-        #expect(Self.deletes(rig).isEmpty)
+        // Exactly the earlier capture's withdraw: none for a session this one never opened.
+        #expect(Self.paths(Self.deletes(rig)) == ["/api/uploads/u-earlier"])
+        #expect(try Self.queued(rig).isEmpty, "an answered withdraw stayed queued")
         #expect(await rig.repository.job(rig.job.id) == nil)
     }
 
+    /// Stands in for the acceptance criterion "a finalize refused as withdrawn is terminal": the
+    /// client's finalize is the memo create, and this proves a create that may be out and a
+    /// withdraw never meet. Remove is refused, and nothing of the capture is queued or sent — not
+    /// then, and not by the next pass, which still sends what an earlier Remove owes.
     @Test("A Remove refused because the create may be out withdraws nothing")
     func refusedRemoveWithdrawsNothing() async throws {
         let rig = try await WholeRig.make(attached: false)
         defer { rig.cleanUp() }
         let composed = try await Self.compose(rig)
         _ = try await Self.halfway(rig, composed)
+        try Self.owe("u-earlier", in: rig)
         // The create — the server's finalize of every session it names — is claimed.
         var claimed = try await rig.reload()
         claimed.state = .creating
@@ -255,6 +308,67 @@ struct SessionWithdrawalTests {
         try await settled(composed.engine)
 
         #expect(Self.deletes(rig).isEmpty, "withdrew a session the create is finalizing")
+        #expect(try Self.queued(rig).map(\.uploadUID) == ["u-earlier"], "queued the claimed one")
         #expect(await rig.repository.job(rig.job.id) != nil)
+
+        await composed.outbox.appBecameActive().value
+        try await settled(composed.engine)
+        #expect(Self.paths(Self.deletes(rig)) == ["/api/uploads/u-earlier"])
+        #expect(try Self.queued(rig).isEmpty)
+    }
+
+    @Test("Remove returns while the DELETE is still suspended in the transport")
+    func removeDoesNotWaitForTheDelete() async throws {
+        let rig = try await WholeRig.make(attached: false)
+        defer { rig.cleanUp() }
+        let gate = TestGate()
+        let composed = try await Self.compose(rig, http: DeleteGate(inner: rig.http, gate: gate))
+        let opened = try await Self.halfway(rig, composed)
+
+        #expect(await composed.outbox.withdraw(rig.job.id))
+        // Remove has answered; the first DELETE is only now held in the transport.
+        try await bounded("a DELETE reaching the transport") { await gate.waitUntilParked() }
+        #expect(Self.deletes(rig).isEmpty, "the DELETE was answered before Remove returned")
+        #expect(!composed.outbox.jobs.contains { $0.id == rig.job.id })
+        #expect(await rig.repository.job(rig.job.id) == nil)
+
+        await gate.open()
+        try await settled(composed.engine)
+        #expect(Set(Self.paths(Self.deletes(rig))) == opened)
+        #expect(try Self.queued(rig).isEmpty)
+    }
+
+    @Test("A withdraw left unanswered survives a relaunch and is sent by the next process")
+    func queuedWithdrawSurvivesARelaunch() async throws {
+        let online = WholeBox(false)
+        let rig = try await WholeRig.make(
+            attached: false,
+            answerDelete: { _ in
+                guard online.value else { throw URLError(.notConnectedToInternet) }
+                return OutboxHTTPResponse(statusCode: 204)
+            }
+        )
+        defer { rig.cleanUp() }
+        let composed = try await Self.compose(rig)
+        let opened = try await Self.halfway(rig, composed)
+        #expect(await composed.outbox.withdraw(rig.job.id))
+        try await settled(composed.engine)
+        let offline = Self.deletes(rig).count
+        #expect(Set(try Self.queued(rig).map { "/api/uploads/\($0.uploadUID)" }) == opened)
+
+        // A new process: a repository and a facade read back from the same directory.
+        online.value = true
+        let reopened = try OutboxRepository(
+            root: rig.root.appending(path: "outbox"),
+            stillCurrent: { rig.credentials.stillCurrent(epoch: $0) }
+        )
+        let relaunched = try await Self.compose(rig, repository: reopened)
+        try await settled(relaunched.engine)
+
+        let retried = Self.paths(Array(Self.deletes(rig).dropFirst(offline)))
+        #expect(Set(retried) == opened, "the queued withdraw did not survive the relaunch")
+        #expect(retried.count == opened.count)
+        #expect(try Self.queued(rig).isEmpty)
+        #expect(await reopened.job(rig.job.id) == nil, "the relaunch resurrected the capture")
     }
 }
