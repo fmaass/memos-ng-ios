@@ -531,7 +531,8 @@ public final class SessionStore {
             serverBaseURL: configuration.baseURL,
             token: presented.token,
             epoch: epoch.current,
-            uploadLimit: uploadLimits?.maxBytes
+            uploadLimit: uploadLimits?.maxBytes,
+            uploadAdmission: uploadLimits?.bodiesPerUser
         )
     }
 

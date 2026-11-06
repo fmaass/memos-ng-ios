@@ -238,6 +238,12 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// exact bytes, so nothing is PATCHed and the file is named in no completion. Never set on the
     /// member lane. Optional and last, so an older manifest decodes.
     public var alreadyReceived: Bool?
+    /// Set when the server refused to open a session for this file alone, inside a batch whose
+    /// other entries it accepted (MEMNG-958): the file waits for a person, and its siblings carry
+    /// on. The capture itself holds — for this reason — once nothing but such files is left to
+    /// send. Cleared when a person releases the capture. Optional and last, so an older manifest
+    /// decodes and reads as "not refused".
+    public var heldReason: HoldReason?
 
     public init(
         id: UUID = UUID(),
@@ -256,7 +262,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         attemptCount: Int? = nil,
         freshSessions: Int? = nil,
         conflictResync: Bool? = nil,
-        alreadyReceived: Bool? = nil
+        alreadyReceived: Bool? = nil,
+        heldReason: HoldReason? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -275,6 +282,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.freshSessions = freshSessions
         self.conflictResync = conflictResync
         self.alreadyReceived = alreadyReceived
+        self.heldReason = heldReason
     }
 
     public var isComplete: Bool {

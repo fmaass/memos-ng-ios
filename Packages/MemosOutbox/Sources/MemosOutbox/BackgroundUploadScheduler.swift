@@ -428,7 +428,7 @@ public actor BackgroundUploadScheduler {
         // successor alike — so the barrier is asked here, synchronously, beside the authority.
         guard unreadableLive.allSatisfy({ delegate.terminations.hasEnded($0) }) else { return nil }
         live = live.filter { !delegate.terminations.hasEnded($0) }
-        guard live.count < UploadBudget.inFlightUploads else { return nil }
+        guard live.count < UploadBudget.maxInFlightUploads else { return nil }
         guard authority.holds() else { return nil }
         let identity = WholeTaskIdentity(
             jobID: ref.jobID, fileID: ref.fileID, attempt: attempt, launch: launch, epoch: epoch

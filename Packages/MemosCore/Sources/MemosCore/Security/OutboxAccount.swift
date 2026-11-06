@@ -50,7 +50,8 @@ public struct DeviceOutboxCredentials: OutboxCredentialsProviding {
             ownerSubject: grant.subject,
             token: grant.token,
             epoch: grant.epoch,
-            uploadLimit: grant.uploadLimit
+            uploadLimit: grant.uploadLimit,
+            uploadAdmission: grant.uploadAdmission
         )
     }
 

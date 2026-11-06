@@ -56,6 +56,40 @@ public enum OutboxWire {
         }
     }
 
+    /// What opening several upload sessions in one request sends: one `UploadStart` per session,
+    /// 1 to `UploadBudget.maxSessionsPerBatch` of them, in the order the answer comes back in.
+    public struct UploadBatchStart: Encodable, Sendable {
+        public var entries: [UploadStart]
+
+        public init(entries: [UploadStart]) {
+            self.entries = entries
+        }
+    }
+
+    /// What the batch answers with, always as one 200: a result per entry, in request order.
+    public struct UploadBatchAnswer: Decodable, Equatable, Sendable {
+        /// One entry's answer: 201 with the session, or the status the single create would have
+        /// answered for this entry alone — 413 over the size limit, 507 when the volume cannot
+        /// hold it — with the server's reason.
+        public struct Result: Decodable, Equatable, Sendable {
+            public var status: Int
+            public var upload: UploadSession?
+            public var detail: String?
+
+            public init(status: Int, upload: UploadSession? = nil, detail: String? = nil) {
+                self.status = status
+                self.upload = upload
+                self.detail = detail
+            }
+        }
+
+        public var results: [Result]
+
+        public init(results: [Result]) {
+            self.results = results
+        }
+    }
+
     /// What creating the memo sends. `upload_uids` is what links the originals: the server
     /// finalises the pending uploads itself, so there is no separate finalize call from here.
     public struct MemoCreate: Encodable, Sendable {
@@ -141,6 +175,12 @@ public enum OutboxWire {
 
     public static func decodeSession(_ data: Data) -> UploadSession? {
         try? JSONDecoder().decode(UploadSession.self, from: data)
+    }
+
+    /// The batch's answer, or nil when the body is not one — an answer that cannot be matched to
+    /// its entries is no answer about any of them.
+    public static func decodeBatch(_ data: Data) -> UploadBatchAnswer? {
+        try? JSONDecoder().decode(UploadBatchAnswer.self, from: data)
     }
 
     /// The machine-readable `code` of a structured refusal, when the body carries one.

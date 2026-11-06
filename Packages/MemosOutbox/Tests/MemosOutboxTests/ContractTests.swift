@@ -416,6 +416,52 @@ struct ContractTests {
         #expect(responses["409"] != nil, "the chunk PATCH no longer declares an offset gap")
     }
 
+    @Test(
+        "the batch create still takes single-create bodies and answers one result per entry",
+        .tags(.contract)
+    )
+    func batchCreateContract() throws {
+        let batch = try operation("/api/uploads/batch", "post")
+        // The body: `entries`, each exactly the single create's body, at most the batch cap.
+        let body = try #require(batch["requestBody"] as? [String: Any])
+        let content = try #require(body["content"] as? [String: Any])
+        let json = try #require(content["application/json"] as? [String: Any])
+        let ref = try #require((json["schema"] as? [String: Any])?["$ref"] as? String)
+        #expect(ref == "#/components/schemas/UploadBatchCreate")
+        let entries = try #require(try properties("UploadBatchCreate")["entries"] as? [String: Any])
+        #expect(entries["maxItems"] as? Int == UploadBudget.maxSessionsPerBatch)
+        let items = try #require(entries["items"] as? [String: Any])
+        #expect(items["$ref"] as? String == "#/components/schemas/UploadCreate")
+        let sent = try #require(
+            try JSONSerialization.jsonObject(
+                with: try #require(
+                    try OutboxRequests.startUploadBatch(
+                        baseURL: Fixture.server, token: "t",
+                        files: [Fixture.file(), Fixture.file()]
+                    ).httpBody
+                )
+            ) as? [String: Any]
+        )
+        #expect(Set(sent.keys) == ["entries"])
+        let entry = try #require((sent["entries"] as? [[String: Any]])?.first)
+        let declared = try properties("UploadCreate")
+        for key in entry.keys { #expect(declared[key] != nil, "\(key) is not in UploadCreate") }
+
+        // The answer: always one 200, a result per entry, each a status with the single create's
+        // session beside a 201.
+        #expect(try responseSchema(batch, status: "200") == "UploadBatchOut")
+        let results = try #require(try properties("UploadBatchOut")["results"] as? [String: Any])
+        let result = try #require(results["items"] as? [String: Any])
+        #expect(result["$ref"] as? String == "#/components/schemas/UploadBatchResult")
+        let fields = try properties("UploadBatchResult")
+        #expect((try schema("UploadBatchResult")["required"] as? [String]) == ["status"])
+        #expect(Set(fields.keys) == ["status", "upload", "detail"])
+        let upload = try #require(fields["upload"] as? [String: Any])
+        #expect(upload["$ref"] as? String == "#/components/schemas/UploadOut")
+        let security = try #require(batch["security"] as? [[String: Any]])
+        #expect(security.contains { $0["bearerAuth"] != nil })
+    }
+
     @Test("the calls that carry a bearer token are the ones that declare it", .tags(.contract))
     func bearerAuthDeclared() throws {
         let components = try #require(document["components"] as? [String: Any])
