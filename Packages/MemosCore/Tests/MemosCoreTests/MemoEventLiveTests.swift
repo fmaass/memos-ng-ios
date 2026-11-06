@@ -294,11 +294,15 @@ struct MemoEventLiveTests {
         let handle = fixture.client.handle
         let created = MemoEvent(kind: .created, uid: "m2")
 
-        // Both enqueued before this test suspends: the main actor runs them in order, so the
-        // second finds the first's read already in the air.
+        // The first frame's read is in the air and HELD at the transport.
         let first = Task { await store.apply(created, using: handle, baseURL: Stub.baseURL) }
-        let second = Task { await store.apply(created, using: handle, baseURL: Stub.baseURL) }
         await reached.wait()
+        // The second frame arrives while it is held. Both tasks are main-actor tasks, enqueued in
+        // order, so once a task enqueued AFTER the second has run, the second has run up to its
+        // own first suspension — the join, or a second request.
+        let second = Task { await store.apply(created, using: handle, baseURL: Stub.baseURL) }
+        await Task {}.value
+        #expect(fixture.gets.count == 1, "the second frame issued its own read instead of joining")
         await store.apply(
             MemoEvent(kind: .deleted, uid: "m2"), using: handle, baseURL: Stub.baseURL)
         before.open()
