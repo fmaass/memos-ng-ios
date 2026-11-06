@@ -57,6 +57,10 @@ enum MediaInfoRows {
         /// Whether the memo is the signed-in person's: the server's own `mine`, the flag the
         /// timeline's long press reads before it offers Visibility. Never the FILE's flag.
         let mine: Bool
+        /// Who sent the memo in when a pass guest did — "Anna · guest", the card's own words
+        /// (`MemoCardPresentation.displayName(for:)`) — and nil for a memo its owner wrote
+        /// (MEMNG-1164, MEMNG-1007).
+        var contributor: String? = nil
     }
 
     struct File: Equatable {
@@ -205,7 +209,8 @@ enum MediaInfoRows {
         let text = stripTagOnlyLines(memo.content).trimmingCharacters(in: .whitespacesAndNewlines)
         return MemoCard(
             excerpt: String(text.prefix(140)), tags: memo.tags, visibility: memo.visibility,
-            showable: showable, uid: memo.uid, mine: memo.mine)
+            showable: showable, uid: memo.uid, mine: memo.mine,
+            contributor: memo.guest == nil ? nil : MemoCardPresentation.displayName(for: memo))
     }
 
     static func file(_ attachment: MemoAttachment, facts: AttachmentFacts?) -> File {
@@ -370,6 +375,7 @@ struct MediaInfoSheet: View {
 
     @ViewBuilder
     private func memoRows(_ card: MediaInfoRows.MemoCard) -> some View {
+        if let contributor = card.contributor { LabeledContent("Contributor", value: contributor) }
         if !card.excerpt.isEmpty { Text(card.excerpt).lineLimit(4) }
         if !card.tags.isEmpty {
             Text(card.tags.map { "#\($0)" }.joined(separator: " ")).foregroundStyle(.secondary)

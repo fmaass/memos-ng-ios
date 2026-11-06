@@ -473,7 +473,7 @@ struct GuestUploadRow: Equatable {
 
     init(_ row: TripContribution, picture: MemoAttachment?, filename: String?) {
         uid = row.attachmentUid
-        contributor = row.contributorName ?? "A guest"
+        contributor = MemoCardPresentation.guestName(row.contributorName)
         uploadedAt = row.createdAt
         hidden = row.hidden
         self.filename = picture == nil ? nil : filename.flatMap { $0.isEmpty ? nil : $0 }
@@ -634,7 +634,7 @@ enum TripGuestsText {
         var found: [(String, String)] = []
         for row in rows {
             guard let device = row.deviceUid, seen.insert(device).inserted else { continue }
-            found.append((device, row.contributorName ?? "A guest"))
+            found.append((device, MemoCardPresentation.guestName(row.contributorName)))
         }
         return found
     }
