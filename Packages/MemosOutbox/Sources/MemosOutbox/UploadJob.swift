@@ -244,6 +244,11 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
     /// send. Cleared when a person releases the capture. Optional and last, so an older manifest
     /// decodes and reads as "not refused".
     public var heldReason: HoldReason?
+    /// Set on a file whose session a batch opened ahead of its body (MEMNG-958): nothing has been
+    /// sent on it, so when a place frees it is sent whole on that session, with no offset HEAD.
+    /// Cleared in the write that hands it to a task. Optional and last, so an older manifest
+    /// decodes and reads as "a session that may hold bytes", which is what it then is.
+    public var sessionUnsent: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -263,7 +268,8 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         freshSessions: Int? = nil,
         conflictResync: Bool? = nil,
         alreadyReceived: Bool? = nil,
-        heldReason: HoldReason? = nil
+        heldReason: HoldReason? = nil,
+        sessionUnsent: Bool? = nil
     ) {
         self.id = id
         self.relativePath = relativePath
@@ -283,6 +289,7 @@ public struct OutboxFile: Codable, Sendable, Equatable, Identifiable {
         self.conflictResync = conflictResync
         self.alreadyReceived = alreadyReceived
         self.heldReason = heldReason
+        self.sessionUnsent = sessionUnsent
     }
 
     public var isComplete: Bool {

@@ -11,9 +11,9 @@ public enum WholeAction: Sendable, Equatable {
     /// waiting for scheduling to open, which only the app coming to the foreground does.
     case wait(until: Date)
     /// Send these files, each whole, in ONE pass, in capture order. None of them has an upload
-    /// session yet. At most the in-flight budget less the files already carried, and
-    /// possibly none: every file that still needs sending is carried, and its task's answer is what
-    /// comes next.
+    /// session yet, or only one a batch opened ahead of its body (`OutboxFile.sessionUnsent`). At
+    /// most the in-flight budget less the files already carried, and possibly none: every file
+    /// that still needs sending is carried, and its task's answer is what comes next.
     case upload(starting: [UUID])
     /// This file has an upload session holding less than the whole file, and no task is carrying
     /// it: the server is asked how much it holds, and only the rest is sent
@@ -221,8 +221,11 @@ extension OutboxPlanner {
             return .wait(until: deadline)
         }
         // A file with a session goes first on its own: its resume starts with the offset HEAD, and
-        // the pass plans again once that file is carried.
-        if let resumable = chosen.first(where: { $0.uploadUID != nil }) {
+        // the pass plans again once that file is carried. A session a batch opened ahead of its
+        // body holds nothing yet: that file is sent like one with no session, without a HEAD.
+        if let resumable = chosen.first(where: {
+            $0.uploadUID != nil && $0.sessionUnsent != true
+        }) {
             return .resume(resumable.id)
         }
         return .upload(starting: chosen.map(\.id))
@@ -249,6 +252,7 @@ extension UploadJob {
             guard !file.isComplete else { return }
             file.uploadAttempt = (file.uploadAttempt ?? 0) + 1
             file.uploadUID = nil
+            file.sessionUnsent = nil
             file.bytesConfirmed = 0
         }
     }

@@ -118,23 +118,83 @@ struct UploadBatchEngineTests {
         return try #require(object["entries"] as? [[String: Any]])
     }
 
-    @Test("one batch request carries every file's session; no single create is sent")
+    private static let twelve: [WholeRig.Media] = (0..<12).map {
+        WholeRig.Media(name: "IMG_\($0).heic", bytes: 1000 + $0, mime: "image/heic")
+    }
+
+    @Test("one batch request opens every file's session; only the budget's bodies start")
     func oneBatchCarriesEveryFile() async throws {
-        let rig = try await WholeRig.make()
+        let rig = try await WholeRig.make(media: Self.twelve)
         defer { rig.cleanUp() }
         await rig.engine.drain()
         let batches = Self.batches(rig)
         #expect(batches.count == 1)
         let entries = try Self.entries(try #require(batches.first))
-        #expect(entries.compactMap { $0["filename"] as? String } == ["picture.heic", "video.mov"])
-        #expect(entries.compactMap { $0["size"] as? Int } == [1000, 3000])
+        #expect(entries.compactMap { $0["filename"] as? String } == Self.twelve.map(\.name))
+        #expect(entries.compactMap { $0["size"] as? Int } == Self.twelve.map(\.bytes))
         let singles = rig.http.requests(method: "POST").filter {
             $0.url?.path() == "/api/uploads"
         }
         #expect(singles.isEmpty)
         let saved = try await rig.reload()
         #expect(saved.files.allSatisfy { $0.uploadUID != nil })
+        // Sessions are not bodies: two bodies start, ten sessions wait, each marked unsent.
+        #expect(rig.session.createdTasks.count == UploadBudget.inFlightUploads)
+        #expect(saved.files.filter { $0.sessionUnsent == true }.count == 10)
+        // A place frees: the next file goes on its waiting session, with no HEAD and no batch.
+        let first = try #require(rig.session.createdTasks.first)
+        let identity = try #require(WholeTaskIdentity(taskDescription: first.description))
+        let size = try #require(rig.job.file(identity.fileID)?.byteSize)
+        await rig.engine.handle(try rig.answer(first, status: 200, received: Int(size)))
+        let next = try await rig.eventually { rig.session.createdTasks.count == 3 }
+        #expect(next)
+        #expect(Self.batches(rig).count == 1)
+        #expect(rig.http.requests(method: "HEAD").isEmpty)
+        #expect(rig.uploadPosts == 12)
+    }
+
+    @Test("a 507 for one entry spaces out only that file; its sibling is sent")
+    func entryNoRoomSpacesOnlyThatFile() async throws {
+        let rig = try await WholeRig.make(
+            answerPost: { request in
+                let body = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                return body.contains("video.mov") ? OutboxHTTPResponse(statusCode: 507) : nil
+            }
+        )
+        defer { rig.cleanUp() }
+        await rig.engine.drain()
+        #expect(Self.batches(rig).count == 1)
+        let saved = try await rig.reload()
+        #expect(saved.state != .held)
+        let video = try #require(saved.file(rig.video.id))
+        #expect(video.uploadUID == nil)
+        #expect(video.heldReason == nil)
+        #expect(video.attemptCount == 1)
+        #expect((video.nextAttemptAt ?? .distantPast) > rig.clock.now)
+        #expect(saved.file(rig.picture.id)?.uploadUID != nil)
+        #expect(rig.session.createdTasks.count == 1)
+        _ = try rig.task(for: rig.picture.id)
+    }
+
+    @Test("a budget raised while the batch is awaited is not handed to the attempt it carries")
+    func generationTakenBeforeTheHop() async throws {
+        let raising = RaisingHTTP()
+        let rig = try await WholeRig.make(wrapHTTP: { inner in
+            raising.inner.value = inner
+            return raising
+        })
+        defer { rig.cleanUp() }
+        raising.clock.value = rig.clock
+        raising.engine.value = rig.engine
+        await rig.engine.drain()
+        // Inside the batch's await a quiet Wi-Fi minute passed and the budget rose.
+        #expect(raising.raisedTo.value == UploadBudget.maxInFlightUploads)
+        #expect(await rig.engine.budgetGeneration == 1)
+        // Both bodies were granted their places under generation 0, and carry it.
         #expect(rig.session.createdTasks.count == 2)
+        for task in rig.session.createdTasks {
+            #expect(await rig.engine.budgetStamp(of: task.taskIdentifier) == 0)
+        }
     }
 
     @Test("a 413 for one entry holds only that file; its sibling is sent and lands")
@@ -169,5 +229,25 @@ struct UploadBatchEngineTests {
         #expect(held.file(rig.picture.id)?.isComplete == true)
         #expect(rig.completion.idempotencyKeys.isEmpty)
         #expect(Self.batches(rig).count == 1)
+    }
+}
+
+/// Raises the budget from inside the batch request's await: the clock moves past a quiet minute
+/// and the engine is asked its ceiling, as a concurrent pass would ask it.
+private final class RaisingHTTP: OutboxHTTPPerforming, @unchecked Sendable {
+    let inner = WholeBox<ScriptedHTTP?>(nil)
+    let clock = WholeBox<MutableClock?>(nil)
+    let engine = WholeBox<OutboxEngine?>(nil)
+    let raisedTo = WholeBox<Int?>(nil)
+
+    func perform(_ request: URLRequest, under authority: SendAuthority) async throws
+        -> OutboxHTTPResponse
+    {
+        if request.url?.path() == "/api/uploads/batch", let engine = engine.value {
+            clock.value?.advance(61)
+            raisedTo.value = await engine.askBudgetCeiling()
+        }
+        guard let inner = inner.value else { return OutboxHTTPResponse(statusCode: 500) }
+        return try await inner.perform(request, under: authority)
     }
 }
