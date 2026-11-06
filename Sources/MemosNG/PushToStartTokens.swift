@@ -21,7 +21,9 @@ enum PushToStartTokens {
         #endif
     }
 
-    static func follow(_ store: LiveActivityTokenStore, session: SessionStore) -> Task<Void, Never> {
+    static func follow(
+        _ store: LiveActivityTokenStore, session: SessionStore
+    ) -> Task<Void, Never> {
         Task { @MainActor [weak session, weak store] in
             for await token in Activity<TransferActivityAttributes>.pushToStartTokenUpdates {
                 guard let session, let store else { return }

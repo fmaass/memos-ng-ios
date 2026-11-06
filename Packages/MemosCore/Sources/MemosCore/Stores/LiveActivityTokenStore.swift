@@ -104,8 +104,8 @@ public final class LiveActivityTokenStore {
         let client = handle.client
         let task = Task<Bool, Never> {
             do {
-                let response = try await client
-                    .registerLiveActivityTokenApiDevicesLiveActivityTokenPost(
+                let response =
+                    try await client.registerLiveActivityTokenApiDevicesLiveActivityTokenPost(
                         .init(body: .json(body)))
                 if case .noContent = response { return true }
                 return false
