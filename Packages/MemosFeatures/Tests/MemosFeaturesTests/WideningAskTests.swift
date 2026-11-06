@@ -240,6 +240,24 @@ struct WideningAskTests {
         #expect(ask.pending == nil)
     }
 
+    @Test("one question per memo: none asked twice, a newer one takes a waiting one's place")
+    func queueHoldsOneQuestionPerMemo() throws {
+        var ask = WideningAsk()
+        #expect(ask.pick(.public, from: .private, on: "m1") == .asking)
+        let first = try #require(ask.pending)
+        // The same question for the memo on screen, heard again, is not asked a second time.
+        ask.heard(.ask(first.question), on: "m1")
+        // Two questions for another memo while the first is up: the newer one waits, alone.
+        ask.heard(.ask(try Self.question(.private, .protected)), on: "m2")
+        let newer = try Self.question(.private, .public)
+        ask.heard(.ask(newer), on: "m2")
+        #expect(ask.answer(first, confirmed: false) == nil, "control: a dismissal sends nothing")
+        let next = try #require(ask.pending, "the waiting question was lost")
+        #expect(next.uid == "m2" && next.question == newer, "the older question was asked")
+        #expect(ask.answer(next, confirmed: false) == nil)
+        #expect(ask.pending == nil, "a memo's question was asked twice")
+    }
+
     @Test("the alert's dismissal answers the presentation it showed, not the one promoted after")
     func dismissalAnswersItsOwnPresentation() throws {
         let held = Held()
