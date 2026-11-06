@@ -23,7 +23,8 @@
 #   subtree…      repo subtrees under the root whose EXISTING components must stay on the volume
 #                 (relative paths), at least one; a single "-" = the volume identity only. The
 #                 helper holds no inventory: each caller names what it proves, and a mode with
-#                 neither is refused as a usage error (16, never softened by a marker).
+#                 neither is refused as a usage error (16, never softened by a marker). The token
+#                 @devroot among them is no subtree: it asks for term (f). Any other @-token refuses.
 # Output: exactly one verdict line, `MOUNT OK host=<host> uuid=<uuid> dev=<device>` or
 # `MOUNT REFUSE host=<host> <reason>` (`MOUNT REFUSE usage: …` and `MOUNT REFUSE no mount profile
 # for host <name|unmeasured …>` carry no host= token: no profile was chosen), then one state line
@@ -47,7 +48,12 @@
 #   (c) the root's device differs from $HOME's (a mount boundary, not the plain directory);
 #   (d) the sentinel the unmounted directory carries is not visible;
 #   (e) every existing component of each subtree is not a symlink, is on the root's device and
-#       resolves physically under the root.
+#       resolves physically under the root;
+#   (f) only when the caller passes @devroot: the simulator's device root, the literal
+#       $HOME/Library/Developer/CoreSimulator/Devices, is a symlink, resolves (cd -P) to exactly
+#       <root>/CoreSimulator/Devices, and that directory passes (e). A real directory there, a
+#       dangling link or a link anywhere else refuses as "device root …": the simulator's bytes
+#       would land off the image. The path is host-wide, so the helper still names no project.
 # A reader that fails, times out (GATE_MG_READ_S) or prints an unparsable value refuses; there is
 # no fallback reader. Recovery after an unmount is manual (launchd gives the wrapper no trigger
 # after it exited 0), and the refusal names the command.
@@ -202,7 +208,13 @@ gate_mg_dev_of() {
 # gate_mg_predicate <subtree…>: rc 0 and GATE_MG_DEVNODE set when every term holds; rc 1 with the
 # reason in GATE_MG_WHY otherwise.
 gate_mg_predicate() {
-  local M="$GATE_MG_ROOT" info v devnode rc mdev hdev sub rel comp p r
+  local M="$GATE_MG_ROOT" info v devnode rc mdev hdev sub p r devroot=0 n="$#"
+  # @devroot is a request for (f), not a subtree: rotated out, every other argument (an empty one
+  # included, which (e) refuses) stays a positional subtree, in order.
+  while [ "$n" -gt 0 ]; do
+    sub="$1"; shift; n=$((n - 1))
+    if [ "$sub" = @devroot ]; then devroot=1; else set -- "$@" "$sub"; fi
+  done
   GATE_MG_WHY=""; GATE_MG_DEVNODE=""
   [ -n "$GATE_MG_HOST" ] && [ -n "$M" ] || { GATE_MG_WHY="no mount profile selected"; return 1; }
   # (a) the volume's identity, from the volume itself.
@@ -235,28 +247,44 @@ gate_mg_predicate() {
   # (e) the repos' own subtrees stay on the volume, checked read-only before anything is created.
   [ ! -L "$M" ] || { GATE_MG_WHY="$M is a symlink"; return 1; }
   for sub in "$@"; do
-    case "/$sub/" in
-      //|*/../*|*/./*|//*) GATE_MG_WHY="subtree '$sub' is not a plain relative path"; return 1 ;;
-    esac
-    p="$M"; rel="$sub"
-    while [ -n "$rel" ]; do
-      comp="${rel%%/*}"
-      if [ "$comp" = "$rel" ]; then rel=""; else rel="${rel#*/}"; fi
-      [ -n "$comp" ] || continue
-      p="$p/$comp"
-      # A missing component is fine: it will be created under a verified ancestor.
-      if [ ! -e "$p" ] && [ ! -L "$p" ]; then break; fi
-      [ ! -L "$p" ] || { GATE_MG_WHY="$p is a symlink"; return 1; }
-      v="$(gate_mg_dev_of "$p")" || { GATE_MG_WHY="stat of $p failed"; return 1; }
-      [ "$v" = "$mdev" ] || { GATE_MG_WHY="$p is on device $v, not the volume's $mdev"; return 1; }
-      r="$(cd -P "$p" 2>/dev/null && pwd -P)" || { GATE_MG_WHY="$p does not resolve as a directory"; return 1; }
-      case "$r/" in
-        "$M"/?*) ;;
-        *) GATE_MG_WHY="$p resolves to $r, outside $M"; return 1 ;;
-      esac
-    done
+    gate_mg_subtree_ok "$M" "$mdev" "$sub" || return 1
   done
+  # (f) the simulator's device root is a link onto the image, and its target is a proved subtree.
+  if [ "$devroot" -eq 1 ]; then
+    p="$HOME/Library/Developer/CoreSimulator/Devices"
+    [ -L "$p" ] || { GATE_MG_WHY="device root $p is not a symlink: the simulator's devices are not on $M"; return 1; }
+    r="$(cd -P "$p" 2>/dev/null && pwd -P)" || { GATE_MG_WHY="device root $p does not resolve (a dangling link)"; return 1; }
+    [ "$r" = "$M/CoreSimulator/Devices" ] || { GATE_MG_WHY="device root $p resolves to $r, not $M/CoreSimulator/Devices"; return 1; }
+    gate_mg_subtree_ok "$M" "$mdev" CoreSimulator/Devices || { GATE_MG_WHY="device root $GATE_MG_WHY"; return 1; }
+  fi
   GATE_MG_DEVNODE="$devnode"
+  return 0
+}
+
+# gate_mg_subtree_ok <root> <root's device> <subtree>: term (e) for one subtree; rc 1 with the
+# reason in GATE_MG_WHY.
+gate_mg_subtree_ok() {
+  local M="$1" mdev="$2" sub="$3" rel comp p v r
+  case "/$sub/" in
+    //|*/../*|*/./*|//*|/@*) GATE_MG_WHY="subtree '$sub' is not a plain relative path"; return 1 ;;
+  esac
+  p="$M"; rel="$sub"
+  while [ -n "$rel" ]; do
+    comp="${rel%%/*}"
+    if [ "$comp" = "$rel" ]; then rel=""; else rel="${rel#*/}"; fi
+    [ -n "$comp" ] || continue
+    p="$p/$comp"
+    # A missing component is fine: it will be created under a verified ancestor.
+    if [ ! -e "$p" ] && [ ! -L "$p" ]; then break; fi
+    [ ! -L "$p" ] || { GATE_MG_WHY="$p is a symlink"; return 1; }
+    v="$(gate_mg_dev_of "$p")" || { GATE_MG_WHY="stat of $p failed"; return 1; }
+    [ "$v" = "$mdev" ] || { GATE_MG_WHY="$p is on device $v, not the volume's $mdev"; return 1; }
+    r="$(cd -P "$p" 2>/dev/null && pwd -P)" || { GATE_MG_WHY="$p does not resolve as a directory"; return 1; }
+    case "$r/" in
+      "$M"/?*) ;;
+      *) GATE_MG_WHY="$p resolves to $r, outside $M"; return 1 ;;
+    esac
+  done
   return 0
 }
 

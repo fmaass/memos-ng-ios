@@ -151,7 +151,7 @@ marker() {    # marker <host> <created offset s> <expires offset s> [extra line]
 OUT=""; RC=""
 # The helper holds no inventory; the build host's mount wrapper hands it this one
 # (scripts/merkur/build-image-mount.sh, BUILD_IMAGE_SUBTREES), so the cases below prove it too.
-INV="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate"
+INV="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate CoreSimulator/Devices"
 raw() {       # raw <arguments…>: the helper run with exactly these arguments
   OUT="$(env HOME="$H" GATE_MG_STAT="$tmp/bin/stat" GATE_MG_DISKUTIL="$tmp/bin/diskutil" \
     GATE_MG_HDIUTIL="$tmp/bin/hdiutil" GATE_MG_IOREG="$tmp/bin/ioreg" GATE_MG_PLUTIL="$tmp/bin/plutil" \
@@ -233,6 +233,47 @@ expect "an absolute subtree -> refuse" 16 "MOUNT REFUSE host=merkur subtree*not 
 healthy; mv "$M" "$tmp/build.real"; ln -s "$tmp/build.real" "$M"; run enforce
 expect "the root itself a symlink -> refuse" 16 "MOUNT REFUSE host=merkur $M is a symlink*" "mountguard=enforced*"
 rm -f "$M"
+
+# --- (f) the simulator's device root: a link onto the image, only when the caller asks with @devroot ---
+# The device root is $HOME's, a literal; on a host that moved it, it is a symlink whose physical path is
+# exactly <root>/CoreSimulator/Devices, and that directory passes (e). Each refusal names "device root".
+DR="$H/Library/Developer/CoreSimulator/Devices"
+devroot() {   # devroot link <target> | dir | none: what $HOME's device root is
+  rm -rf "$H/Library"; mkdir -p "$H/Library/Developer/CoreSimulator"
+  case "$1" in
+    link) ln -s "$2" "$DR" ;;
+    dir) mkdir -p "$DR" ;;
+    none) ;;
+  esac
+}
+DREF="MOUNT REFUSE host=merkur device root *recovery*launchctl kickstart*"
+healthy; mkdir -p "$M/CoreSimulator/Devices"; devroot link "$M/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) the device root a link to <root>/CoreSimulator/Devices -> OK" 0 "MOUNT OK host=merkur uuid=$UUID dev=/dev/disk8s1" "mountguard=enforced marker=not-read"
+healthy; mkdir -p "$M/CoreSimulator/Devices"; devroot dir; run enforce $INV @devroot
+expect "(f) the device root a real directory (the simulator writes to the internal disk) -> refuse" 16 "MOUNT REFUSE host=merkur device root $DR is not a symlink*" "mountguard=enforced marker=not-read"
+healthy; devroot link "$M/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) the device root a dangling link (its target absent on the image) -> refuse" 16 "MOUNT REFUSE host=merkur device root $DR does not resolve*" "mountguard=enforced*"
+healthy; mkdir -p "$M/CoreSimulator/Devices" "$tmp/elsewhere/CoreSimulator/Devices"; devroot link "$tmp/elsewhere/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) the device root a link outside the root -> refuse" 16 "MOUNT REFUSE host=merkur device root $DR resolves to $tmp/elsewhere/CoreSimulator/Devices, not $M/CoreSimulator/Devices*" "mountguard=enforced*"
+healthy; mkdir -p "$M/CoreSimulator/Devices"; devroot link "../../../../build/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) a relative link that resolves to <root>/CoreSimulator/Devices -> OK (the physical path decides)" 0 "MOUNT OK host=merkur *" "mountguard=enforced*"
+healthy; mkdir -p "$tmp/elsewhere/cs/Devices"; ln -s "$tmp/elsewhere/cs" "$M/CoreSimulator"; devroot link "$M/CoreSimulator/Devices"; run enforce @devroot
+expect "(f) <root>/CoreSimulator a symlink, @devroot alone (no subtree) -> refuse in (f) itself" 16 "MOUNT REFUSE host=merkur device root $DR resolves to $tmp/elsewhere/cs/Devices*" "mountguard=enforced*"
+healthy; mkdir -p "$tmp/elsewhere/cs/Devices"; ln -s "$tmp/elsewhere/cs" "$M/CoreSimulator"; devroot link "$M/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) <root>/CoreSimulator a symlink, with the inventory -> refuse ((e) on CoreSimulator/Devices first)" 16 "MOUNT REFUSE host=merkur $M/CoreSimulator is a symlink*" "mountguard=enforced*"
+healthy; mkdir -p "$M/CoreSimulator/Devices" "$F/dev"; echo 16777234 > "$F/dev/$(printf '%s' "$M/CoreSimulator/Devices" | tr / _)"; devroot link "$M/CoreSimulator/Devices"; run enforce @devroot
+expect "(f) <root>/CoreSimulator/Devices on another device, @devroot alone -> refuse ((e) inside (f))" 16 "MOUNT REFUSE host=merkur device root $M/CoreSimulator/Devices is on device 16777234*" "mountguard=enforced*"
+healthy; devroot none; run enforce $INV @devroot
+expect "(f) no device root at all -> refuse" 16 "MOUNT REFUSE host=merkur device root $DR is not a symlink*" "mountguard=enforced*"
+healthy; devroot dir; run enforce
+expect "(f) @devroot absent -> (f) not evaluated: a real device-root directory passes with the inventory alone" 0 "MOUNT OK host=merkur *" "mountguard=enforced*"
+healthy; devroot dir; run enforce -
+expect "(f) '-' -> (f) not evaluated" 0 "MOUNT OK host=merkur *" "mountguard=enforced*"
+healthy; devroot dir; run enforce memos-ng-ios/gate @devroo
+expect "an @-token other than @devroot (a typo) -> refuse, never silently skipped" 16 "MOUNT REFUSE host=merkur subtree '@devroo' is not a plain relative path*" "mountguard=enforced*"
+plain; devroot link "$M/CoreSimulator/Devices"; run enforce $INV @devroot
+expect "(f) unmounted root with a correct link -> refuse at the volume terms, before (f)" 16 "$REF" "mountguard=enforced*"
+if printf '%s\n' "$OUT" | grep -q 'device root'; then bad "(f) unmounted: the refusal names the device root, not the volume"; else ok "(f) unmounted: the refusal is the volume's, (a)-(d) run first"; fi
 
 # --- readers that fail, hang, or print nothing ------------------------------------------------------
 healthy; echo 1 > "$F/diskutil-rc"; run enforce

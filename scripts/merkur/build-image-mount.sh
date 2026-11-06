@@ -34,7 +34,9 @@ WRAPPER_LOG=""
 GATE_MG_LS="${GATE_MG_LS:-ls}"
 # Every project's subtrees on the build root, the one inventory of them: the shared helper names no
 # project, so this host's wrapper hands it the list it proves. A root added on the host is added here.
-BUILD_IMAGE_SUBTREES="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate"
+# CoreSimulator/Devices is the simulator's device root on the image; @devroot (term (f)) proves that
+# $HOME's device root links there, so a mount is success only with the simulator's bytes on it.
+BUILD_IMAGE_SUBTREES="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate CoreSimulator/Devices"
 
 wlog() {
   [ -n "$WRAPPER_LOG" ] || { printf '%s pid=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" >&2; return; }
@@ -56,7 +58,7 @@ M="$GATE_MG_ROOT"
 # predicate, every project's subtrees included (BUILD_IMAGE_SUBTREES): a repo root symlinked off
 # the volume is no mount the gates could use.
 # shellcheck disable=SC2086
-verdict="$(gate_mount_guard enforce $BUILD_IMAGE_SUBTREES)" && finish 0 "already mounted and proved: $(printf '%s' "$verdict" | head -1)"
+verdict="$(gate_mount_guard enforce $BUILD_IMAGE_SUBTREES @devroot)" && finish 0 "already mounted and proved: $(printf '%s' "$verdict" | head -1)"
 wlog "not proved: $(printf '%s' "$verdict" | head -1)"
 
 # (2) Nothing to mount from.
@@ -95,5 +97,5 @@ out="$(GATE_MG_READ_S=180 gate_mg_run $GATE_MG_HDIUTIL attach -owners on -mountp
 
 # (6) An attach that returned 0 is not a mount: only the predicate is.
 # shellcheck disable=SC2086
-verdict="$(gate_mount_guard enforce $BUILD_IMAGE_SUBTREES)" || finish 1 "attach returned 0 but the predicate fails: $(printf '%s' "$verdict" | head -1)"
+verdict="$(gate_mount_guard enforce $BUILD_IMAGE_SUBTREES @devroot)" || finish 1 "attach returned 0 but the predicate fails: $(printf '%s' "$verdict" | head -1)"
 finish 0 "mounted and proved: $(printf '%s' "$verdict" | head -1)"

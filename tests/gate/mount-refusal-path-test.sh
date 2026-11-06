@@ -206,8 +206,8 @@ esac
 if [ -s "$CASE_DIR/mount-script.txt" ]; then
   sent="$CASE_DIR/mount-script.txt"
   last="$(tail -n 1 "$sent")"
-  if [ "$last" = "gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work" ]; then
-    ok "the guard is asked in report mode about memos-ng-ios/gate and memos-ng-ios/work"
+  if [ "$last" = "gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work CoreSimulator/Devices @devroot" ]; then
+    ok "the guard is asked in report mode about memos-ng-ios/gate, memos-ng-ios/work, CoreSimulator/Devices and the device root (@devroot)"
   else bad "the guard's call is [$last]"; fi
   if head -n "$(wc -l < "$HELPER")" "$sent" | cmp -s - "$HELPER" \
      && [ "$(wc -l < "$sent")" -eq $(( $(wc -l < "$HELPER") + 1 )) ]; then

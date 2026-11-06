@@ -23,10 +23,10 @@
 #   the caller's reader reports free space plus what the run's own trees already hold >= one run's
 #   peak + a reserve. Refuses 12 at the ceiling, 13 after GATE_UNMEASURED_MAX unmeasured polls.
 # Simulator admission (build host, after the compile, before the device exists):
-#   gate_slot_wait_claim polls every GATE_POLL_S until ALL of: free >= GATE_SIM_FREE_FLOOR_KB,
-#   memory_pressure free >= GATE_MEMFREE_MIN_PCT, 1-minute load <= GATE_LOAD_MAX, no booted device matching GATE_DEVICE_PATTERNS that is not this run's, and the
-#   slot free — then claims the slot. Returns 0 (taken), 11 (ceiling), 12 (ceiling, free space the
-#   one failing term), 13 (GATE_UNMEASURED_MAX consecutive polls with a reader unmeasured), 14
+#   gate_slot_wait_claim polls every GATE_POLL_S until ALL of: the device root's free >=
+#   GATE_SIM_FREE_FLOOR_KB, $HOME's free >= GATE_SIM_INTERNAL_FLOOR_KB, memory_pressure free >= GATE_MEMFREE_MIN_PCT, 1-minute load <= GATE_LOAD_MAX, no booted device matching GATE_DEVICE_PATTERNS that is not this run's, and the
+#   slot free — then claims the slot. Returns 0 (taken), 11 (ceiling), 12 (ceiling, free space —
+#   the device root's, the internal volume's or both — the only failing term), 13 (GATE_UNMEASURED_MAX consecutive polls with a reader unmeasured), 14
 #   (the controller's ssh went away before the claim — see gate_on_broken_pipe).
 #   Residuals of 14, stated rather than closed: (a) it detects a BROKEN OUTPUT CONNECTION, not a
 #   dead controller — an orphaned ssh client that keeps draining the output is not caught; (b) a
@@ -61,7 +61,16 @@ GATE_RESERVE_KB="${GATE_RESERVE_KB:-3145728}"
 # and are not counted twice): the device's data, its caches, the result bundle, and swap growth.
 # 8 GiB until measured; the measurements are recorded here as they are taken:
 #   reference project, 2026-09-30, 5 s df samples over two spans on a shared host: -1.83, -3.05 GiB
+# It is read on the DEVICE ROOT, the literal $HOME/Library/Developer/CoreSimulator/Devices/ (the
+# trailing slash makes df answer for where a link there points), because that is where the device's
+# bytes land: on a host whose device root is a link onto the build image, $HOME's volume says
+# nothing about it (ARCH-1262 on mars: 126 GiB free on the image, 5.0 GiB on $HOME, a 5 h 20 min wait).
 GATE_SIM_FREE_FLOOR_KB="${GATE_SIM_FREE_FLOOR_KB:-8388608}"
+# What still lands on the internal volume while the device root is elsewhere (swap, the simulator's
+# logs) is held to its own floor on $HOME. Provisional: the largest single-volume drop recorded
+# above (3.05 GiB, when everything shared one volume) rounded up to 4 GiB; to be finalised from
+# samples taken after the device root moved.
+GATE_SIM_INTERNAL_FLOOR_KB="${GATE_SIM_INTERNAL_FLOOR_KB:-4194304}"
 GATE_MEMFREE_MIN_PCT="${GATE_MEMFREE_MIN_PCT:-20}"
 GATE_LOAD_MAX="${GATE_LOAD_MAX:-24}"
 GATE_POLL_S="${GATE_POLL_S:-60}"
@@ -402,7 +411,7 @@ gate_slot_claim() { # PROJECT BRANCH TOKEN SHARED [SHARED_UDID]
   fi
   [ "$(gate_owner_get "$root/sim/owner" token)" = "$3" ] || return 1
   GATE_SLOT_HELD=1; GATE_SLOT_TOKEN="$3"; GATE_SLOT_SHARED="$4"; GATE_SIMRELEASE=0
-  gate_log "token=$3 slot-claimed project=$1 branch=$2 pid=$$ pgid=$pgid"
+  gate_log "token=$3 slot-claimed project=$1 branch=$2 pid=$$ pgid=$pgid${GATE_SLOT_CLAIM_NOTE:+ $GATE_SLOT_CLAIM_NOTE}"
   return 0
 }
 # Names a device before it exists, so a recoverer finds it by name even if its UDID is never written.
@@ -651,8 +660,10 @@ gate_slot_wait_claim() { # PROJECT BRANCH TOKEN SHARED SHARED_UDID
 }
 gate_slot_wait_claim_polls() {
   local project="$1" branch="$2" token="$3" shared="$4" shared_udid="${5:-}"
-  local root="$GATE_SLOT_ROOT" waited=0 unmeasured_run=0 terms unmeasured space_only
-  local free swap mem load devices holder_file verdict holder_names holder_udids line udid state name pat holderless recovered
+  local root="$GATE_SLOT_ROOT" waited=0 unmeasured_run=0 terms unmeasured space_only t
+  # Read by gate_slot_claim for its slot-claimed line: the readings this claim was admitted on.
+  local GATE_SLOT_CLAIM_NOTE="" free_devroot free_internal devroot
+  local swap mem load devices holder_file verdict holder_names holder_udids line udid state name pat holderless recovered
   GATE_SLOT_WAITED=0
   mkdir -p "$root" 2>/dev/null || { gate_log "token=$token cannot create $root"; return 13; }
   while :; do
@@ -664,10 +675,14 @@ gate_slot_wait_claim_polls() {
       return 14
     fi
     terms=""; unmeasured=""; space_only=0
-    if free="$(gate_read_free_kb "$HOME")"; then
-      [ "$free" -ge "$GATE_SIM_FREE_FLOOR_KB" ] \
-        || terms="$terms free=$(gate_kb_h "$free")<$(gate_kb_h "$GATE_SIM_FREE_FLOOR_KB")"
-    else unmeasured="$unmeasured free"; fi
+    if free_devroot="$(gate_read_free_kb "$HOME/Library/Developer/CoreSimulator/Devices/")"; then
+      [ "$free_devroot" -ge "$GATE_SIM_FREE_FLOOR_KB" ] \
+        || terms="$terms devroot_low=$(gate_kb_h "$free_devroot")<$(gate_kb_h "$GATE_SIM_FREE_FLOOR_KB")"
+    else free_devroot="?"; unmeasured="$unmeasured free_devroot"; fi
+    if free_internal="$(gate_read_free_kb "$HOME")"; then
+      [ "$free_internal" -ge "$GATE_SIM_INTERNAL_FLOOR_KB" ] \
+        || terms="$terms internal_low=$(gate_kb_h "$free_internal")<$(gate_kb_h "$GATE_SIM_INTERNAL_FLOOR_KB")"
+    else free_internal="?"; unmeasured="$unmeasured free_internal"; fi
     swap="$(gate_read_swap_mb)" || { swap="?"; unmeasured="$unmeasured swap"; }
     if mem="$(gate_read_memfree_pct)"; then
       [ "$mem" -ge "$GATE_MEMFREE_MIN_PCT" ] || terms="$terms memfree=${mem}%<${GATE_MEMFREE_MIN_PCT}%"
@@ -675,7 +690,12 @@ gate_slot_wait_claim_polls() {
     if load="$(gate_read_load1)"; then
       awk -v l="$load" -v m="$GATE_LOAD_MAX" 'BEGIN { exit !(l <= m) }' || terms="$terms load=$load>$GATE_LOAD_MAX"
     else unmeasured="$unmeasured load"; fi
-    case "$terms" in " free="*) case "${terms# free=}" in *" "*) ;; *) space_only=1 ;; esac ;; esac
+    # 12 needs every failing term so far to be a space term (the holder and device terms below
+    # clear it on their own). The terms so far carry no space and no glob character: one word each.
+    if [ -n "$terms" ]; then
+      space_only=1
+      for t in $terms; do case "$t" in devroot_low=*|internal_low=*) ;; *) space_only=0 ;; esac; done
+    fi
     # One snapshot of the record is judged, and the token recovery is later held to is the token
     # of THAT snapshot: read afresh, it could already name the next run.
     holder_file="$root/snapshot.$token"
@@ -751,6 +771,8 @@ GATE_HOLDERLESS_EOF
     else
       # A claim that cannot even be attempted (no record could be written, or a shared claim
       # without a valid UDID) counts toward the same refusal as an unmeasured reading.
+      devroot="$(cd -P "$HOME/Library/Developer/CoreSimulator/Devices" 2>/dev/null && pwd -P)" || devroot="?"
+      GATE_SLOT_CLAIM_NOTE="free_devroot=$free_devroot free_internal=$free_internal devroot=${devroot:-?}"
       gate_slot_claim "$project" "$branch" "$token" "$shared" "$shared_udid"
       case $? in
         0) GATE_SLOT_WAITED="$waited"; return 0 ;;
@@ -765,11 +787,11 @@ GATE_HOLDERLESS_EOF
           fi ;;
       esac
     fi
-    [ -z "$terms" ] || gate_log "token=$token$terms swap_used=${swap}M (waited ${waited}s)"
+    [ -z "$terms" ] || gate_log "token=$token free_devroot=$free_devroot free_internal=$free_internal$terms swap_used=${swap}M (waited ${waited}s)"
     if [ "$waited" -ge "$GATE_CEILING_S" ]; then
       GATE_SLOT_WAITED="$waited"
       if [ "$space_only" -eq 1 ] && [ -z "$unmeasured" ]; then
-        gate_log "token=$token REFUSED slot=12 after ${waited}s: free space stayed below the floor"
+        gate_log "token=$token REFUSED slot=12 after ${waited}s: free space stayed below the floor:$terms"
         return 12
       fi
       gate_log "token=$token REFUSED slot=11 after ${waited}s (ceiling ${GATE_CEILING_S}s):$terms"

@@ -6,7 +6,10 @@ Moved verbatim from CLAUDE.md § The gate is the only build authority on 2026-10
 with the build host is the `--- step: mount ---`, after the classification and before the
 preflight's first write: it pipes `scripts/gate-mount-guard.sh` from the run's private copy (it is
 one of `GATE_RUN_HELPERS`) to `ssh bash -s` and asks `gate_mount_guard report memos-ng-ios/gate
-memos-ng-ios/work`, under `timeout 30`. The guard first picks its profile by a PAIR read on the host — its
+memos-ng-ios/work CoreSimulator/Devices @devroot`, under `timeout 30`. The `@devroot` token (ARCH-1262)
+adds term (f): `$HOME/Library/Developer/CoreSimulator/Devices` must be a symlink resolving to exactly
+`<root>/CoreSimulator/Devices`, itself a proved subtree, else `MOUNT REFUSE host=<h> device root …`,
+rc 16; the mount wrapper's inventory and both of its predicate calls carry the same. The guard first picks its profile by a PAIR read on the host — its
 `LocalHostName` (`scutil --get LocalHostName`, lower-cased) and its hardware `IOPlatformUUID` (`ioreg`,
 read once and reused for the marker check) — and each profile is a block of literals naming both
 halves of its pair: `merkur` on `ABED54FD-4031-53B1-9951-E8FF4DE51F69` — volume UUID

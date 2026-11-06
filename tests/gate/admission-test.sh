@@ -47,8 +47,12 @@ mkdir -p "$F" "$SIM" "$tmp/bin"
 cat > "$tmp/bin/df" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$F/df-args"
-printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 239362496 1 %s 45%% /\n' "\$(cat "$F/free")"
+# Per path: \$F/free.<path, every byte but [A-Za-z0-9] as _> answers that path, else \$F/free; \$F/df-fail.<same> fails it.
+k="\$(printf '%s' "\$2" | tr -c 'A-Za-z0-9' '_')"
+v="$F/free.\$k"; [ -e "\$v" ] || v="$F/free"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3 239362496 1 %s 45%% /\n' "\$(cat "\$v")"
 [ ! -e "$F/df-fail" ] || exit 1
+[ ! -e "$F/df-fail.\$k" ] || exit 1
 EOF
 cat > "$tmp/bin/du" <<EOF
 #!/usr/bin/env bash
@@ -128,7 +132,7 @@ sleeps() { cat "$tmp/sleeps" 2>/dev/null || echo 0; }
 GIB=1048576
 healthy() { # every reading passes, nothing is booted, no slot, no hook
   echo 1048576 > "$F/du"; echo $((20 * GIB)) > "$F/free"; echo 1024.00M > "$F/swap"; echo 40 > "$F/mem"; echo 3.50 > "$F/load"
-  rm -f "$F"/*-fail "$F/sim-garbage" "$F/sim-malformed" "$tmp/sleeps" "$tmp/on-sleep" "$SIM"/*
+  rm -f "$F"/*-fail "$F"/free.* "$F"/df-fail.* "$F/df-args" "$F/sim-garbage" "$F/sim-malformed" "$tmp/sleeps" "$tmp/on-sleep" "$SIM"/*
   rm -rf "$GATE_SLOT_ROOT"; mkdir -p "$GATE_SLOT_ROOT"
   unset GATE_TEST_HOOK
 }
@@ -276,7 +280,7 @@ term_case() { # NAME SETUP EXPECTED_RC EXPECTED_TERM
     ok "$1 alone keeps the wait, logs '$4', and the ceiling refuses with $3"
   else bad "$1: rc $rc (want $3), $(sleeps) sleeps, slot $([ -d "$GATE_SLOT_ROOT/sim" ] && echo taken || echo free)"; show "$out"; fi
 }
-term_case "free space below the floor" "echo $((7 * GIB)) > '$F/free'" 12 'free=7.0G<8.0G'
+term_case "free space below the floor" "echo $((7 * GIB)) > '$F/free'" 12 'devroot_low=7.0G<8.0G'
 term_case "memory free below 20%" "echo 19 > '$F/mem'" 11 'memfree=19%<20%'
 
 # The edges themselves admit: a memory-free of exactly the floor, a load of exactly the ceiling and free
@@ -325,6 +329,79 @@ if [ "$rc" -eq 0 ] && [ "$(sleeps)" -eq 1 ] && [ "$(slot_token)" = tokT ] \
    && ! printf '%s' "$out" | grep -q 'swap=9216M>'; then
   ok "swap used 9 GiB is logged on the wait line (swap_used=9216M) and does not block the admission after it"
 else bad "swap logged, not a term: rc $rc after $(sleeps) sleeps, slot '$(slot_token)'"; show "$out"; fi
+
+# --- the two space terms: the device root (where the simulator's bytes land) and the internal volume ---
+# The simulator writes its device into the device root, which on a moved host is a link onto the build
+# image; what still lands on the internal volume (swap, simulator logs) is held to its own, smaller
+# floor. A home whose device root is such a link, so the claim line's devroot= is the resolved path.
+TH="$tmp/simhome"
+mkdir -p "$TH/Library/Developer/CoreSimulator" "$tmp/image/CoreSimulator/Devices"
+ln -s "$tmp/image/CoreSimulator/Devices" "$TH/Library/Developer/CoreSimulator/Devices"
+fkey() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
+DKEY="$(fkey "$TH/Library/Developer/CoreSimulator/Devices/")"; IKEY="$(fkey "$TH")"
+space_term_case() { # NAME DEVROOT_KB INTERNAL_KB EXTRA_SETUP EXPECTED_RC EXPECTED_TEXT
+  healthy
+  echo "$2" > "$F/free.$DKEY"; echo "$3" > "$F/free.$IKEY"
+  eval "$4"
+  out="$(HOME="$TH" GATE_CEILING_S=120 gate_slot_wait_claim proj fix/t tokT 0 "" 2>&1)"; rc=$?
+  if [ "$rc" -eq "$5" ] && [ ! -d "$GATE_SLOT_ROOT/sim" ] && [ "$(sleeps)" -eq 2 ] \
+     && printf '%s' "$out" | grep -q -- "$6" \
+     && [ "$(printf '%s\n' "$out" | grep -c "token=tokT free_devroot=$2 free_internal=$3 .*(waited")" -eq 3 ]; then
+    ok "$1: every wait line carries free_devroot=$2 free_internal=$3, logs '$6', and the ceiling refuses with $5"
+  else bad "$1: rc $rc (want $5), $(sleeps) sleeps, slot $([ -d "$GATE_SLOT_ROOT/sim" ] && echo taken || echo free)"; show "$out"; fi
+}
+space_term_case "the device root below 8 GiB alone (internal 20 GiB)" $((7 * GIB)) $((20 * GIB)) ":" 12 'devroot_low=7.0G<8.0G swap_used'
+space_term_case "the internal volume below its 4 GiB floor alone (device root 20 GiB)" $((20 * GIB)) $((3 * GIB)) ":" 12 'internal_low=3.0G<4.0G swap_used'
+space_term_case "both space terms below their floors" $((7 * GIB)) $((3 * GIB)) ":" 12 'devroot_low=7.0G<8.0G internal_low=3.0G<4.0G swap_used'
+space_term_case "both space terms and memory free below their floors" $((7 * GIB)) $((3 * GIB)) "echo 19 > '$F/mem'" 11 'REFUSED slot=11 .*devroot_low=7.0G<8.0G internal_low=3.0G<4.0G memfree=19%<20%'
+
+space_unmeasured_case() { # NAME KEY LABEL
+  healthy
+  : > "$F/df-fail.$2"
+  out="$(HOME="$TH" gate_slot_wait_claim proj fix/u tokU 0 "" 2>&1)"; rc=$?
+  if [ "$rc" -eq 13 ] && [ "$(slot_token)" != tokU ] && printf '%s' "$out" | grep -q "REFUSED slot=13: 3 consecutive polls could not measure: $3\$" \
+     && [ "$(printf '%s\n' "$out" | grep -c "unmeasured: $3 (poll")" -eq 3 ]; then
+    ok "$1 failing (df exits nonzero after a plausible line) is unmeasured: three polls refuse with 13, naming $3"
+  else bad "$1 failing: rc $rc (want 13), slot '$(slot_token)'"; show "$out"; fi
+}
+space_unmeasured_case "the device-root reader" "$DKEY" free_devroot
+space_unmeasured_case "the internal reader" "$IKEY" free_internal
+
+# Admitted at once: the device root at 20 GiB, the internal volume at 7 GiB (below the old single
+# floor, above its own). The claim line carries both readings and where the device root resolves to,
+# and df was asked about exactly the device root (trailing slash: df follows the link) and the home.
+healthy
+echo $((20 * GIB)) > "$F/free.$DKEY"; echo $((7 * GIB)) > "$F/free.$IKEY"
+out="$(HOME="$TH" gate_slot_wait_claim proj fix/t tokT 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(sleeps)" -eq 0 ] && [ "$(slot_token)" = tokT ] \
+   && printf '%s\n' "$out" | grep -q "token=tokT slot-claimed project=proj branch=fix/t pid=[0-9]* pgid=[0-9]* free_devroot=$((20 * GIB)) free_internal=$((7 * GIB)) devroot=$tmp/image/CoreSimulator/Devices\$"; then
+  ok "device root 20 GiB, internal 7 GiB -> admitted at once; slot-claimed carries free_devroot, free_internal and the resolved devroot"
+else bad "device root 20 GiB, internal 7 GiB: rc $rc, $(sleeps) sleeps, slot '$(slot_token)'"; show "$out"; fi
+want_args="-Pk $TH/Library/Developer/CoreSimulator/Devices/
+-Pk $TH"
+if [ "$(cat "$F/df-args" 2>/dev/null)" = "$want_args" ]; then
+  ok "one poll asks df about exactly '-Pk \$HOME/Library/Developer/CoreSimulator/Devices/' and '-Pk \$HOME'"
+else bad "one poll asked df about [$(cat "$F/df-args" 2>/dev/null | tr '\n' ',')]"; fi
+
+# The edges admit: the device root at exactly 8 GiB and the internal volume at exactly 4 GiB.
+healthy
+echo $((8 * GIB)) > "$F/free.$DKEY"; echo $((4 * GIB)) > "$F/free.$IKEY"
+out="$(HOME="$TH" gate_slot_wait_claim proj fix/t tokT 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ "$(sleeps)" -eq 0 ] && [ "$(slot_token)" = tokT ]; then
+  ok "device root at exactly 8 GiB and internal at exactly 4 GiB admit at once (edges, >=)"
+else bad "space edges: rc $rc, $(sleeps) sleeps, slot '$(slot_token)'"; show "$out"; fi
+# One KiB under each floor is a wait (the other edge of the same comparison).
+space_term_case "the device root one KiB under 8 GiB" $((8 * GIB - 1)) $((4 * GIB)) ":" 12 'devroot_low=8.0G<8.0G swap_used'
+space_term_case "the internal volume one KiB under 4 GiB" $((8 * GIB)) $((4 * GIB - 1)) ":" 12 'internal_low=4.0G<4.0G swap_used'
+
+# A device root that does not resolve is logged as devroot=? on the claim: a measurement, not a term
+# (the mount guard's term (f) is the fence for where it points, before any of this runs).
+healthy
+TH2="$tmp/simhome-bare"; mkdir -p "$TH2"
+out="$(HOME="$TH2" gate_slot_wait_claim proj fix/t tokT 0 "" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q "slot-claimed .* free_devroot=$((20 * GIB)) free_internal=$((20 * GIB)) devroot=?\$"; then
+  ok "a device root that does not resolve is claimed with devroot=? (logged, not a term)"
+else bad "unresolved device root: rc $rc"; show "$out"; fi
 
 # --- readers: a nonzero exit with plausible output is unmeasured, never a reading ------------------------
 unmeasured_case() { # NAME SETUP

@@ -1704,7 +1704,7 @@ else
   mount_answer="$GATE_RUN_COPY/mount-answer.txt"
   (
     exec 9>&- 7>&-
-    { cat "$GATE_MOUNT_GUARD_SELF"; printf '%s\n' 'gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work'; } \
+    { cat "$GATE_MOUNT_GUARD_SELF"; printf '%s\n' 'gate_mount_guard report memos-ng-ios/gate memos-ng-ios/work CoreSimulator/Devices @devroot'; } \
       | timeout 30 ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" 'bash -s' > "$mount_answer" 2>&1
   )
   mount_ssh_rc=$?

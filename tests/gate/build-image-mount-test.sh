@@ -119,7 +119,7 @@ case "\$1" in
       noop) echo attached > "$F/state"; exit 0 ;;
     esac
     [ "\$mode" != owners-off ] || touch "$F/owners-off"
-    mv "$M" "$M.under" && mkdir "$M" && mkdir "$M/quarantine-pre602" && echo mounted > "$F/state"
+    mv "$M" "$M.under" && mkdir "$M" && mkdir -p "$M/quarantine-pre602" "$M/CoreSimulator/Devices" && echo mounted > "$F/state"
     [ "\$mode" != symlink ] || { mkdir -p "$tmp/elsewhere"; ln -s "$tmp/elsewhere" "$M/memos-ng-ios"; } ;;
   detach)
     [ ! -e "$F/detach-busy" ] || { echo 'hdiutil: couldn'"'"'t unmount "disk7" - Resource busy' >&2; exit 16; }
@@ -162,6 +162,8 @@ chmod +x "$tmp/bin/"*
 reset() {   # reset <state> <root: sentinel|populated|empty|sentinel+extra>
   chmod -R u+rwx "$M" "$M.under" 2>/dev/null; rm -rf "$F" "$M" "$M.under" "$H" "$VOL"
   rm -rf "${MVOL:?}"; mkdir -p "$F" "$M" "$H" "$BUNDLE" "$MBUNDLE"; echo "$1" > "$F/state"; echo merkur > "$F/host"; echo "$MERKUR_HW" > "$F/hw"
+  # The moved device root: a link onto the image, dangling while the image is not mounted.
+  mkdir -p "$H/Library/Developer/CoreSimulator"; ln -s "$M/CoreSimulator/Devices" "$H/Library/Developer/CoreSimulator/Devices"
   case "$2" in
     sentinel) touch "$M/$SENT" ;;
     populated) mkdir -p "$M/memos-ng-ios/gate" "$M/img-manager-ios/gate"; echo x > "$M/run.log" ;;
@@ -169,7 +171,7 @@ reset() {   # reset <state> <root: sentinel|populated|empty|sentinel+extra>
     empty) ;;
   esac
   if [ "$1" = mounted ]; then   # the populated tree is underneath; on top, the image's content
-    mv "$M" "$M.under"; mkdir -p "$M/memos-ng-ios/gate" "$M/quarantine-pre602"
+    mv "$M" "$M.under"; mkdir -p "$M/memos-ng-ios/gate" "$M/quarantine-pre602" "$M/CoreSimulator/Devices"
   fi
 }
 RC=""
@@ -238,6 +240,23 @@ chmod +x "$tmp/awkbin/awk"
 reset prep sentinel; PATH="$tmp/awkbin:$PATH" run
 if [ "$RC" = 1 ] && [ -z "$(calls)" ] && [ "$(state)" = prep ] && tail -1 "$H/Library/Logs/merkur-build-image.log" | grep -qF "exit 1: the bundle's mount points could not be read (awk rc 2)"; then ok "the mount-point reading fails -> exit 1, nothing detached"; else bad "mount-point reading fails (rc $RC)"; fi
 
+# The device root (term (f), @devroot): the wrapper declares success only with the device root on
+# the image. Detached + bare sentinel + the correct link, dangling until the mount: attach, then (f)
+# passes — the dangling link never blocks the mount it is waiting for.
+reset detached sentinel; run
+if [ "$RC" = 0 ] && [ "$(calls)" = "hdiutil attach -owners on -mountpoint $M -nobrowse $BUNDLE;" ] && [ -d "$H/Library/Developer/CoreSimulator/Devices/" ] \
+   && tail -1 "$H/Library/Logs/merkur-build-image.log" | grep -qF "exit 0: mounted and proved: MOUNT OK host=merkur"; then ok "(f) a dangling device-root link over a bare sentinel -> attach, then (f) passes, exit 0 (no mount deadlock)"; else bad "(f) dangling link before attach (rc $RC)"; fi
+reset mounted populated; rm "$H/Library/Developer/CoreSimulator/Devices"; mkdir "$H/Library/Developer/CoreSimulator/Devices"; run
+if [ "$RC" = 1 ] && [ -z "$(calls)" ] && [ "$(state)" = mounted ] && grep -qF "not proved: MOUNT REFUSE host=merkur device root $H/Library/Developer/CoreSimulator/Devices is not a symlink" "$H/Library/Logs/merkur-build-image.log"; then ok "(f) step 1: a healthy image but a real device-root directory -> not proved, exit 1, neither detached nor re-attached"; else bad "(f) step 1 real device-root directory (rc $RC)"; fi
+reset detached sentinel; rm "$H/Library/Developer/CoreSimulator/Devices"; ln -s "$tmp/elsewhere-devices" "$H/Library/Developer/CoreSimulator/Devices"; mkdir -p "$tmp/elsewhere-devices"; run
+if [ "$RC" = 1 ] && [ "$(state)" = mounted ] && tail -1 "$H/Library/Logs/merkur-build-image.log" | grep -qF "exit 1: attach returned 0 but the predicate fails: MOUNT REFUSE host=merkur device root $H/Library/Developer/CoreSimulator/Devices resolves to $tmp/elsewhere-devices"; then ok "(f) step 6: a fresh mount but the device root linked elsewhere -> exit 1"; else bad "(f) step 6 device root elsewhere (rc $RC)"; fi
+# The inventory the wrapper hands the predicate: every project's subtrees, the device root's target,
+# and the @devroot request, on both of its calls.
+n="$(grep -c '^BUILD_IMAGE_SUBTREES="memos-ng-ios/gate memos-ng-ios/work img-manager-ios/gate repaso-es-ios/gate.noindex repaso-es-ios/work.noindex repaso-es-ios/scratch.noindex mardermusic-ios/gate CoreSimulator/Devices"$' "$WRAPPER")"
+c="$(grep -c 'gate_mount_guard enforce $BUILD_IMAGE_SUBTREES @devroot)' "$WRAPPER")"
+OUT="inventory lines: $n, @devroot predicate calls: $c"
+if [ "$n" = 1 ] && [ "$c" = 2 ]; then ok "the wrapper's inventory names CoreSimulator/Devices and both predicate calls ask for @devroot"; else bad "the wrapper's inventory or its @devroot calls"; fi
+
 # Unmeasured attachment and a missing helper refuse.
 reset detached sentinel; touch "$F/hdiutil-garbage"; run
 if [ "$RC" = 1 ] && [ -z "$(calls)" ]; then ok "hdiutil info unparsable -> exit 1, nothing attached"; else bad "hdiutil garbage (rc $RC)"; fi
@@ -253,7 +272,8 @@ reset mounted populated; ln -s "$M.under" "$M/repaso-es-ios"; run
 if [ "$RC" = 1 ] && [ -z "$(calls)" ] && grep -qF "not proved: MOUNT REFUSE host=merkur $M/repaso-es-ios is a symlink" "$LOG"; then ok "step 1: every project's subtrees are proved, not memos's alone (repaso-es-ios a symlink -> exit 1)"; else bad "step 1 symlinked repaso root (rc $RC)"; fi
 reset mounted populated; ln -s "$M.under" "$M/mardermusic-ios"; run
 if [ "$RC" = 1 ] && [ -z "$(calls)" ] && grep -qF "not proved: MOUNT REFUSE host=merkur $M/mardermusic-ios is a symlink" "$LOG"; then ok "step 1: the newest root is in the inventory too (mardermusic-ios a symlink -> exit 1)"; else bad "step 1 symlinked mardermusic root (rc $RC)"; fi
-# The helper names no project: the wrapper hands it the inventory, the same seven roots at step 1
+# The helper names no project: the wrapper hands it the inventory, the same seven roots, the device
+# root's target and the @devroot request at step 1
 # and at step 6, each its own argument. A spy wraps the real helper function in the installed copy.
 cp "$tmp/inst/gate-mount-guard.sh" "$tmp/guard.unspied"
 cat >> "$tmp/inst/gate-mount-guard.sh" <<EOF
@@ -261,10 +281,10 @@ eval "unspied_\$(declare -f gate_mount_guard)"
 gate_mount_guard() { printf '<%s>' "\$@" >> "$F/guard-args"; echo >> "$F/guard-args"; unspied_gate_mount_guard "\$@"; }
 EOF
 reset detached sentinel; run; mv "$tmp/guard.unspied" "$tmp/inst/gate-mount-guard.sh"
-want='<enforce><memos-ng-ios/gate><memos-ng-ios/work><img-manager-ios/gate><repaso-es-ios/gate.noindex><repaso-es-ios/work.noindex><repaso-es-ios/scratch.noindex><mardermusic-ios/gate>'
+want='<enforce><memos-ng-ios/gate><memos-ng-ios/work><img-manager-ios/gate><repaso-es-ios/gate.noindex><repaso-es-ios/work.noindex><repaso-es-ios/scratch.noindex><mardermusic-ios/gate><CoreSimulator/Devices><@devroot>'
 got="$(cat "$F/guard-args" 2>/dev/null)"
 if [ "$RC" = 0 ] && [ "$got" = "$want
-$want" ]; then ok "both proofs hand the helper exactly the seven roots, mardermusic-ios/gate included"; else OUT="$OUT
+$want" ]; then ok "both proofs hand the helper exactly the seven roots, mardermusic-ios/gate included, then CoreSimulator/Devices and @devroot"; else OUT="$OUT
 --- guard args: $got"; bad "inventory handed to the helper (rc $RC)"; fi
 reset detached sentinel; echo symlink > "$F/attach-mode"; run
 if [ "$RC" = 1 ] && [ "$(state)" = mounted ] && tail -1 "$LOG" | grep -qF "exit 1: attach returned 0 but the predicate fails: MOUNT REFUSE host=merkur $M/memos-ng-ios is a symlink"; then ok "step 6: a fresh mount whose memos-ng-ios is a symlink off the volume -> exit 1"; else bad "step 6 symlinked repo root (rc $RC)"; fi
