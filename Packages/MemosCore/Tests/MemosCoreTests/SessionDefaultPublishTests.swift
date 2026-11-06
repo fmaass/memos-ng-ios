@@ -157,6 +157,43 @@ struct SessionDefaultPublishTests {
         #expect(rig.published == "PROTECTED")
     }
 
+    /// The write's half of the identity fence: a PATCH asked for by account A and answered after
+    /// B has signed in is judged against A's generation, so its answer reaches neither B's screen
+    /// nor B's licence file.
+    @Test("a save answered after another account signed in publishes nothing onto that account")
+    func staleSaveNeverCrossesAccounts() async throws {
+        let subject = LockedValue("fabian")
+        let entered = TripLatch()
+        let release = TripLatch()
+        let rig = await makeRig(subject: subject) { operation, _ in
+            switch operation {
+            case patchSettings:
+                entered.open()
+                _ = await release.wait()
+                return Stub.json(settingsBody("PRIVATE"))
+            case getSettings:
+                return Stub.json(settingsBody("PROTECTED"))
+            default:
+                return nil
+            }
+        }
+        defer { rig.cleanUp() }
+
+        async let stale = rig.session.setDefaultVisibility(.private)
+        #expect(await entered.wait(), "the first account's save never reached the wire")
+        subject.set("someone-else")
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "memos_pat_other")
+        let licence = try #require(rig.sheet.currentLicence())
+        #expect(licence.binding.ownerSubject == "someone-else", "precondition: B is signed in")
+        await rig.session.loadSettings()
+        #expect(rig.published == "PROTECTED", "precondition: B's own default was published")
+        release.open()
+
+        #expect(await stale == false, "A's save answered as adopted in B's session")
+        #expect(rig.session.defaultVisibility == .protected, "A's answer replaced B's default")
+        #expect(rig.published == "PROTECTED", "A's answer was published onto B's licence")
+    }
+
     /// «A store serializes its own mutations»: a read that was already out when a save went on
     /// the wire carries the default from before the save, and must not put it back afterwards —
     /// neither on the screen nor in the share extension's file.
