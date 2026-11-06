@@ -392,7 +392,12 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8", newline="").read()
 open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", "\r\n"))
 PY
-check "the config with CRLF line endings" 0 "$w" "97 operationIds named by filter.operations"
+# The length is read from the rule's own run on the real tree, never written down: a literal count
+# goes stale on every re-vendor of the document (97 became 107 with memos-ng 2.14.0) and then fails
+# every gate-path change for a reason that has nothing to do with the change.
+real_named="$("$RULE" "$repo_root" 2>&1 | sed -n 's/^openapi-coverage: \([0-9][0-9]*\) operationIds named by filter\.operations$/\1/p')"
+[ -n "$real_named" ] || { echo "FAIL: the rule names no operationIds count on the real tree"; exit 1; }
+check "the config with CRLF line endings" 0 "$w" "$real_named operationIds named by filter.operations"
 
 # And the repository this suite ships in, which is the point of the whole exercise. With the copied
 # pair at the top of this file it is also the positive control on every refusal above: the real
