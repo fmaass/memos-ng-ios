@@ -211,6 +211,28 @@ public struct MemoQuery: Sendable, Equatable, Codable {
         return !memo.isArchived
     }
 
+    /// Whether this query would show a memo another device has just created (MEMNG-966).
+    ///
+    /// The opposite bias from `admitsArchiveState`, and for the same reason turned around: there
+    /// a wrong "no" evicts a row nothing brings back, here a wrong "yes" shows a memo the list does
+    /// not hold, while a wrong "no" costs only the wait for the next refresh. So every dimension
+    /// this side cannot judge exactly answers no — the full-text term above all, which the server
+    /// matches with an index this client does not have.
+    ///
+    /// A guest memo is shown only where guests are asked for: the home timeline leaves them out
+    /// (MEMNG-1164), a trip's list takes them (MEMNG-1233).
+    public func admitsLiveCreated(_ memo: Memo, isGuest: Bool, in calendar: Calendar) -> Bool {
+        if isGuest && !includeGuests { return false }
+        if term != nil { return false }
+        if let visibility, memo.visibility != visibility { return false }
+        if !tags.allSatisfy(memo.tags.contains) { return false }
+        if !admitsArchiveState(of: memo) { return false }
+        if let ceiling = anchor?.createdBefore(in: calendar), memo.createdAt >= ceiling {
+            return false
+        }
+        return true
+    }
+
     /// A term of nothing but spaces is not a search, and a tag of nothing but spaces is not a tag:
     /// both are normalised away here, once, so a blank field can never reach the wire as `q=` and
     /// two queries that ask the same thing compare equal.

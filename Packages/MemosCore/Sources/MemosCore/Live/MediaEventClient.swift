@@ -62,17 +62,21 @@ public enum MediaEventConnectionState: Sendable, Equatable {
 /// closes that window. The question can only be answered where the answer is used, and
 /// `MediaIdentity` rotates on the main actor — so a consumer that asks there is asking a clock
 /// that cannot move underneath it.
-public struct MediaEventEnvelope: Sendable, Equatable {
+///
+/// Generic over the event because every kind the stream carries needs the same fence: a memo uid
+/// means nothing across accounts either, and a memo frame applied past a rotation would insert the
+/// previous account's memo into the new account's timeline.
+public struct LiveEventEnvelope<Event: Sendable & Equatable>: Sendable, Equatable {
     /// Deliberately not `public`, and the whole reason this is a type rather than a tuple: outside
     /// this module there is no unfenced way to reach the event at all. A rule a consumer has to
     /// remember is a rule a consumer eventually forgets, and forgetting it here is precisely the
     /// bug the stamp exists to prevent.
-    let event: MediaEvent
+    let event: Event
     /// The generation the channel was fenced to when this event arrived. Readable everywhere: it
     /// is a counter, it names no account and carries nothing of the event.
     public let generation: Int
 
-    init(event: MediaEvent, generation: Int) {
+    init(event: Event, generation: Int) {
         self.event = event
         self.generation = generation
     }
@@ -84,10 +88,17 @@ public struct MediaEventEnvelope: Sendable, Equatable {
     /// patches the new account's timeline with the previous account's photo. Reading the clock
     /// HERE, on the actor that owns it, is what makes the answer still true when it is used.
     @MainActor
-    public func eventIfCurrent(for identity: MediaIdentity = .shared) -> MediaEvent? {
+    public func eventIfCurrent(for identity: MediaIdentity = .shared) -> Event? {
         generation == identity.generation ? event : nil
     }
 }
+
+/// A media-status event in its envelope.
+public typealias MediaEventEnvelope = LiveEventEnvelope<MediaEvent>
+/// A memo frame (`memo.created`, `memo.updated`, `memo.deleted`) in its envelope.
+public typealias MemoEventEnvelope = LiveEventEnvelope<MemoEvent>
+/// An `upload.progress` frame in its envelope.
+public typealias UploadProgressEnvelope = LiveEventEnvelope<UploadProgressEvent>
 
 /// Everything the channel reports, in the order it happens: state changes and events on one
 /// stream, so a consumer cannot see an event from a connection whose `open` it has not seen yet.
@@ -95,6 +106,10 @@ public enum MediaEventStreamItem: Sendable, Equatable {
     case state(MediaEventConnectionState)
     /// Stamped, and to be read through `MediaEventEnvelope.eventIfCurrent(for:)` — see the fence.
     case event(MediaEventEnvelope)
+    /// A memo frame, stamped and fenced exactly as a media event is.
+    case memo(MemoEventEnvelope)
+    /// An upload's received offset, stamped and fenced exactly as a media event is.
+    case uploadProgress(UploadProgressEnvelope)
 }
 
 /// The live media channel: `GET /api/events`, parsed, decoded, and reconnected.
@@ -425,9 +440,18 @@ public final class MediaEventClient: Sendable {
                 guard await generation() == fence else { return result(.identityChanged) }
                 for frame in frames {
                     do {
-                        let event = try MediaEvent.decode(frame)
-                        let stamped = MediaEventEnvelope(event: event, generation: fence)
-                        continuation.yield(.event(stamped))
+                        switch try LiveEvent.decode(frame) {
+                        case .media(let event):
+                            continuation.yield(
+                                .event(MediaEventEnvelope(event: event, generation: fence)))
+                        case .memo(let event):
+                            continuation.yield(
+                                .memo(MemoEventEnvelope(event: event, generation: fence)))
+                        case .uploadProgress(let event):
+                            continuation.yield(
+                                .uploadProgress(
+                                    UploadProgressEnvelope(event: event, generation: fence)))
+                        }
                     } catch {
                         MemosLog.media.info(
                             "media event skipped: \(String(describing: error), privacy: .public)"
