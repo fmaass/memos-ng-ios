@@ -146,6 +146,18 @@ struct MemoQueryTests {
         #expect(!MemoQuery(visibility: .public).isEmpty)
         #expect(!MemoQuery(includeArchived: true).isEmpty)
         #expect(!MemoQuery(archivedOnly: true).isEmpty)
+        #expect(!MemoQuery(includeGuests: true).isEmpty)
+        #expect(parameters.includeGuests == nil, "the plain timeline asked for pass guests")
+    }
+
+    @Test("a query asking for pass guests becomes includeGuests, its other filters untouched")
+    func aQueryAskingForGuests() {
+        let parameters = MemoQuery(tags: ["cyprus2026"], includeGuests: true)
+            .parameters(in: Self.berlin, direction: .newer)
+        #expect(parameters.includeGuests == true)
+        #expect(parameters.tag == ["cyprus2026"])
+        #expect(parameters.sort == "created_at")
+        #expect(MemoQuery(tags: ["cyprus2026"]).parameters(in: Self.berlin).includeGuests == nil)
     }
 
     @Test("a query round-trips through its own serialization")
@@ -164,6 +176,7 @@ struct MemoQueryTests {
                 includeArchived: true,
                 archivedOnly: true
             ),
+            MemoQuery(tags: ["cyprus2026"], includeGuests: true),
         ]
 
         for query in queries {
@@ -182,6 +195,8 @@ struct MemoQueryTests {
         let decoded = try JSONDecoder().decode(MemoQuery.self, from: Data(blank.utf8))
         #expect(decoded == MemoQuery(tags: ["trip"]))
         #expect(decoded.parameters(in: calendar).q == nil)
+        // Written down before guests could be asked for: it asked for none.
+        #expect(decoded.includeGuests == false)
 
         // Control: two queries that differ do not decode equal, so the assertions above are about
         // the round trip rather than about everything comparing equal.

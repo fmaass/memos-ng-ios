@@ -72,6 +72,8 @@ struct CollectionScopeJournalTests {
         #expect(TripWire.query(path, "sort") == "created_at", "\(path)")
         #expect(!TripWire.hasQuery(path, "created_after"), "\(path)")
         #expect(!TripWire.hasQuery(path, "created_before"), "\(path)")
+        // Everyone's tag reads what the household wrote; pass guests stay in their trip.
+        #expect(!TripWire.hasQuery(path, "guest"), "a tag's journal asked for guests: \(path)")
     }
 
     @Test("October's journal: bounds on every page, start and last second in, nextStart out")
@@ -109,6 +111,7 @@ struct CollectionScopeJournalTests {
         #expect(sent.count == 2, "the walk read past nextStart: \(sent)")
         for path in sent {
             #expect(!TripWire.hasQuery(path, "tag"), "a month's journal named a tag: \(path)")
+            #expect(!TripWire.hasQuery(path, "guest"), "a month asked for guests: \(path)")
             #expect(TripWire.query(path, "sort") == "created_at", "\(path)")
             let after = Self.parsed(TripWire.query(path, "created_after"))
             let before = Self.parsed(TripWire.query(path, "created_before"))
@@ -164,6 +167,40 @@ struct CollectionScopeJournalTests {
         #expect(reads.contains { TripWire.query($0, "tag") == TripJournalWire.tag })
         #expect(store.journal(for: .trip(trip)).map(\.uid) == store.journal(for: trip).map(\.uid))
         #expect(Set(store.journal(for: .trip(trip)).map(\.uid)) == ["tagged", "spanned"])
+    }
+
+    /// The server answers `guest=exclude` unless asked (MEMNG-1164), and a pass guest's memo is
+    /// written under the trip's tag inside its days — so only the parameter keeps it out.
+    @Test("a trip's journal asks for pass guests' memos on both lanes and lists them (MEMNG-1233)")
+    func aTripsJournalIncludesGuestMemos() async throws {
+        let server = TripServer(answer: { request, operation in
+            guard operation == TripJournalWire.memos else { return nil }
+            let path = request.path ?? ""
+            let guests = TripWire.query(path, "guest") == "include"
+            let tagged = TripWire.query(path, "tag") == TripJournalWire.tag
+            let own = tagged ? "tagged" : "spanned"
+            var memos = [Self.memo(own, tagged ? "2026-07-11T10:00:00Z" : "2026-07-12T10:00:00Z")]
+            if guests {
+                memos.append(
+                    Self.memo(
+                        tagged ? "guest-tagged" : "guest-spanned",
+                        tagged ? "2026-07-13T10:00:00Z" : "2026-07-14T10:00:00Z"))
+            }
+            return Stub.json(Stub.page(memos, nextCursor: nil))
+        })
+        server.seed(title: "Lisbon", tag: TripJournalWire.tag, span: TripJournalWire.span)
+        let (trips, store) = await TripSeeder(server: server).members()
+        let trip = try #require(trips.trips.first)
+        await store.loadJournal(trip, using: server.client.handle, baseURL: Stub.baseURL)
+
+        let reads = server.calls.of(TripJournalWire.memos).map(\.path)
+        #expect(reads.count == 2, "not the tag lane and the span lane: \(reads)")
+        for path in reads {
+            #expect(TripWire.query(path, "guest") == "include", "a lane left guests out: \(path)")
+        }
+        #expect(
+            Set(store.journal(for: trip).map(\.uid))
+                == ["tagged", "spanned", "guest-tagged", "guest-spanned"])
     }
 }
 

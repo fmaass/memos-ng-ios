@@ -3095,6 +3095,7 @@ public final class TimelineStore {
                     createdAfter: parameters.createdAfter,
                     tag: parameters.tag,
                     visibility: parameters.visibility?.generated,
+                    guest: parameters.includeGuests == true ? .include : nil,
                     q: parameters.q,
                     includeArchived: parameters.includeArchived,
                     archivedOnly: parameters.archivedOnly,

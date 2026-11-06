@@ -100,6 +100,10 @@ public struct MemoQuery: Sendable, Equatable, Codable {
     public let includeArchived: Bool
     /// Only archived memos.
     public let archivedOnly: Bool
+    /// Memos a trip pass brought in alongside the household's own. The server leaves them out
+    /// unless asked (`guest=exclude`, MEMNG-1164), which is right for the home timeline and wrong
+    /// for the trip they were shared into (MEMNG-1233).
+    public let includeGuests: Bool
 
     public init(
         term: String? = nil,
@@ -107,7 +111,8 @@ public struct MemoQuery: Sendable, Equatable, Codable {
         tags: [String] = [],
         visibility: MemoVisibility? = nil,
         includeArchived: Bool = false,
-        archivedOnly: Bool = false
+        archivedOnly: Bool = false,
+        includeGuests: Bool = false
     ) {
         self.term = Self.normalisedTerm(term)
         self.anchor = anchor
@@ -115,6 +120,7 @@ public struct MemoQuery: Sendable, Equatable, Codable {
         self.visibility = visibility
         self.includeArchived = includeArchived
         self.archivedOnly = archivedOnly
+        self.includeGuests = includeGuests
     }
 
     /// The plain timeline: no term, no anchor, no filter.
@@ -139,6 +145,8 @@ public struct MemoQuery: Sendable, Equatable, Codable {
         public var visibility: MemoVisibility?
         public var includeArchived: Bool?
         public var archivedOnly: Bool?
+        /// `guest=include`, or nil to let the server's `exclude` stand.
+        public var includeGuests: Bool?
         /// The server's `sort`, or nil to let its own default (`-created_at`) stand. Sent only by
         /// the direction that needs the other one — see `MemoPageDirection`.
         public var sort: String?
@@ -151,6 +159,7 @@ public struct MemoQuery: Sendable, Equatable, Codable {
             visibility: MemoVisibility? = nil,
             includeArchived: Bool? = nil,
             archivedOnly: Bool? = nil,
+            includeGuests: Bool? = nil,
             sort: String? = nil
         ) {
             self.q = q
@@ -160,6 +169,7 @@ public struct MemoQuery: Sendable, Equatable, Codable {
             self.visibility = visibility
             self.includeArchived = includeArchived
             self.archivedOnly = archivedOnly
+            self.includeGuests = includeGuests
             self.sort = sort
         }
     }
@@ -177,7 +187,8 @@ public struct MemoQuery: Sendable, Equatable, Codable {
             tag: tags.isEmpty ? nil : tags,
             visibility: visibility,
             includeArchived: includeArchived ? true : nil,
-            archivedOnly: archivedOnly ? true : nil
+            archivedOnly: archivedOnly ? true : nil,
+            includeGuests: includeGuests ? true : nil
         )
     }
 
@@ -222,6 +233,7 @@ extension MemoQuery {
         case visibility
         case includeArchived
         case archivedOnly
+        case includeGuests
     }
 
     /// Decoding goes through the same initialiser everything else does, so a query read back from
@@ -236,7 +248,10 @@ extension MemoQuery {
             visibility: try container.decodeIfPresent(MemoVisibility.self, forKey: .visibility),
             includeArchived: try container.decodeIfPresent(Bool.self, forKey: .includeArchived)
                 ?? false,
-            archivedOnly: try container.decodeIfPresent(Bool.self, forKey: .archivedOnly) ?? false
+            archivedOnly: try container.decodeIfPresent(Bool.self, forKey: .archivedOnly) ?? false,
+            // A query written down before guests existed asked for none.
+            includeGuests: try container.decodeIfPresent(Bool.self, forKey: .includeGuests)
+                ?? false
         )
     }
 }
