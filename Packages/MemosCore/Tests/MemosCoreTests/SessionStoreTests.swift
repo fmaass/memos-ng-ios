@@ -740,6 +740,9 @@ final class SpyAccountStore: OutboxAccountPublishing, @unchecked Sendable {
         log?.record("licence.publish")
     }
 
+    /// Not modelled: the suites that need the default's file use a real `OutboxAccountStore`.
+    func publishDefaultVisibility(_ wire: String?, for binding: AccountBinding) {}
+
     func clear() throws {
         let refuse: Bool = lock.withLock {
             guard refusals > 0 else { return false }

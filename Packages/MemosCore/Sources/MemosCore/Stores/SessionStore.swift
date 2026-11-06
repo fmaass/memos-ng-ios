@@ -249,6 +249,11 @@ public final class SessionStore {
     /// The default-visibility PATCH and the token rename on the wire, each the one a second caller
     /// joins or is refused by (`setDefaultVisibility`, `renameDeviceToken`).
     @ObservationIgnored private var visibilityWrite: InFlightWrite<MemoVisibility>?
+    /// Moved as a default-visibility write goes on the wire and again as its answer lands, on the
+    /// main actor with nothing awaited around either. A settings READ that saw it move while it
+    /// was out carries a default from before the write, so it adopts nothing: the write's answer
+    /// is the newer choice, and a GET that outlived it must not put the old one back (MEMNG-972).
+    @ObservationIgnored private var visibilityWriteTurns = 0
     @ObservationIgnored private var tokenRename: InFlightWrite<String>?
     /// The generation a client was last INSTALLED under. Moved by an establishment, and by
     /// nothing else — a withdrawal leaves it exactly where it was.
@@ -2407,10 +2412,15 @@ public final class SessionStore {
     public func loadSettings() async {
         guard let client else { return }
         let generation = sessionGeneration
+        let turns = visibilityWriteTurns
         do {
             let settings = try await Self.settings(client)
             guard generation == sessionGeneration else {
                 MemosLog.session.info("GET /api/settings answered for a session that has ended")
+                return
+            }
+            guard turns == visibilityWriteTurns else {
+                MemosLog.session.info("GET /api/settings answered across a write; the write stands")
                 return
             }
             apply(settings)
@@ -2499,6 +2509,10 @@ public final class SessionStore {
         _ visibility: MemoVisibility, askedIn generation: Int
     ) async -> Bool {
         guard generation == sessionGeneration, let client else { return false }
+        visibilityWriteTurns += 1
+        // Every way out below lands here first, synchronously after the await: a read that
+        // overlapped any part of this write is judged stale against it.
+        defer { visibilityWriteTurns += 1 }
         do {
             let settings = try await Self.updateSettings(client, defaultVisibility: visibility)
             guard generation == sessionGeneration else {
@@ -3033,9 +3047,23 @@ public final class SessionStore {
         }
     }
 
+    /// Adopts what the server said about the account. Every caller has already checked that the
+    /// answer belongs to the session generation that asked, and nothing is awaited between that
+    /// check and this write — so the copy published beside the licence for the share sheet
+    /// (MEMNG-972) is fenced by the same check: an answer from a previous sign-in never reaches
+    /// the next account's licence file.
     private func apply(_ settings: AccountSettings) {
         defaultVisibility = settings.defaultVisibility
         avatar = settings.avatar
+        // Onto the licence of the account signed in NOW, and only that one: the store refuses a
+        // binding that is not the standing licence's, and a session that is not signed in (a
+        // provisional launch publishes no licence) publishes nothing.
+        if let configuration, let user = state.user {
+            let binding = AccountBinding(
+                serverBaseURL: configuration.baseURL, ownerSubject: user.subject
+            )
+            account?.publishDefaultVisibility(settings.defaultVisibility.rawValue, for: binding)
+        }
     }
 
     /// What `/api/settings` says about the account, in the app's own vocabulary. The server also
