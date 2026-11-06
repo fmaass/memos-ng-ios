@@ -362,6 +362,8 @@ public final class Outbox {
     public func appBecameActive() -> Task<Void, Never> {
         schedulingGate.open()
         return Task {
+            // A withdraw Remove queued and the server never answered is sent again (MEMNG-953).
+            await engine.requestSessionWithdrawals(from: repository.sessionWithdrawals)
             await reattachShareSessions()
             await drain()
             // Access the person may have just allowed in Settings reaches the items left in Photos.
@@ -707,8 +709,15 @@ public final class Outbox {
         // The delete is fenced on the row this call wrote, and the hop above is an instant for
         // another write to land in. Losing it leaves a cancelled capture on disk, so the answer is
         // the delete's: a card hidden over a row that is still there would come back next launch.
-        let removed = await repository.delete(landed, ifStillCurrent: landed)
+        //
+        // Its open upload sessions are queued for their DELETE in the same write (MEMNG-953):
+        // after the mark above, which is the withdraw decision — a create claimed first made that
+        // write lose, and one claimed later is refused by it, so no finalize follows a withdraw —
+        // and after the tasks are cancelled, so no byte of theirs is sent after it.
+        let removed = await repository.withdraw(landed, ifStillCurrent: landed)
         await refresh()
+        // Queued, never awaited: the card goes now, the DELETE when the server can take it.
+        await engine.requestSessionWithdrawals(from: repository.sessionWithdrawals)
         return removed
     }
 

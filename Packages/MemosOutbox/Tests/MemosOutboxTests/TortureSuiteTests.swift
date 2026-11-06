@@ -128,10 +128,7 @@ struct TortureSuiteTests {
         #expect(rig.session.createdTasks.count == 2)
     }
 
-    @Test(
-        "T9: Remove with the first file on the server withdraws every upload session",
-        .disabled("MEMNG-973 T9: Remove sends no DELETE /api/uploads/{uid}; the contract has none")
-    )
+    @Test("T9: Remove with the first file on the server withdraws every upload session")
     @MainActor
     func t9RemoveWithFirstFileOnServer() async throws {
         let rig = try await WholeRig.make(attached: false)
@@ -168,6 +165,8 @@ struct TortureSuiteTests {
         #expect(opened.count == 2)
 
         #expect(await outbox.withdraw(rig.job.id))
+        // The withdraw is queued, never awaited by Remove: the engine sends it on its own.
+        try await settled(engine)
 
         #expect(rig.session.cancelledIdentifiers.contains(video.taskIdentifier))
         let withdrawn = Set(rig.http.requests(method: "DELETE").compactMap { $0.url?.path() })
