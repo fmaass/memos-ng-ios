@@ -5,6 +5,15 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (78)
+
+- Pictures a guest shared into a trip now show in that trip's Journal.
+- Ending a trip pass asks with a centered Yes or No alert instead of a detached popover.
+- A picture a guest adds while the trip is still refreshing shows up without another refresh.
+- Two visibility questions asked close together are both asked, one after the other, instead of the second replacing the first.
+- A visibility change whose answer was lost stays marked until the server shows it landed.
+- The share sheet's upload permission is renewed cleanly when my sign-in renews.
+
 ## 2.4.0 (77)
 
 - A trip pass link opened from the Camera or Messages opens the app on that pass; without the app it falls back to the door's landing page.
