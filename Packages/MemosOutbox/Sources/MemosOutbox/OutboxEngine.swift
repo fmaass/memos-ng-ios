@@ -1930,6 +1930,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         }
         var opened = candidate.files.contains { sending.contains($0.id) && $0.uploadUID != nil }
         var refused = false
+        var spaced: [(fileID: UUID, message: String, retryAfter: TimeInterval?)] = []
         for file in candidate.files where sending.contains(file.id) {
             candidate = candidate.updating(file.id) { $0.sessionUnsent = nil }
         }
@@ -1949,13 +1950,21 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                     file.id, retry: FileRetry(retryAfter: retryAfter, draw: rng()),
                     error: message, at: clock()
                 )
+                spaced.append((file.id, message, retryAfter))
             case nil:
                 break
             }
         }
+        // A batch that opened nothing and turned nothing away has only spacing to write, and that
+        // is written onto the row as it stands, as the single create's failure is: a sibling's
+        // answer landing meanwhile must not throw a file's deadline away and resend it at once.
+        guard opened || refused else {
+            await spaceOut(spaced, of: job, credentials: credentials)
+            return false
+        }
         // Nothing is handed to the session on a state nobody wrote: the answer to each task is
-        // matched against this write. A batch that opened nothing leaves the row as its spacing
-        // or its refusals wrote it; each file's deadline, or the next plan, is what comes next.
+        // matched against this write. A batch that opened nothing leaves the row as its refusals
+        // wrote it; each file's deadline, or the next plan, is what comes next.
         let uploading =
             opened
             ? candidate.with {
@@ -1964,7 +1973,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             } : candidate
         guard let saved = await save(uploading, matching: job) else {
             // The row moved under this hand-off — perhaps by a pass that skipped these very files
-            // because this hand-off owned them. Nobody else will send them: ask again.
+            // because this hand-off owned them. Nobody else will send them: ask again. The spacing
+            // is not the row's move to lose: each file's deadline is written as it stands.
+            await spaceOut(spaced, of: job, credentials: credentials)
             requestDrain()
             return false
         }
@@ -2431,6 +2442,20 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             fileID, of: job, term: term, credentials: credentials,
             with: .sessionFailed(message, FileRetry(retryAfter: retryAfter, draw: rng()))
         )
+    }
+
+    /// Every file a batch spaced out, its failure written as `sessionFailed` writes one: onto the
+    /// row as it stands, against the term `job` gave the file.
+    private func spaceOut(
+        _ spaced: [(fileID: UUID, message: String, retryAfter: TimeInterval?)],
+        of job: UploadJob, credentials: OutboxCredentials
+    ) async {
+        for file in spaced {
+            await sessionFailed(
+                file.fileID, of: job, term: job.file(file.fileID)?.uploadAttempt ?? 0,
+                retryAfter: file.retryAfter, message: file.message, credentials: credentials
+            )
+        }
     }
 
     /// Tasks whose request allows other networks than the person's choice now are replaced: the

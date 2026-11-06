@@ -2477,7 +2477,9 @@ struct WholeBudgetEngineTests {
         #expect(rig.session.createdTasks.count == 4)
     }
 
-    @Test("a session request answered 429 spaces its file; a sibling's success clears nothing")
+    /// Both sessions open in one batch (MEMNG-958), where a 429 can only answer the whole request;
+    /// what one file alone can be answered with is its entry's 507, which carries no delay.
+    @Test("a batch entry answered 507 spaces its file; a sibling's success clears nothing")
     func sessionBackpressureIsPerFile() async throws {
         let sleeper = ControlledSleeper()
         let busy = WholeBox(true)
@@ -2486,7 +2488,7 @@ struct WholeBudgetEngineTests {
             answerPost: { request in
                 let body = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 guard busy.value, body.contains("video.mov") else { return nil }
-                return OutboxHTTPResponse(statusCode: 429, headers: ["Retry-After": "2"])
+                return OutboxHTTPResponse(statusCode: 507)
             }
         )
         defer { rig.cleanUp() }
@@ -2494,7 +2496,8 @@ struct WholeBudgetEngineTests {
         await rig.engine.drain()
         try await settled(rig.engine)
         let row = try await rig.reload()
-        #expect(row.file(rig.video.id)?.nextAttemptAt == start.addingTimeInterval(2))
+        let deadline = try #require(row.file(rig.video.id)?.nextAttemptAt)
+        #expect(deadline > start)
         #expect(row.state != .held)
         let picture = try rig.task(for: rig.picture.id)
         #expect(rig.postsNaming("video.mov") == 1)
@@ -2504,8 +2507,9 @@ struct WholeBudgetEngineTests {
         await rig.engine.handle(try rig.answer(picture, status: 200, received: 1000))
         try await settled(rig.engine)
         #expect(rig.postsNaming("video.mov") == 1)
+        #expect(try await rig.reload().file(rig.video.id)?.nextAttemptAt == deadline)
 
-        rig.clock.advance(2)
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.postsNaming("video.mov") == 2 })
         #expect(try await rig.eventually { (try? rig.task(for: rig.video.id)) != nil })
