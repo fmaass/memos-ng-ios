@@ -352,7 +352,60 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     private var isQuiescent: Bool {
         !isDraining && !drainRequested && continuationsInFlight == 0 && creating.isEmpty
-            && drainsKicked == 0
+            && drainsKicked == 0 && !isWithdrawingSessions
+    }
+
+    /// A pass over the queued withdraws is running (`requestSessionWithdrawals`), and whether
+    /// another was asked for while it ran.
+    private var isWithdrawingSessions = false
+    private var sessionWithdrawalRequested = false
+
+    /// Sends the DELETE every removed capture still owes (MEMNG-953), without being awaited.
+    ///
+    /// Joined, never doubled: asked while a pass runs, it is folded into that pass, which reads
+    /// the queue again before it ends — a session owed after the first read is still sent, and
+    /// none is sent twice by overlapping asks. Claimed here, before any suspension, so
+    /// `untilQuiescent` covers the pass from the instant this returns.
+    public func requestSessionWithdrawals(from queue: UploadSessionWithdrawals) {
+        guard !isWithdrawingSessions else {
+            sessionWithdrawalRequested = true
+            return
+        }
+        isWithdrawingSessions = true
+        Task { await self.withdrawSessions(from: queue) }
+    }
+
+    private func withdrawSessions(from queue: UploadSessionWithdrawals) async {
+        repeat {
+            sessionWithdrawalRequested = false
+            await withdrawSessionsOnce(from: queue)
+        } while sessionWithdrawalRequested
+        isWithdrawingSessions = false
+        settle()
+    }
+
+    /// One pass over the queue. Each withdraw goes only under the account that opened its session,
+    /// and that is asked again where the request leaves (`SendAuthority`): another account's
+    /// server answers 204 for a uid it does not own. An answer — success, or the session already
+    /// gone — takes the entry off the queue; anything else (no network, a busy database, a
+    /// credential refused) leaves it for a later pass. No capture is read or written: the capture
+    /// is gone, so nothing answered here can bring it back.
+    private func withdrawSessionsOnce(from queue: UploadSessionWithdrawals) async {
+        let owed = queue.pending()
+        guard !owed.isEmpty, let credentials = await acquire(), credentials.kind == .member else {
+            return
+        }
+        var answered: [UploadSessionWithdrawal] = []
+        for item in owed where item.binding.matches(credentials) {
+            let request = OutboxRequests.withdrawUpload(
+                baseURL: credentials.serverBaseURL, token: credentials.token,
+                uploadUID: item.uploadUID
+            )
+            let sending = authority(under: credentials, for: .sessionWithdrawal)
+            guard let response = try? await http.perform(request, under: sending) else { continue }
+            if response.isSuccess || response.statusCode == 404 { answered.append(item) }
+        }
+        queue.settle(answered)
     }
 
     /// Asks for another pass without waiting for it: folded into the running drain when there is
@@ -2533,6 +2586,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         case memoCreate
         /// The health GET before a pass.
         case probe
+        /// The DELETE a removed capture owes each upload session it opened.
+        case sessionWithdrawal
     }
 
     /// What asking the server where an upload stands came to.

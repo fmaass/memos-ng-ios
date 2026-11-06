@@ -502,6 +502,7 @@ struct WholeRig {
         sleeper: any OutboxSleeping = ControlledSleeper(),
         rng: @escaping @Sendable () -> Double = { 1 },
         answerPost: (@Sendable (URLRequest) -> OutboxHTTPResponse?)? = nil,
+        answerDelete: (@Sendable (URLRequest) throws -> OutboxHTTPResponse)? = nil,
         wrapHTTP: (@Sendable (ScriptedHTTP) -> any OutboxHTTPPerforming)? = nil,
         carriedElsewhere: @escaping @Sendable (UUID) -> Bool = { _ in false }
     ) async throws -> WholeRig {
@@ -544,6 +545,10 @@ struct WholeRig {
             case ("HEAD", _):
                 if let scripted = answerHead?(request) { return scripted }
                 return OutboxHTTPResponse(statusCode: headStatus)
+            case ("DELETE", _):
+                // The contract's withdraw: always 204, idempotent.
+                if let answerDelete { return try answerDelete(request) }
+                return OutboxHTTPResponse(statusCode: 204)
             default:
                 return OutboxHTTPResponse(statusCode: 500)
             }
