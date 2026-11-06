@@ -34,11 +34,14 @@ struct TripPassSheet: View {
     }
 }
 
-/// Joining a trip: the live scanner when the phone has one, and a paste field always — a link sent
-/// in a chat is a pass too. A refused redeem says why, and "Scan again" gives the scanner a fresh
-/// claim.
+/// Joining a trip: the name to join under, the live scanner when the phone has one, and a paste
+/// field always — a link sent in a chat is a pass too. A refused redeem says why, and "Scan
+/// again" gives the scanner a fresh claim.
 struct TripPassJoinView: View {
     let guest: GuestSessionStore
+    /// Starts as the name typed last time, else the device's; whatever it holds when a code is
+    /// scanned or Join is tapped is the name sent.
+    @State private var name: String
     @State private var pasted = ""
     @State private var pasteRefused = false
     @State private var scan = 0
@@ -46,6 +49,11 @@ struct TripPassJoinView: View {
     /// Tall enough to aim at a code held at arm's length, short enough to leave the paste field
     /// on screen above the keyboard.
     static let scannerHeight: CGFloat = 280
+
+    init(guest: GuestSessionStore) {
+        self.guest = guest
+        _name = State(initialValue: guest.presentedName)
+    }
 
     private var isRedeeming: Bool { guest.state == .redeeming }
 
@@ -56,6 +64,20 @@ struct TripPassJoinView: View {
 
     var body: some View {
         Form {
+            Section {
+                TextField("Your name", text: $name)
+                    .textContentType(.name)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .onChange(of: name) { _, typed in
+                        let capped = GuestName.capped(typed)
+                        if capped != typed { name = capped }
+                    }
+            } header: {
+                Text("Your name")
+            } footer: {
+                Text("The trip shows it with everything you send.")
+            }
             if TripPassScannerView.isAvailable {
                 Section {
                     TripPassScannerView { url in join(url) }
@@ -98,7 +120,8 @@ struct TripPassJoinView: View {
 
     private func join(_ url: URL) {
         pasteRefused = false
-        Task { await guest.redeem(passLink: url) }
+        let typed = name
+        Task { await guest.redeem(passLink: url, typedName: typed) }
     }
 
     private func joinPasted() {
@@ -126,6 +149,11 @@ struct GuestModeView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                }
+                // Read-only: the door's redeem is the only writer of a device's name, so changing
+                // it after joining waits for a door endpoint of its own.
+                if let joinedName = guest.joinedName {
+                    LabeledContent("Joined as", value: joinedName)
                 }
                 Text("Share photos and videos to this trip from the Photos app.")
                     .font(.footnote)

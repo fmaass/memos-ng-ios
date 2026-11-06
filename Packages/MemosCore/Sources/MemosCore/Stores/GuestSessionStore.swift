@@ -17,10 +17,11 @@ import OpenAPIRuntime
 /// the generated guest client can take this seam's place without the store noticing.
 ///
 /// Overlapping redeems JOIN: while one is on the wire, a second call waits for it and returns its
-/// outcome, so two taps (or a tap and an opened link) are one request. Every read is judged against
-/// the guest epoch that issued it: an answer that outlived a leave or a newer pass publishes
-/// nothing. A redeem is judged the same way against the session generation it was sent under: a
-/// pass the door hands over after a leave is not taken.
+/// outcome, so two taps (or a tap and an opened link) are one request — sent under the FIRST
+/// caller's name; a joining caller's name is neither sent nor remembered. Every read is judged
+/// against the guest epoch that issued it: an answer that outlived a leave or a newer pass
+/// publishes nothing. A redeem is judged the same way against the session generation it was sent
+/// under: a pass the door hands over after a leave is not taken.
 @MainActor
 @Observable
 public final class GuestSessionStore {
@@ -70,11 +71,20 @@ public final class GuestSessionStore {
     public private(set) var state: State = .none
     /// What the door says this device has sent, newest first as the door orders them.
     public private(set) var receipts: [GuestWire.Receipt] = []
+    /// The name the pass this device holds was redeemed under, as this device sent it. `nil` for
+    /// no pass, and for a pass redeemed by a build that did not keep it.
+    public private(set) var joinedName: String?
+
+    /// Where the names are kept: the name last typed, and the name the current pass joined under.
+    /// Read on every launch forever, so they are never renamed.
+    public static let rememberedNameKey = "guestDisplayName"
+    public static let joinedNameKey = "guestJoinedName"
 
     @ObservationIgnored private let credentials: GuestCredentialStore
     @ObservationIgnored private let licence: (any OutboxAccountPublishing)?
     @ObservationIgnored private let door: GuestDoorClient
-    @ObservationIgnored private let displayName: String
+    @ObservationIgnored private let deviceName: String
+    @ObservationIgnored private let names: UserDefaults
     @ObservationIgnored private var redeeming: Task<State, Never>?
     /// Moved, synchronously, by every mutation that ends guest mode: `leave`, and a refusal that
     /// ends the pass. A redeem reads it before its request is sent; once it has moved, whatever
@@ -93,29 +103,51 @@ public final class GuestSessionStore {
         // The door's own URLSession transport unless a test scripts one — a default here, so the
         // app composes the store without naming the API layer it never imports.
         transport: any ClientTransport = APIClientFactory.guestTransport(),
-        displayName: String
+        deviceName: String,
+        // The app group's, so the name survives the app's own container being the one that is
+        // reset; a test hands in a scratch suite.
+        names: UserDefaults = UserDefaults(suiteName: DeviceCredentials.appGroup) ?? .standard
     ) {
         self.credentials = credentials
         self.licence = licence
         self.door = GuestDoorClient(transport: transport)
-        self.displayName = displayName
+        self.deviceName = deviceName
+        self.names = names
     }
 
-    /// Redeems the pass a link carries. Joins a redeem already on the wire.
+    /// The name a redeem with nothing typed is sent under, and the one the Join screen starts with:
+    /// the name typed last time, else the device's.
+    public var presentedName: String {
+        GuestName.resolve(
+            typed: nil, remembered: names.string(forKey: Self.rememberedNameKey),
+            deviceName: deviceName)
+    }
+
+    /// Redeems the pass a link carries, under `typedName` (see `redeem(secret:typedName:)`).
+    /// Joins a redeem already on the wire.
     @discardableResult
-    public func redeem(passLink url: URL) async -> State {
+    public func redeem(passLink url: URL, typedName: String? = nil) async -> State {
         if let redeeming { return await redeeming.value }
         guard let secret = GuestDoor.secret(fromPassLink: url) else {
             return settle(.notAPassLink)
         }
-        return await redeem(secret: secret)
+        return await redeem(secret: secret, typedName: typedName)
     }
 
-    /// Redeems a pass secret. Joins a redeem already on the wire: one request, one outcome.
+    /// Redeems a pass secret. Joins a redeem already on the wire: one request, one outcome, under
+    /// the first caller's name.
+    ///
+    /// `typedName` is what the person typed; trimmed and capped to the door's 64, it is sent and
+    /// remembered for next time. Blank or `nil` (a link opened from outside), the remembered name
+    /// is sent, else the device's.
     @discardableResult
-    public func redeem(secret: String) async -> State {
+    public func redeem(secret: String, typedName: String? = nil) async -> State {
         if let redeeming { return await redeeming.value }
-        let task = Task { @MainActor in await self.performRedeem(secret: secret) }
+        if let typed = GuestName.cleaned(typedName) {
+            names.set(typed, forKey: Self.rememberedNameKey)
+        }
+        let name = presentedName
+        let task = Task { @MainActor in await self.performRedeem(secret: secret, name: name) }
         redeeming = task
         let outcome = await task.value
         redeeming = nil
@@ -126,6 +158,7 @@ public final class GuestSessionStore {
     public func restore() async {
         try? await credentials.restore()
         guard let current = credentials.current else { return }
+        joinedName = names.string(forKey: Self.joinedNameKey)
         activate(current, label: current.tripLabel, expiresAt: current.passExpiresAt)
         await confirm()
     }
@@ -169,6 +202,7 @@ public final class GuestSessionStore {
         generation += 1
         withdrawLicence()
         receipts = []
+        forgetJoinedName()
         state = .none
         do {
             try await credentials.clear()
@@ -185,6 +219,7 @@ public final class GuestSessionStore {
             generation += 1
             withdrawLicence()
             receipts = []
+            forgetJoinedName()
             state = .ended
         }
         return await credentials.handle(refusal)
@@ -207,11 +242,11 @@ public final class GuestSessionStore {
 
     // MARK: - internals
 
-    private func performRedeem(secret: String) async -> State {
+    private func performRedeem(secret: String, name: String) async -> State {
         let issuedUnder = generation
         state = .redeeming
         let answer = await door.redeem(
-            GuestWire.Redeem(secret: secret, displayName: displayName)
+            GuestWire.Redeem(secret: secret, displayName: name)
         )
         // A leave (or the door ending the pass) while the request was on the wire wins, whatever
         // the answer: nothing is stored, nothing is published, and the state stays the one that
@@ -242,8 +277,15 @@ public final class GuestSessionStore {
         // A leave or another pass made while the write was in flight wins: the store published
         // nothing for this one, and neither does the session.
         guard credentials.current == credential else { return state }
+        names.set(name, forKey: Self.joinedNameKey)
+        joinedName = name
         activate(credential, label: credential.tripLabel, expiresAt: credential.passExpiresAt)
         return state
+    }
+
+    private func forgetJoinedName() {
+        joinedName = nil
+        names.removeObject(forKey: Self.joinedNameKey)
     }
 
     /// How a redeem that gave no pass ends. A pass this device already holds stays the subject (an

@@ -198,3 +198,67 @@ struct TripPassPresentationTests {
         )
     }
 }
+
+/// The name the Join screen and an opened link send (`GuestName.resolve`), one case per input.
+@Suite("The name a guest joins under")
+struct GuestNameResolutionTests {
+    @Test("a typed name wins over the remembered one and the device's, trimmed")
+    func typedWins() {
+        let name = GuestName.resolve(typed: "  Ana ", remembered: "Ben", deviceName: "iPhone")
+        #expect(name == "Ana")
+    }
+
+    @Test(
+        "a typed name of blanks only counts as nothing typed",
+        arguments: [("   ", "Ben", "Ben"), ("\n\t", nil, "iPhone")] as [(String, String?, String)])
+    func whitespaceOnly(typed: String, remembered: String?, expected: String) {
+        let name = GuestName.resolve(typed: typed, remembered: remembered, deviceName: "iPhone")
+        #expect(name == expected)
+    }
+
+    @Test("nothing typed sends the name remembered from last time")
+    func emptyWithRemembered() {
+        #expect(GuestName.resolve(typed: "", remembered: "Ben", deviceName: "iPhone") == "Ben")
+        #expect(GuestName.resolve(typed: nil, remembered: " Ben ", deviceName: "iPhone") == "Ben")
+    }
+
+    @Test("nothing typed and nothing remembered sends the device's name")
+    func emptyWithNone() {
+        #expect(GuestName.resolve(typed: "", remembered: nil, deviceName: "iPhone") == "iPhone")
+        #expect(GuestName.resolve(typed: nil, remembered: "  ", deviceName: "iPhone") == "iPhone")
+    }
+
+    // The door's own fallback, reached only when the device reports a blank name too.
+    @Test("a blank device name sends the door's own word, never an empty string")
+    func blankEverywhere() {
+        #expect(GuestName.resolve(typed: " ", remembered: nil, deviceName: " ") == "Guest")
+    }
+
+    @Test("over 64 is capped to the first 64, at 64 and below it is kept whole")
+    func overTheLimit() {
+        let x = { (count: Int) in String(repeating: "x", count: count) }
+        #expect(GuestName.resolve(typed: x(70), remembered: nil, deviceName: "iPhone") == x(64))
+        #expect(GuestName.resolve(typed: x(65), remembered: nil, deviceName: "iPhone") == x(64))
+        #expect(GuestName.resolve(typed: x(64), remembered: nil, deviceName: "iPhone") == x(64))
+        #expect(GuestName.resolve(typed: x(63), remembered: nil, deviceName: "iPhone") == x(63))
+    }
+
+    // The door counts code points; a thumbs-up with a skin tone is two of them and one character.
+    @Test("the cap counts code points and never cuts a character in half")
+    func capCountsScalars() {
+        let thumb = "\u{1F44D}\u{1F3FD}"
+        let x63 = String(repeating: "x", count: 63)
+        let x62 = String(repeating: "x", count: 62)
+        #expect(GuestName.capped(x63 + thumb) == x63)
+        #expect(GuestName.capped(x62 + thumb) == x62 + thumb)
+        #expect(GuestName.capped(x62 + thumb).unicodeScalars.count == GuestName.limit)
+    }
+
+    // A cut landing just after a space must not send that space.
+    @Test("a cap that ends on a space is trimmed again")
+    func capThenTrim() {
+        let x63 = String(repeating: "x", count: 63)
+        let name = GuestName.resolve(typed: x63 + " yz", remembered: nil, deviceName: "iPhone")
+        #expect(name == x63)
+    }
+}

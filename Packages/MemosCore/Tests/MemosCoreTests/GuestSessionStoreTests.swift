@@ -33,6 +33,8 @@ struct GuestSessionStoreTests {
         let licenceRoot = FileManager.default.temporaryDirectory
             .appending(path: "guest-session-\(UUID().uuidString)")
         let calls = CallLog()
+        /// A scratch suite of its own, so no test reads a name another test remembered.
+        let names = UserDefaults(suiteName: "guest-names-\(UUID().uuidString)")!
         let credentials: GuestCredentialStore
         let store: GuestSessionStore
 
@@ -47,7 +49,7 @@ struct GuestSessionStoreTests {
             }
             store = GuestSessionStore(
                 credentials: credentials, licence: OutboxAccountStore(root: licenceRoot),
-                transport: transport, displayName: "Guest iPhone"
+                transport: transport, deviceName: "Guest iPhone", names: names
             )
         }
 
@@ -212,6 +214,172 @@ struct GuestSessionStoreTests {
         #expect(await rig.calls.count("guestRedeem") == 1)
     }
 
+    // MARK: - the name a guest joins under
+
+    private func sentName(_ rig: Rig, at index: Int = 0) async throws -> String? {
+        let bodies = await rig.calls.bodies
+        try #require(bodies.count > index)
+        let sent = try #require(
+            try JSONSerialization.jsonObject(with: bodies[index]) as? [String: Any])
+        return sent["display_name"] as? String
+    }
+
+    private static func redeemedRig() -> Rig {
+        Rig { operation in
+            operation == "guestRedeem"
+                ? Stub.json(Self.redeemed, status: .created) : Self.status(500)
+        }
+    }
+
+    // Mutation that turns it red: send `presentedName` without remembering `typedName` first.
+    @Test("a redeem is sent under the name typed, trimmed, remembered, and shown as joined")
+    func typedNameIsSentAndRemembered() async throws {
+        let rig = Self.redeemedRig()
+        // Quotes and a backslash: the name is a JSON string on the wire, not a template.
+        let name = #"Ana "Bean" O\Neil"#
+
+        await rig.store.redeem(secret: "pass-secret", typedName: "  \(name) \n")
+
+        #expect(try await sentName(rig) == name)
+        #expect(rig.names.string(forKey: GuestSessionStore.rememberedNameKey) == name)
+        #expect(rig.store.joinedName == name)
+        #expect(rig.store.presentedName == name)
+    }
+
+    // Mutation that turns it red: let `GuestName.cleaned` return a blank name instead of `nil`.
+    @Test(
+        "nothing typed, or only blanks, is sent as the device name, never empty",
+        arguments: [nil, "", "   ", "\n\t\u{00A0}"] as [String?])
+    func blankNameFallsBackToTheDevice(_ typed: String?) async throws {
+        let rig = Self.redeemedRig()
+
+        await rig.store.redeem(secret: "pass-secret", typedName: typed)
+
+        #expect(try await sentName(rig) == "Guest iPhone")
+        #expect(rig.names.string(forKey: GuestSessionStore.rememberedNameKey) == nil)
+        #expect(rig.store.joinedName == "Guest iPhone")
+    }
+
+    // Capped, not refused: the door would answer 422 to 65, and the person typed a name.
+    @Test("a name over the door's 64 is capped to 64, never sent whole")
+    func overlongNameIsCapped() async throws {
+        let rig = Self.redeemedRig()
+        let typed = String(repeating: "x", count: 70)
+
+        await rig.store.redeem(secret: "pass-secret", typedName: typed)
+
+        #expect(try await sentName(rig) == String(repeating: "x", count: 64))
+    }
+
+    // Mutation that turns it red: remember `typedName` before the `if let redeeming` join check.
+    @Test("two overlapping redeems under different names are ONE request, under the first name")
+    func overlappingRedeemsKeepTheFirstName() async throws {
+        let gate = Gate()
+        let rig = Rig { _ in
+            await gate.wait()
+            return Stub.json(Self.redeemed, status: .created)
+        }
+        let store = rig.store
+
+        let first = Task { await store.redeem(secret: "pass-secret", typedName: "Ana") }
+        try await waitUntil { await rig.calls.count("guestRedeem") == 1 }
+        let second = Task { await store.redeem(secret: "pass-secret", typedName: "Ben") }
+        await Task.yield()
+        await gate.release()
+        _ = (await first.value, await second.value)
+
+        #expect(await rig.calls.count("guestRedeem") == 1)
+        #expect(try await sentName(rig) == "Ana")
+        #expect(store.joinedName == "Ana")
+        #expect(rig.names.string(forKey: GuestSessionStore.rememberedNameKey) == "Ana")
+    }
+
+    // Mutation that turns it red: write the joined name as soon as the door answers, before the
+    // switch and the generation guard in `performRedeem`.
+    @Test("a refused redeem remembers the name typed but joins under nothing")
+    func refusedRedeemJoinsUnderNothing() async throws {
+        let rig = Rig { _ in Self.status(404) }
+
+        await rig.store.redeem(secret: "pass-secret", typedName: "Ana")
+
+        #expect(rig.store.state == .refused(.unknownPass))
+        #expect(rig.store.joinedName == nil)
+        #expect(rig.names.string(forKey: GuestSessionStore.joinedNameKey) == nil)
+        #expect(rig.names.string(forKey: GuestSessionStore.rememberedNameKey) == "Ana")
+    }
+
+    // Mutation that turns it red: the same early write as above.
+    @Test("a redeem answered after a leave joins under no name")
+    func lateRedeemAfterLeaveKeepsNoName() async throws {
+        let gate = Gate()
+        let rig = Rig { _ in
+            await gate.wait()
+            return Stub.json(Self.redeemed, status: .created)
+        }
+        let store = rig.store
+
+        let redeem = Task { await store.redeem(secret: "pass-secret", typedName: "Ana") }
+        try await waitUntil { await rig.calls.count("guestRedeem") == 1 }
+        await store.leave()
+        await gate.release()
+        _ = await redeem.value
+
+        #expect(store.joinedName == nil)
+        #expect(rig.names.string(forKey: GuestSessionStore.joinedNameKey) == nil)
+    }
+
+    @Test("leaving forgets the name the pass joined under, and keeps the name typed")
+    func leaveForgetsTheJoinedName() async throws {
+        let rig = Self.redeemedRig()
+        await rig.store.redeem(secret: "pass-secret", typedName: "Ana")
+
+        await rig.store.leave()
+
+        #expect(rig.store.joinedName == nil)
+        #expect(rig.names.string(forKey: GuestSessionStore.joinedNameKey) == nil)
+        #expect(rig.store.presentedName == "Ana")
+    }
+
+    @Test("the names live in the suite the store was given, not the app's own defaults")
+    func namesStayInTheirSuite() async throws {
+        let rig = Self.redeemedRig()
+
+        await rig.store.redeem(secret: "pass-secret", typedName: "Ana")
+
+        #expect(UserDefaults.standard.string(forKey: GuestSessionStore.rememberedNameKey) == nil)
+        #expect(UserDefaults.standard.string(forKey: GuestSessionStore.joinedNameKey) == nil)
+        #expect(rig.names.string(forKey: GuestSessionStore.rememberedNameKey) == "Ana")
+    }
+
+    // Mutation that turns it red: drop the joined-name read in `restore`.
+    @Test("after a relaunch the typed name is offered and sent, and the pass shows its own name")
+    func namesSurviveARelaunch() async throws {
+        let rig = Self.redeemedRig()
+        await rig.store.redeem(secret: "pass-secret", typedName: "Ana")
+        let calls = CallLog()
+        let relaunched = GuestSessionStore(
+            credentials: GuestCredentialStore(credentials: rig.vault),
+            licence: rig.licence,
+            transport: StubTransport { request, body, operationID in
+                await calls.record(operationID, request, body)
+                return operationID == "guestRedeem"
+                    ? Stub.json(Self.redeemed, status: .created) : Self.status(500)
+            },
+            deviceName: "Other iPhone", names: rig.names
+        )
+
+        await relaunched.restore()
+        #expect(relaunched.state.isActive)
+        #expect(relaunched.joinedName == "Ana")
+        #expect(relaunched.presentedName == "Ana")
+
+        await relaunched.leave()
+        await relaunched.redeem(secret: "pass-secret")
+        let body = try #require(await calls.bodies.last)
+        let sent = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(sent["display_name"] as? String == "Ana")
+    }
+
     // Mutation that turns it red: delete the generation guard after `door.redeem` in
     // `performRedeem`.
     @Test("a redeem answered after a leave brings nothing back: no pass, no licence, no state")
@@ -360,7 +528,7 @@ struct GuestSessionStoreTests {
             transport: StubTransport { _, _, operationID in
                 operationID == "guestMe" ? Self.status(410) : Self.status(500)
             },
-            displayName: "Guest iPhone"
+            deviceName: "Guest iPhone", names: rig.names
         )
 
         await relaunched.restore()
