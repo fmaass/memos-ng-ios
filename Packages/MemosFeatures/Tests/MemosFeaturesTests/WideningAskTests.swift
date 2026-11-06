@@ -3,6 +3,7 @@ import HTTPTypes
 import MemosAPI
 import MemosCore
 import OpenAPIRuntime
+import SwiftUI
 import Testing
 
 @testable import MemosFeatures
@@ -199,5 +200,68 @@ struct WideningAskTests {
         await Self.act(on: yes, &ask, in: store, server: server)
         #expect(server.visibilities == ["PRIVATE", "PROTECTED"])
         #expect(ask.pending == nil)
+    }
+
+    // MARK: - one question at a time, none lost (MEMNG-1193)
+
+    /// The screen's state, as the `@State` behind `$widening` holds it.
+    private final class Held {
+        var ask = WideningAsk()
+    }
+
+    private struct NotAWidening: Error {}
+
+    private static func question(_ from: MemoVisibility, _ to: MemoVisibility) throws
+        -> VisibilityChange.Question
+    {
+        guard case .ask(let question) = VisibilityChange.propose(to, from: from) else {
+            throw NotAWidening()
+        }
+        return question
+    }
+
+    @Test("another memo's question waits behind the one on screen and is asked after it")
+    func anotherMemosQuestionQueues() throws {
+        var ask = WideningAsk()
+        #expect(ask.pick(.public, from: .private, on: "m1") == .asking)
+        let first = try #require(ask.pending)
+        // The store answers a change on another memo with a question while the first is up.
+        let second = try Self.question(.private, .protected)
+        ask.heard(.ask(second), on: "m2")
+        #expect(ask.pending == first, "another memo's question replaced the one on screen")
+        #expect(ask.answer(first, confirmed: false) == nil, "control: a dismissal sends nothing")
+        let next = try #require(ask.pending, "the queued question was lost")
+        #expect(next.uid == "m2" && next.question == second)
+        #expect(next.id != first.id, "the queued question is its own presentation")
+        // Its yes is its own memo's change, exactly once.
+        let yes = ask.answer(next, confirmed: true)
+        #expect(yes == WideningAsk.Send(uid: "m2", change: second.confirmed()))
+        #expect(ask.answer(next, confirmed: true) == nil, "the yes was answered twice")
+        #expect(ask.pending == nil)
+    }
+
+    @Test("the alert's dismissal answers the presentation it showed, not the one promoted after")
+    func dismissalAnswersItsOwnPresentation() throws {
+        let held = Held()
+        let state = Binding(get: { held.ask }, set: { held.ask = $0 })
+        #expect(held.ask.pick(.public, from: .private, on: "m1") == .asking)
+        let first = try #require(held.ask.pending)
+        held.ask.heard(.ask(try Self.question(.private, .protected)), on: "m2")
+        // The alert as rendered for the first question.
+        let presented = WideningAsk.presented(state)
+        #expect(presented.wrappedValue, "control: the first question is up")
+        // Its yes is tapped; the answer promotes the queued question; then the alert writes its
+        // own dismissal through the binding it was rendered with.
+        let yes = held.ask.answer(first, confirmed: true)
+        #expect(yes?.uid == "m1", "control: the yes answered the first question")
+        let promoted = try #require(held.ask.pending, "the queued question was not promoted")
+        presented.wrappedValue = false
+        #expect(held.ask.pending == promoted, "the first alert's dismissal took the next one down")
+        #expect(presented.wrappedValue, "the next question is not up")
+        // The next render's alert, dismissed: that one, and only that one, goes, sending nothing.
+        let next = WideningAsk.presented(state)
+        next.wrappedValue = false
+        #expect(held.ask.pending == nil, "a dismissal left its own question up")
+        #expect(held.ask.answer(promoted, confirmed: true) == nil, "a dismissed question sent")
     }
 }
