@@ -213,6 +213,19 @@ public enum MediaChannel {
                         await list.refreshMemo(uid: uid, using: handle, baseURL: baseURL)
                     }
                 }
+            case .memo(let envelope):
+                // The same fence, asked the same way: a memo uid means nothing across accounts,
+                // and a frame applied past a rotation would put the previous account's memo on the
+                // new account's timeline. Asked again per list, because each apply awaits.
+                guard let event = envelope.eventIfCurrent(for: identity) else { continue }
+                for list in lists {
+                    guard envelope.eventIfCurrent(for: identity) != nil else { break }
+                    await list.apply(event, using: handle, baseURL: baseURL)
+                }
+            case .uploadProgress:
+                // Nothing on these lists shows an upload's received offset; the Transfers ledger
+                // is fed by the outbox planner's own confirmations.
+                break
             }
         }
     }
