@@ -480,8 +480,10 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         guard session.credentialGrant() != nil else { return }
         // A confirmed session holds the device's push-to-start token, posted under its own
         // generation — ActivityKit says nothing more until the token changes.
+        // Not awaited: a slow answer must not hold the outbox's drain behind it.
         if let generation = session.activeHandle?.generation {
-            await liveActivityTokens.resubmit(under: generation)
+            let tokens = liveActivityTokens
+            Task { await tokens.resubmit(under: generation) }
         }
         await outbox?.start()
     }

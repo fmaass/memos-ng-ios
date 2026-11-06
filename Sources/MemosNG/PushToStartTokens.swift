@@ -15,9 +15,9 @@ enum PushToStartTokens {
     /// A development build's push tokens are sandbox tokens.
     static var environment: LiveActivityTokenStore.Environment {
         #if DEBUG
-        .sandbox
+        return .sandbox
         #else
-        .production
+        return .production
         #endif
     }
 

@@ -12,10 +12,11 @@ import Testing
 @MainActor
 @Suite("Live Activity push-to-start token")
 struct LiveActivityTokenTests {
-    private static let register = "register_live_activity_token_api_devices_live_activity_token_post"
-    private static let unregister =
+    nonisolated private static let register =
+        "register_live_activity_token_api_devices_live_activity_token_post"
+    nonisolated private static let unregister =
         "unregister_live_activity_token_api_devices_live_activity_token_delete"
-    private static let logout = "native_logout_api_auth_native_logout_post"
+    nonisolated private static let logout = "native_logout_api_auth_native_logout_post"
     private static let token = Data((0..<32).map { UInt8($0 * 7 % 256) })
 
     /// What left, in order: the operation, and the JSON body it carried.
