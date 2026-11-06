@@ -102,6 +102,13 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
         }
     )
     private(set) var outbox: Outbox?
+    /// The Live Activity push-to-start token's registration (MEMNG-946): the session deletes it on
+    /// sign-out, and `PushToStartTokens` feeds it for the life of the process.
+    private(set) lazy var liveActivityTokens = LiveActivityTokenStore(
+        environment: PushToStartTokens.environment,
+        session: { [weak self] in self?.session.activeHandle }
+    )
+    private var pushToStartFollow: Task<Void, Never>?
     /// The trip pass, kept in its own Keychain accounts under its own epoch, in the same vault the
     /// member session defaults to. `lazy` for the reason `session` is: it is built on the main
     /// actor, the first time something asks.
@@ -153,6 +160,8 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
                 root: root)
         }
         let session = session
+        session.liveActivityTokens = liveActivityTokens
+        pushToStartFollow = PushToStartTokens.follow(liveActivityTokens, session: session)
         // The session is the ONE source of the outbox's authority: who it may upload as and the
         // token it presents come from `credentialGrant()` as a single value, never assembled here
         // out of the keychain and the session separately. The epoch box is what the drain reads
@@ -469,6 +478,11 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     /// screen; the only question worth asking is whether there is authority to drain with NOW.
     private func drainOnConfirmation() async {
         guard session.credentialGrant() != nil else { return }
+        // A confirmed session holds the device's push-to-start token, posted under its own
+        // generation — ActivityKit says nothing more until the token changes.
+        if let generation = session.activeHandle?.generation {
+            await liveActivityTokens.resubmit(under: generation)
+        }
         await outbox?.start()
     }
 
