@@ -66,6 +66,31 @@ public enum MemoCardPresentation {
         return name.isEmpty ? "Unknown" : name
     }
 
+    /// A pass guest's name as every surface says it: the name they gave, or "A guest" when they
+    /// gave none. The one spelling the Guest Uploads inbox and the memo cards share (MEMNG-1164).
+    public static func guestName(_ contributorName: String?) -> String {
+        let name = contributorName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "A guest" : name
+    }
+
+    /// Who a memo is BY, as its card, its detail and its Info sheet name it.
+    ///
+    /// A guest memo is owned by the pass's account, so the owner's name would put the household's
+    /// name on a guest's words: it says "<contributor> · guest" instead, or "A guest" when the
+    /// guest gave no name (MEMNG-1164, MEMNG-1007). Every other memo says its owner.
+    public static func displayName(for memo: Memo) -> String {
+        guard let guest = memo.guest else { return displayName(forOwner: memo.owner) }
+        let given = guest.contributorName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return given.isEmpty ? guestName(nil) : "\(given) · guest"
+    }
+
+    /// The name the avatar circle takes its letter from: the contributor's on a guest memo — a
+    /// nameless guest gets the circle's "?" — and the owner's on every other.
+    public static func avatarName(for memo: Memo) -> String {
+        guard let guest = memo.guest else { return memo.owner }
+        return guest.contributorName ?? ""
+    }
+
     private static func localPart(of owner: String) -> String {
         let trimmed = owner.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let at = trimmed.firstIndex(of: "@") else { return trimmed }
