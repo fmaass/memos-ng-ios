@@ -380,7 +380,7 @@ public struct MemoDetailView: View {
     @ViewBuilder
     private var header: some View {
         let identity = VStack(alignment: .leading, spacing: 0) {
-            Text(MemoCardPresentation.displayName(forOwner: memo.owner))
+            Text(MemoCardPresentation.displayName(for: memo))
                 .font(.subheadline.weight(.semibold))
             Text(memo.createdAt, format: .dateTime.day().month().year().hour().minute())
                 .font(.caption)
@@ -389,7 +389,7 @@ public struct MemoDetailView: View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
                 HStack(spacing: DesignTokens.Space.snug) {
-                    OwnerAvatar(owner: memo.owner, size: avatar)
+                    OwnerAvatar(owner: MemoCardPresentation.avatarName(for: memo), size: avatar)
                     identity
                 }
                 HStack(spacing: DesignTokens.Space.snug) {
@@ -399,7 +399,7 @@ public struct MemoDetailView: View {
             }
         } else {
             HStack(spacing: DesignTokens.Space.snug) {
-                OwnerAvatar(owner: memo.owner, size: avatar)
+                OwnerAvatar(owner: MemoCardPresentation.avatarName(for: memo), size: avatar)
                 identity
                 Spacer(minLength: DesignTokens.Space.snug)
                 archived

@@ -164,6 +164,21 @@ public struct MemoAttachment: Sendable, Equatable, Identifiable, Codable {
     }
 }
 
+/// Who sent a guest memo in, and through which trip pass — the server's `MemoOut.guest`.
+///
+/// A guest memo is still OWNED by the account the pass belongs to (`Memo.owner`), so the owner's
+/// name is the wrong one to put on it: the person who wrote it is the contributor. `nil` when the
+/// guest gave no name.
+public struct MemoGuest: Sendable, Equatable, Codable {
+    public var contributorName: String?
+    public var passUid: String
+
+    public init(contributorName: String?, passUid: String) {
+        self.contributorName = contributorName
+        self.passUid = passUid
+    }
+}
+
 /// One memo, as every screen in the app reads it.
 ///
 /// `Codable` because the timeline snapshot on disk is made of these (`TimelineSnapshotStore`).
@@ -182,6 +197,10 @@ public struct Memo: Sendable, Equatable, Identifiable, Codable {
     public var archivedAt: Date?
     public var tags: [String]
     public var attachments: [MemoAttachment]
+    /// Who sent this memo in through a trip pass, when a guest did (MEMNG-1164). `nil` is a memo
+    /// the owner wrote — every memo the home timeline asks for, since the server leaves guest
+    /// memos out of a list that does not ask for them.
+    public var guest: MemoGuest?
 
     public init(
         uid: String,
@@ -194,7 +213,8 @@ public struct Memo: Sendable, Equatable, Identifiable, Codable {
         updatedAt: Date,
         archivedAt: Date? = nil,
         tags: [String] = [],
-        attachments: [MemoAttachment] = []
+        attachments: [MemoAttachment] = [],
+        guest: MemoGuest? = nil
     ) {
         self.uid = uid
         self.owner = owner
@@ -207,6 +227,7 @@ public struct Memo: Sendable, Equatable, Identifiable, Codable {
         self.archivedAt = archivedAt
         self.tags = tags
         self.attachments = attachments
+        self.guest = guest
     }
 
     public var id: String { uid }
@@ -301,6 +322,9 @@ extension Memo {
             tags: generated.tags,
             attachments: (generated.attachments ?? []).map {
                 MemoAttachment($0, baseURL: baseURL)
+            },
+            guest: generated.guest.map {
+                MemoGuest(contributorName: $0.contributorName, passUid: $0.passUid)
             }
         )
     }

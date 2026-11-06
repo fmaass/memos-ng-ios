@@ -631,6 +631,36 @@ struct TripScreenRenderTests {
         }
     }
 
+    /// A pass guest's memo sits in the trip's Journal (MEMNG-1233 asks for it) and its card names
+    /// the guest who sent it, never the account that owns it (MEMNG-1164).
+    @Test("a pass guest's memo in the Journal names its contributor, not the owner")
+    func aGuestJournalCardNamesItsContributor() async {
+        let wire = TripWire()
+        wire.transport.guestJournal()
+        let stores = stores()
+        let record = await filed(stores, wire, "Portugal 2026", tag: "portugal2026")
+        let guest = TripTransport.guestMemo.text
+        let own = TripTransport.journal[0].text
+        await CollectionsHost.with(trip(stores, wire, record), height: 3000) { screen in
+            let chosen = await screen.until { choose(.journal) }
+            #expect(chosen, "the Journal chip took no press")
+            let drawn = await screen.until {
+                TripProbe.card(saying: guest, in: screen.window) != nil
+                    && TripProbe.card(saying: own, in: screen.window) != nil
+            }
+            #expect(drawn, "no guest card: \(TripProbe.labels(in: screen.window))")
+            let label = TripProbe.card(saying: guest, in: screen.window)?.accessibilityLabel ?? ""
+            #expect(label.contains("Anna · guest"), "the card does not name Anna: \(label)")
+            #expect(!label.contains("fabian"), "the card names the owner: \(label)")
+            let mine = TripProbe.card(saying: own, in: screen.window)?.accessibilityLabel ?? ""
+            #expect(mine.contains("fabian"), "control: the owner's card names the owner: \(mine)")
+            #expect(!mine.contains("guest"), "the owner's card says guest: \(mine)")
+        }
+        #expect(
+            wire.transport.memoReads.allSatisfy { $0["guest"] == "include" },
+            "a journal read left guests out: \(wire.transport.memoReads)")
+    }
+
     @Test("a journal stopped at the cap counts memos under the list, not photos")
     func theJournalCapFooter() async {
         let wire = TripWire()
@@ -2388,6 +2418,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     private nonisolated(unsafe) var emptied = false
     private nonisolated(unsafe) var unoriginal = false
     private nonisolated(unsafe) var pictured = false
+    private nonisolated(unsafe) var guested = false
     private nonisolated(unsafe) var dropped: Set<String> = []
     private nonisolated(unsafe) var others: Set<String> = []
     private nonisolated(unsafe) var othersMemos: Set<String> = []
@@ -2434,6 +2465,11 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
         ("j2", "A day out in Sintra", "2026-03-14T10:00:00Z"),
     ]
 
+    /// The memo `guestJournal()` adds: a pass guest's, owned by the trip's account.
+    nonisolated static let guestMemo = (
+        uid: "jg", text: "Sunset from the ferry", stamp: "2026-03-13T19:00:00Z"
+    )
+
     nonisolated func fail() { lock.withLock { failing = true } }
     nonisolated func hold() { lock.withLock { held = true } }
     nonisolated func release() { lock.withLock { held = false } }
@@ -2449,6 +2485,9 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     nonisolated func nameNoOriginal() { lock.withLock { unoriginal = true } }
     /// The journal's second memo carries two pictures of its own, p1 and p3.
     nonisolated func pictureJournal() { lock.withLock { pictured = true } }
+    /// The trip holds one more memo, `guestMemo`, that a pass guest named Anna sent in — answered
+    /// only to a read that asks `guest=include`, as the server does (MEMNG-1164).
+    nonisolated func guestJournal() { lock.withLock { guested = true } }
     /// The trip's tag leaves one picture: from here on its reads answer without it.
     nonisolated func drop(_ uid: String) { lock.withLock { _ = dropped.insert(uid) } }
     /// `uid` is another member's picture: from here on its reads say it is not mine.
@@ -2505,7 +2544,7 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             }
             return Self.memoPage(
                 query, pictures: pictures, signed: sig, edged: lock.withLock { edged },
-                theirs: lock.withLock { othersMemos })
+                theirs: lock.withLock { othersMemos }, guests: lock.withLock { guested })
         default:
             return (HTTPResponse(status: .notFound), nil)
         }
@@ -2587,11 +2626,16 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
     /// oldest first under `created_at`, newest first under anything else — the server's default.
     private nonisolated static func memoPage(
         _ query: [String: String], pictures: Bool, signed sig: String, edged: Bool = false,
-        theirs: Set<String> = []
+        theirs: Set<String> = [], guests: Bool = false
     ) -> (HTTPResponse, HTTPBody?) {
         // A month's or a year's journal asks from its start, with no tag (MEMNG-817).
         let dated = query["tag"] == nil && query["created_after"] != nil
-        let all = query["tag"] == "portugal2026" || dated ? journal : []
+        var all = query["tag"] == "portugal2026" || dated ? journal : []
+        // A pass guest's memo reaches only a read that asks for guests (MEMNG-1164).
+        if guests, query["guest"] == "include", !all.isEmpty {
+            all.append(guestMemo)
+            all.sort { $0.stamp < $1.stamp }
+        }
         let ordered = query["sort"] == "created_at" ? all : all.reversed()
         let rows = ordered.map { memo in
             let stamp = edged && memo.uid == "j0" ? Self.edgeStamp : memo.stamp
@@ -2603,11 +2647,14 @@ final class TripTransport: ClientTransport, @unchecked Sendable {
             // those; Just us never reaches a month's, a year's or a tag's Journal (MEMNG-933).
             let open = query["visibility"] == "PUBLIC"
             let visibility = open ? "PUBLIC" : other ? "PROTECTED" : "PRIVATE"
+            let guest =
+                memo.uid == guestMemo.uid
+                ? #"{"contributor_name":"Anna","pass_uid":"pass-1"}"# : "null"
             return """
                 {"uid":"\(memo.uid)","owner":"\(owner)","mine":\(!other),"content":"\(memo.text)",\
                 "visibility":"\(visibility)","pinned":false,"created_at":"\(stamp)",\
                 "updated_at":"\(stamp)","archived_at":null,"tags":["portugal2026"],\
-                "attachments":[\(attached.joined(separator: ","))]}
+                "attachments":[\(attached.joined(separator: ","))],"guest":\(guest)}
                 """
         }
         let first = query["cursor"] == nil
