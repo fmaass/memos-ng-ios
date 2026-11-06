@@ -8,13 +8,22 @@ import Foundation
 /// or an account change leaves no grant behind even before the server hears of either.
 public struct CaptureGrantStore: Sendable {
     public let url: URL
+    /// How the file is removed: `FileManager` everywhere but in a test, which makes a removal
+    /// fail without touching the directory's permissions (MEMNG-1186).
+    private let remove: @Sendable (URL) throws -> Void
 
-    public init(root: URL) {
+    public init(
+        root: URL,
+        remove: @escaping @Sendable (URL) throws -> Void = {
+            try FileManager.default.removeItem(at: $0)
+        }
+    ) {
         self.url = root.appending(path: "capture-grant.json")
+        self.remove = remove
     }
 
     public static func live(appGroup: String = OutboxDefaults.appGroup) -> CaptureGrantStore? {
-        OutboxRepository.appGroupRoot(appGroup: appGroup).map(CaptureGrantStore.init(root:))
+        OutboxRepository.appGroupRoot(appGroup: appGroup).map { CaptureGrantStore(root: $0) }
     }
 
     /// The grant on disk, or nil. A file that does not decode reads as nil: a grant nobody can
@@ -41,7 +50,7 @@ public struct CaptureGrantStore: Sendable {
     /// Removing a grant that is not there is success: what matters is that none is left.
     public func clear() throws {
         do {
-            try FileManager.default.removeItem(at: url)
+            try remove(url)
         } catch let error as CocoaError where error.code == .fileNoSuchFile {
             return
         }

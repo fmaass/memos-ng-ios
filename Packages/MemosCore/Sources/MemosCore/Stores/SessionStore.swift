@@ -202,10 +202,10 @@ public final class SessionStore {
     /// revoked — a renewal on an older build kept the file and lost the grant — and nothing on
     /// disk says so, so the first foreground of every launch mints.
     private var captureGrantKept: (epoch: Int, id: Int)?
-    /// A renewal's removal of the dead grant's file that FAILED (MEMNG-1186). The epoch already
-    /// keeps this process from keeping that grant; the flag keeps the file from outliving it in
-    /// the extension's view: the next mint tries the removal again before anything else, and a
-    /// successor written over it settles the debt.
+    /// A removal of a dead grant's file that FAILED — a renewal's or a retirement's (MEMNG-1186).
+    /// The epoch already keeps this process from keeping that grant; the flag keeps the file from
+    /// outliving it in the extension's view: the next mint tries the removal again before
+    /// anything else, and a successor written over it settles the debt.
     private var captureGrantClearOwed = false
     /// The session generations a sign-out is ending right now, one entry per sign-out in flight.
     /// While the current generation is listed, `mintCaptureGrant` REFUSES (it does not join): a
@@ -1423,9 +1423,10 @@ public final class SessionStore {
         captureGrantRetirements += 1
         captureGrantMint = nil
         let standing = captureGrants.current()
-        // A failure here is retried by the licence's own revocation, which removes the grant
-        // first and remembers when it could not (`clearAccountLicence`).
-        try? captureGrants.clear()
+        // A failure here is remembered, as a renewal's is: the next foreground's mint removes the
+        // file before anything else, so a grant whose licence revocation failed too is not left
+        // for the extension until a launch reconciles it (MEMNG-1186).
+        clearCaptureGrantFile(captureGrants)
         return standing?.id
     }
 

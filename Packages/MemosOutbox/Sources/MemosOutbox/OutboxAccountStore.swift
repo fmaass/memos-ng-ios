@@ -90,9 +90,11 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
 
     /// - Parameter root: the outbox's own directory — the binding lives beside the jobs it
     ///   describes, so a container that has one has the other.
-    public init(root: URL) {
+    /// - Parameter grants: the capture grant's file in `root`; a test passes one whose removal it
+    ///   can make fail.
+    public init(root: URL, grants: CaptureGrantStore? = nil) {
         self.url = root.appending(path: "account.json")
-        self.grants = CaptureGrantStore(root: root)
+        self.grants = grants ?? CaptureGrantStore(root: root)
     }
 
     /// The capture grant beside this licence — its lifecycle is the licence's (`CaptureGrantStore`).
@@ -101,7 +103,7 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     /// The store in the app group, or nil when the container is not reachable — on a device that
     /// means the entitlement is missing, and an extension in that state cannot enqueue at all.
     public static func live(appGroup: String = OutboxDefaults.appGroup) -> OutboxAccountStore? {
-        OutboxRepository.appGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
+        OutboxRepository.appGroupRoot(appGroup: appGroup).map { OutboxAccountStore(root: $0) }
     }
 
     /// The guest licence: the same file, in the guest outbox's directory, so a share enqueues a
@@ -109,7 +111,7 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     public static func guestLive(
         appGroup: String = OutboxDefaults.appGroup
     ) -> OutboxAccountStore? {
-        OutboxRepository.guestAppGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
+        OutboxRepository.guestAppGroupRoot(appGroup: appGroup).map { OutboxAccountStore(root: $0) }
     }
 
     /// What the app last said about who is signed in, or nil when it has said nothing or has
