@@ -68,14 +68,21 @@ struct LiveActivityTokenTests {
     @Test("POST names the hex token once for two overlapping asks; sign-out DELETEs it first")
     func registersOnceAndUnregistersOnSignOut() async throws {
         let wire = Wire()
-        let session = Self.session(wire: wire)
+        let parked = Parking()
+        let session = Self.session(wire: wire) { await parked.wait() }
         await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token")
         let generation = try #require(session.activeHandle?.generation)
         let store = Self.store(for: session)
 
-        async let first = store.tokenArrived(Self.token, observedUnder: generation)
-        async let second = store.tokenArrived(Self.token, observedUnder: generation)
-        let answers = await [first, second]
+        // The first POST is held on the wire while the second ask arrives: only the join can
+        // keep the second off the transport, since nothing is recorded yet.
+        let first = Task { await store.tokenArrived(Self.token, observedUnder: generation) }
+        try await Self.until { wire.bodies(of: Self.register).count == 1 }
+        let second = Task { await store.tokenArrived(Self.token, observedUnder: generation) }
+        for _ in 0..<200 { await Task.yield() }
+        #expect(wire.bodies(of: Self.register).count == 1, "the second ask reached the wire")
+        parked.open()
+        let answers = [await first.value, await second.value]
 
         let hex = LiveActivityTokenStore.hex(Self.token)
         #expect(answers == [true, true])
@@ -131,6 +138,38 @@ struct LiveActivityTokenTests {
         #expect(store.registeredToken == nil)
     }
 
+    @Test("a stale arrival never posts under its session; resubmit posts it once under the next")
+    func staleArrivalIsResubmittedUnderTheNextSession() async throws {
+        let wire = Wire()
+        let session = Self.session(wire: wire)
+        await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token")
+        let earlier = try #require(session.activeHandle?.generation)
+        let store = Self.store(for: session)
+        await session.signOutWithoutRevoking()
+
+        // The token is the DEVICE's: it arrives after session A ended and is not posted under A.
+        #expect(await store.tokenArrived(Self.token, observedUnder: earlier) == false)
+        #expect(wire.bodies(of: Self.register).isEmpty)
+
+        await session.signIn(serverAddress: "memos.example.invalid", token: "pat-token-2")
+        let later = try #require(session.activeHandle?.generation)
+        #expect(await store.resubmit(under: later))
+        #expect(await store.resubmit(under: later))
+
+        let hex = LiveActivityTokenStore.hex(Self.token)
+        #expect(wire.bodies(of: Self.register) == [["token": hex, "environment": "production"]])
+        #expect(store.registeredToken == hex)
+    }
+
+    /// Polls until `condition` holds; fails the test after ~5 s.
+    private static func until(_ condition: @Sendable () -> Bool) async throws {
+        for _ in 0..<5000 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        Issue.record("the condition never held")
+    }
+
     @Test("a POST answered after its session ended records nothing")
     func answerOutlivingItsSessionRecordsNothing() async throws {
         let wire = Wire()
@@ -156,4 +195,31 @@ struct LiveActivityTokenTests {
 private final class SessionSlot<Value>: @unchecked Sendable {
     var value: Value
     init(_ value: Value) { self.value = value }
+}
+
+/// Holds every caller of `wait()` until `open()`; a caller after the opening passes straight on.
+private final class Parking: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let passes = lock.withLock {
+                if opened { return true }
+                waiting.append(continuation)
+                return false
+            }
+            if passes { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let released = lock.withLock {
+            opened = true
+            defer { waiting = [] }
+            return waiting
+        }
+        for continuation in released { continuation.resume() }
+    }
 }

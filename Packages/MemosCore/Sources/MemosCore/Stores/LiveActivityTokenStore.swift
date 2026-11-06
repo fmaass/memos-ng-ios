@@ -29,6 +29,11 @@ public final class LiveActivityTokenStore {
     private let session: () -> SessionHandle?
     private let environment: Environment
     /// The token ActivityKit handed over last, hex in lower case.
+    ///
+    /// Kept whoever is signed in, and deliberately so: a push-to-start token belongs to this
+    /// DEVICE, not to an account. A token that arrived under a session that has since ended is
+    /// never posted under that session's credential (`tokenArrived` refuses it), but it is still
+    /// the device's token, and `resubmit` posts it once under the session signed in now.
     private var latest: String?
     /// What the server holds for this device, and the generation it was posted under.
     private var registered: (token: String, generation: Int)?
@@ -90,7 +95,10 @@ public final class LiveActivityTokenStore {
             return true
         }
         let key = Key(token: hex, generation: generation)
-        if let joined = inFlight[key] { return await joined.value }
+        if let joined = inFlight[key] {
+            // A joined caller passes the same completion fence as the one that started the POST.
+            return record(await joined.value, hex, under: generation)
+        }
         let body = Components.Schemas.LiveActivityTokenIn(
             environment: environment == .sandbox ? .sandbox : .production, token: hex)
         let client = handle.client
@@ -108,8 +116,13 @@ public final class LiveActivityTokenStore {
         inFlight[key] = task
         let accepted = await task.value
         inFlight[key] = nil
-        // Judged against the generation that ISSUED the POST, and against the token ActivityKit
-        // gave last: an answer that outlived either records nothing.
+        return record(accepted, hex, under: generation)
+    }
+
+    /// The completion fence, asked synchronously where the record is written: judged against the
+    /// generation that ISSUED the POST and against the token ActivityKit gave last, so an answer
+    /// that outlived either records nothing.
+    private func record(_ accepted: Bool, _ hex: String, under generation: Int) -> Bool {
         guard accepted, session()?.generation == generation, !retiring.contains(generation),
             latest == hex
         else { return false }
