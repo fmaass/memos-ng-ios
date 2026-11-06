@@ -1424,11 +1424,29 @@ public final class TimelineStore {
         // Its audience as well — but not past a mutation still in line for the memo, which may yet
         // move it: that one's own answer is the word that settles the record (`patchAnswer`). Nor
         // from a read that left before a lost answer was recorded: unfenced as it is, it may have
-        // been answered before the server applied the change whose answer was lost.
+        // been answered before the server applied the change whose answer was lost. Nor from one
+        // that cannot show the lost change landed (`readSettlesLostChange`).
         guard fences[memo.uid]?.claims.isEmpty ?? true,
-            issued >= unsettledVisibility[memo.uid] ?? 0
+            issued >= unsettledVisibility[memo.uid] ?? 0,
+            readSettlesLostChange(memo)
         else { return }
         recordServerAudience(memo)
+    }
+
+    /// Whether a read's row may settle a memo whose last audience change was lost (MEMNG-1194).
+    ///
+    /// Only by its content. A read issued after the loss can still be answered with the row as it
+    /// was — a replica behind the write, or the disconnected PATCH still executing — and no stamp
+    /// on this side orders the two on the server. `updated_at` does not either: it says when the
+    /// row was last written, not whether that write was this one. So a row at or narrower than the
+    /// audience sent settles it — the change landed, or the server holds something narrower still
+    /// — and a wider row keeps the narrower record and the mark, which costs a question at worst.
+    /// The next confirmed change settles it regardless (`patchAnswer`).
+    private func readSettlesLostChange(_ memo: Memo) -> Bool {
+        guard unsettledVisibility[memo.uid] != nil, let sent = sentVisibility[memo.uid] else {
+            return true
+        }
+        return VisibilityChange.narrower(memo.visibility, sent) == memo.visibility
     }
 
     /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
@@ -1698,8 +1716,9 @@ public final class TimelineStore {
 
     /// The memos whose last PATCH naming an audience went and was never answered, so the server
     /// may hold either the row's audience or the one sent (`visibilityReask`). Cleared by the next
-    /// statement of the server's about the memo (`recordServerAudience`); a refusal of a LATER
-    /// request says nothing about what became of this one, so it clears nothing.
+    /// statement of the server's about the memo (`recordServerAudience`) — from a read, only one
+    /// whose row shows the change landed (`readSettlesLostChange`); a refusal of a LATER request
+    /// says nothing about what became of this one, so it clears nothing.
     ///
     /// Each holds the sequence stamp taken the moment the loss was recorded. The fence alone cannot
     /// tell a read issued after the loss from one issued while the request was in line — both are

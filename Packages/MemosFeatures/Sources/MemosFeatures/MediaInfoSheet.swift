@@ -300,10 +300,7 @@ struct MediaInfoSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .alert(
                 widening.title,
-                isPresented: Binding(
-                    get: { widening.pending != nil },
-                    set: { if !$0 { _ = widening.answer(widening.pending, confirmed: false) } }
-                ),
+                isPresented: WideningAsk.presented($widening),
                 presenting: widening.pending
             ) { pending in
                 Button("Make \(pending.question.to.label)") {
