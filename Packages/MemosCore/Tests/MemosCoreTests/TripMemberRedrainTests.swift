@@ -409,6 +409,50 @@ struct TripMemberRedrainTests {
         #expect(
             rig.memberReads == 2, "two joined listings were \(rig.memberReads) member reads")
     }
+
+    @Test("the extra read is the joined drain's: one that lands before the second joiner is back")
+    func extraReadIsTheFlightsNotEachJoiners() async throws {
+        let start = try Self.instant("2026-10-10T12:00:00Z")
+        let (rig, release, drain) = try await heldDrain(start: start)
+        let listed = try #require(
+            await TripGuestStoreTests.contributions(
+                TripGuestStoreTests.contribution("g1", at: 11)))
+        // The first joiner back goes on; the second is held until the first has finished —
+        // its extra read landed — and only then decides.
+        let back = LockedValue(0)
+        let firstDone = TripLatch()
+        rig.members.onJoinedDrainLanded = {
+            back.set(back.get() + 1)
+            if back.get() == 2 { await firstDone.wait() }
+        }
+        let members = rig.members
+        let trip = rig.trip
+        let handle = rig.handle
+        // As `listWhileOut`: no suspension from the latch to the join.
+        let listing = { () async -> Task<Bool, Never> in
+            let started = TripLatch()
+            let task = Task {
+                started.open()
+                let read = await members.drainIfNewer(
+                    trip, contributions: listed, using: handle, baseURL: Stub.baseURL)
+                firstDone.open()
+                return read
+            }
+            #expect(await started.wait(), "the Guest Uploads read never asked")
+            return task
+        }
+        let first = await listing()
+        let second = await listing()
+        #expect(rig.memberReads == 1, "the listings did not join the drain on the wire")
+        release.open()
+        _ = await drain.value
+        #expect(await first.value)
+        #expect(await second.value)
+        #expect(back.get() == 2, "both listings did not come back from the joined drain")
+        #expect(
+            rig.memberReads == 2,
+            "two joiners of one stale drain were \(rig.memberReads) member reads")
+    }
 }
 
 extension TripGuestStoreTests {
