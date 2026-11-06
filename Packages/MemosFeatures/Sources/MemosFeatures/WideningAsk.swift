@@ -70,13 +70,15 @@ struct WideningAsk: Equatable {
     }
 
     /// One question per memo in line: the question already on screen for that memo is not
-    /// asked twice, and a newer one for a memo whose question is still waiting takes its place
-    /// there — the later pick is what the person wants now, and two yeses would be two changes.
+    /// asked twice, and a newer one for a memo whose question is on screen or still waiting takes
+    /// its place — the later pick is what the person wants now, and two yeses would be two
+    /// changes. One on screen is superseded by a NEW presentation, so a yes still on its way from
+    /// the superseded alert matches nothing and sends nothing.
     private mutating func present(_ question: VisibilityChange.Question, on uid: String) {
         if let pending, pending.uid == uid, pending.question == question { return }
         presented += 1
         let asked = Pending(id: presented, uid: uid, question: question)
-        if pending == nil {
+        if pending == nil || pending?.uid == uid {
             pending = asked
         } else if let waiting = queued.firstIndex(where: { $0.uid == uid }) {
             queued[waiting] = asked
