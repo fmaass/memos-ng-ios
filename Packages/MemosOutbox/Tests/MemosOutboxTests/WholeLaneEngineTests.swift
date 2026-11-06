@@ -556,7 +556,17 @@ struct WholeRig {
         let attempted = WholeBox<[String]>([])
         http.beforeSend = { request in
             attempted.mutate {
-                $0.append("\(request.httpMethod ?? "") \(request.url?.path() ?? "")")
+                // A batch is one attempt per session it asks for (MEMNG-958): counted as the
+                // single creates it stands in for, so a count of session attempts reads the same.
+                if request.url?.path() == "/api/uploads/batch" {
+                    let body = request.httpBody.flatMap {
+                        try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                    }
+                    let entries = (body?["entries"] as? [Any])?.count ?? 0
+                    $0.append(contentsOf: Array(repeating: "POST /api/uploads", count: entries))
+                } else {
+                    $0.append("\(request.httpMethod ?? "") \(request.url?.path() ?? "")")
+                }
             }
         }
         let session = ScriptedUploadTaskSession(listing: listing(job), onCancel: onCancel)
@@ -605,9 +615,8 @@ struct WholeRig {
 
     func reload() async throws -> UploadJob { try #require(await repository.job(job.id)) }
 
-    var uploadPosts: Int {
-        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }.count
-    }
+    /// Upload sessions asked for — one per file, whether alone or inside a batch.
+    var uploadPosts: Int { http.sessionAsks.count }
 
     var attemptedUploadPosts: Int { attempted.value.filter { $0 == "POST /api/uploads" }.count }
 
@@ -2159,10 +2168,9 @@ extension WholeRig {
     }
 
     func postsNaming(_ filename: String) -> Int {
-        http.requests(method: "POST").filter { request in
-            request.url?.path() == "/api/uploads"
-                && (request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "")
-                    .contains(filename)
+        http.sessionAsks.filter { request in
+            (request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "")
+                .contains(filename)
         }.count
     }
 

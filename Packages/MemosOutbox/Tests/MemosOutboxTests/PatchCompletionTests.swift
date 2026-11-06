@@ -183,7 +183,7 @@ struct Patching {
     /// The upload sessions a pass opened, which is how a picture staged into a restored draft
     /// shows that it reached the wire before the edit did.
     var uploadPosts: [URLRequest] {
-        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }
+        http.sessionAsks
     }
 
     /// Edits only: a chunk is a PATCH as well, and it goes to the upload session, not to the memo.

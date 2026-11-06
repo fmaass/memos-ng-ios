@@ -106,8 +106,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private var drainsKicked = 0
 
     /// Upload places this engine has promised to a hand-off or a replacement that has no task yet,
-    /// and the whole tasks it counts as in flight. Together never more than
-    /// `UploadBudget.inFlightUploads`, across every capture: a place is taken synchronously when
+    /// and the whole tasks it counts as in flight. Together never more than the adaptive budget
+    /// (`uploadCeiling`), across every capture: a place is taken synchronously when
     /// the send is decided, before the session request's first hop, and given back when the task
     /// ends, when the hand-off fails, or — for a replaced task — when its successor settles.
     private var slotsReserved = 0
@@ -124,6 +124,14 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// capture's minimum: a file in flight keeps a deadline that has passed, and as the capture's
     /// minimum that past one would hide a sibling's still ahead.
     private var wakeDeadlines: [UUID: [Date]] = [:]
+    /// The in-flight budget, adapted to the server's 429s and bounded by its published admission
+    /// (MEMNG-958). Asked by every reservation; told every whole task's answer.
+    private var budget = AdaptiveUploadBudget()
+    /// The server's `bodies_per_user` as the latest acquisition carried it, or nil.
+    private var admission: Int?
+    /// The budget generation each whole task was handed over under, by task, until its answer
+    /// lands: a 429 is judged against the generation that SENT it, never the current one.
+    private var budgetStamps: [Int: Int] = [:]
     /// The ONE deadline timer: armed while the gate is open at the earliest future deadline, and a
     /// token that tells its callback whether it is still the timer this engine means.
     private var deadlineTimer: Task<Void, Never>?
@@ -1542,15 +1550,20 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 // files: one waiting out its deadline or already in flight takes no place.
                 let planned = OutboxPlanner.nextWholeAction(
                     for: current, credentials: credentials, now: clock(),
-                    schedulingOpen: schedulingGate.isOpen, carried: carried
+                    schedulingOpen: schedulingGate.isOpen, carried: carried,
+                    budget: uploadCeiling()
                 )
                 if case .resume(let fileID) = planned {
                     // One place and one claim, taken with no hop since the plan, and held by the
                     // resume across its HEAD, the staging and the hand-off.
                     guard reserveSlot() else { return .done }
+                    // The generation the place was granted under, taken before any hop: a raise
+                    // landing during the HEAD must not be handed to this older attempt.
+                    let generation = budget.generation
                     own(WholeFileRef(jobID: jobID, fileID: fileID))
                     let moved = await resumeWhole(
-                        current, fileID: fileID, credentials: credentials, on: uploads
+                        current, fileID: fileID, generation: generation,
+                        credentials: credentials, on: uploads
                     )
                     // Planned again from the row: a sibling may still need its place.
                     return moved ? .replan : .done
@@ -1566,15 +1579,28 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
                 }
                 let grantedStart = start.filter { granted.contains($0) }
                 guard !grantedStart.isEmpty else { return .done }
+                let generation = budget.generation
+                // The sessions of every other file still without one are opened in the same batch
+                // (MEMNG-958): sessions are not bodies, and the budget gates only the bodies. Each
+                // waits, its session opened, for a place of its own.
+                let now = clock()
+                let ahead = current.files.filter { file in
+                    !file.isComplete && file.uploadUID == nil && file.heldReason == nil
+                        && !granted.contains(file.id) && !carried.contains(file.id)
+                        && (file.nextAttemptAt.map { now >= $0 } ?? true)
+                }.map(\.id)
                 // Claimed here, with no hop since the check: a settlement landing after it cannot
                 // free a file this pass is about to send. `handOffWhole` releases each one.
-                for fileID in grantedStart {
+                for fileID in grantedStart + ahead {
                     own(WholeFileRef(jobID: jobID, fileID: fileID))
                 }
-                await handOffWhole(
-                    current, starting: grantedStart, credentials: credentials, on: uploads
+                let refusedSome = await handOffWhole(
+                    current, starting: grantedStart, ahead: ahead, generation: generation,
+                    credentials: credentials, on: uploads
                 )
-                return .done
+                // A file the batch turned away holds the capture once nothing else is left to
+                // send: planned again from the row, so that hold is written in this pass.
+                return refusedSome ? .replan : .done
             case .createMemo:
                 if let reason = networkWait(for: current) {
                     if await !waitForNetwork(current, reason) { requestDrain() }
@@ -1674,13 +1700,41 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// Takes one place, synchronously, or refuses: the file is then left as it stands, and the
     /// release of a place asks for the pass that sends it.
     private func reserveSlot() -> Bool {
-        guard slotsReserved + slotTasks.count < UploadBudget.inFlightUploads else { return false }
+        guard slotsReserved + slotTasks.count < uploadCeiling() else { return false }
         slotsReserved += 1
         return true
     }
 
+    /// How many whole uploads may be in flight now: the adaptive budget, asked of the path the
+    /// phone is on at this instant and the admission the latest grant carried.
+    private func uploadCeiling() -> Int {
+        let path = network.currentPath()
+        let onWiFi = path.isSatisfied && !path.usesCellular && !path.isExpensive
+        return budget.ceiling(onWiFi: onWiFi, admission: admission, at: clock())
+    }
+
+    /// One whole task's answer, told to the budget under the generation that sent it. An answer
+    /// with no status — cancelled, no network, the process gone — says nothing about admission,
+    /// and a task this engine did not hand over (another launch's) carries no generation to
+    /// judge it by: neither is counted.
+    private func noteBudget(_ answer: WholeAnswer) {
+        guard let issued = budgetStamps.removeValue(forKey: answer.taskIdentifier),
+            let status = answer.statusCode
+        else { return }
+        budget.record(rateLimited: status == 429, issuedUnder: issued, at: clock())
+    }
+
+    /// The budget's generation now, and the one a task was stamped with — asked by tests.
+    var budgetGeneration: Int { budget.generation }
+    func budgetStamp(of taskIdentifier: Int) -> Int? { budgetStamps[taskIdentifier] }
+    /// The ceiling as a reservation would ask it now — asked by tests.
+    func askBudgetCeiling() -> Int { uploadCeiling() }
+
     /// A reservation became its task: the same place, counted once.
-    private func occupy(_ task: WholeTask) {
+    /// - Parameter generation: the budget generation the place was granted under, taken where the
+    ///   place was reserved and before any hop — never the generation current at this call.
+    private func occupy(_ task: WholeTask, issuedUnder generation: Int) {
+        budgetStamps[task.taskIdentifier] = generation
         // The task's own marker first, before the reservation is settled: it belongs to the task,
         // and nothing about the count may decide whether it is still there.
         let endedEarly = endedUncounted.remove(task.taskIdentifier) != nil
@@ -1729,7 +1783,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     /// was earned under.
     private func acquire() async -> OutboxCredentials? {
         let acquired = await credentials.currentCredentials()
-        if let acquired { latestEpoch = acquired.epoch }
+        if let acquired {
+            latestEpoch = acquired.epoch
+            admission = acquired.uploadAdmission
+        }
         return acquired
     }
 
@@ -1870,12 +1927,22 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
 
     /// Opens a session for every file that needs one, writes them ONCE with the row `.uploading`
     /// on the whole lane, then hands every file to the session. A sibling's term never moves.
+    /// - Returns: whether the batch turned a file away and the write recording it landed — the
+    ///   capture may now hold for it, which only a fresh plan decides.
+    @discardableResult
+    /// - Parameters:
+    ///   - starting: the files given a place: each is sent once its session exists.
+    ///   - ahead: files with no session and no place: their sessions open in the same batch, and
+    ///     each is marked `sessionUnsent` to be sent, without a HEAD, when a place frees.
+    ///   - generation: the budget generation the places were granted under.
     private func handOffWhole(
         _ job: UploadJob,
         starting: [UUID],
+        ahead: [UUID] = [],
+        generation: Int,
         credentials: OutboxCredentials,
         on uploads: any OutboxUploadScheduling
-    ) async {
+    ) async -> Bool {
         handOffGeneration += 1
         handOffsInProgress += 1
         defer {
@@ -1886,7 +1953,9 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         // The caller claimed every file before this was entered. Each stays owned until the session
         // has its task, so an answer landing for a sibling mid-loop cannot send it again; one that
         // never gets that far is released on the way out.
-        var unsent = Set(sending.map { WholeFileRef(jobID: job.id, fileID: $0) })
+        let opensAhead = Set(ahead)
+        var unsent = Set(
+            sending.union(opensAhead).map { WholeFileRef(jobID: job.id, fileID: $0) })
         defer {
             for ref in unsent { disown(ref) }
         }
@@ -1899,25 +1968,58 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             if placed > 0, drainForPlaces { releaseDrain() }
         }
         var candidate = job.with { $0.transport = .whole }
+        // Every session in ONE request per `UploadBudget.maxSessionsPerBatch` files (MEMNG-958),
+        // each file answered on its own: a file the server turned away holds alone, a file it had
+        // no room for spaces itself out alone, and the rest go.
+        // A file given a place whose session a batch already opened is sent on it as it stands.
+        let files = candidate.files.filter {
+            (sending.contains($0.id) || opensAhead.contains($0.id)) && $0.uploadUID == nil
+        }
+        var openings: [UUID: SessionOpening] = [:]
+        if !files.isEmpty {
+            guard let answered = await openSessions(files, of: job, credentials: credentials)
+            else { return false }
+            openings = answered
+        }
+        var opened = candidate.files.contains { sending.contains($0.id) && $0.uploadUID != nil }
+        var refused = false
         for file in candidate.files where sending.contains(file.id) {
-            guard
-                let session = await openSession(
-                    file, of: job, term: job.file(file.id)?.uploadAttempt ?? 0,
-                    credentials: credentials
+            candidate = candidate.updating(file.id) { $0.sessionUnsent = nil }
+        }
+        for file in files {
+            switch openings[file.id] {
+            case .opened(let session):
+                candidate = candidate.startingUpload(fileID: file.id, session: session)
+                if opensAhead.contains(file.id) {
+                    candidate = candidate.updating(file.id) { $0.sessionUnsent = true }
+                }
+                opened = true
+            case .refused(let reason, let message):
+                candidate = candidate.holdingFile(file.id, for: reason, error: message)
+                refused = true
+            case .spaced(let message, let retryAfter):
+                candidate = candidate.backingOffFile(
+                    file.id, retry: FileRetry(retryAfter: retryAfter, draw: rng()),
+                    error: message, at: clock()
                 )
-            else {
-                return
+            case nil:
+                break
             }
-            candidate = candidate.startingUpload(fileID: file.id, session: session)
         }
         // Nothing is handed to the session on a state nobody wrote: the answer to each task is
-        // matched against this write.
-        let uploading = candidate.with { $0.state = .uploading }
+        // matched against this write. A batch that opened nothing leaves the row as its spacing
+        // or its refusals wrote it; each file's deadline, or the next plan, is what comes next.
+        let uploading =
+            opened
+            ? candidate.with {
+                $0.state = .uploading
+                $0.waitReason = nil
+            } : candidate
         guard let saved = await save(uploading, matching: job) else {
             // The row moved under this hand-off — perhaps by a pass that skipped these very files
             // because this hand-off owned them. Nobody else will send them: ask again.
             requestDrain()
-            return
+            return false
         }
         // From here a file without a task was refused by the session's own checks — the gate, the
         // credential, a barrier — each of which asks for a pass when it lifts.
@@ -1942,11 +2044,12 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             )
             if let task {
                 placed -= 1
-                occupy(task)
+                occupy(task, issuedUnder: generation)
             }
             let ref = WholeFileRef(jobID: saved.id, fileID: file.id)
             if unsent.remove(ref) != nil { disown(ref) }
         }
+        return refused
     }
 
     /// Resumes one file whose session holds less than the whole of it: the offset HEAD first, and
@@ -1960,6 +2063,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private func resumeWhole(
         _ job: UploadJob,
         fileID: UUID,
+        generation: Int,
         credentials: OutboxCredentials,
         on uploads: any OutboxUploadScheduling
     ) async -> Bool {
@@ -2024,7 +2128,10 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             // The fresh session takes this file's place and claim over, and gives both back.
             placed = false
             owning = false
-            await handOffWhole(saved, starting: [fileID], credentials: credentials, on: uploads)
+            await handOffWhole(
+                saved, starting: [fileID], generation: generation, credentials: credentials,
+                on: uploads
+            )
             return true
         }
         guard response.isSuccess, let offset = reported, offset >= 0 else {
@@ -2096,7 +2203,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
         )
         if let task {
             placed = false
-            occupy(task)
+            occupy(task, issuedUnder: generation)
         } else if body != original {
             repository.tails.remove(body)
         }
@@ -2202,21 +2309,143 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             return nil
         }
         guard response.isSuccess, let session = OutboxWire.decodeSession(response.body) else {
-            // Sent under the credential held now, so its refusal holds under a known epoch.
-            let refused = OutboxRefusal(
-                statusCode: response.statusCode, issuedUnder: credentials.epoch, what: "upload",
-                kind: credentials.kind
-            )
-            let disposed = await save(
-                job.applying(refused.disposition(assumingCurrent: true), at: clock()),
-                ifStillCurrent: refused.issuedUnder,
-                matching: job,
-                else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
-            )
-            if disposed == nil { requestDrain() }
+            await refuseSessionRequest(response.statusCode, of: job, credentials: credentials)
             return nil
         }
         return session
+    }
+
+    /// A session request the server refused as a whole, written onto `job` as a refusal under the
+    /// credential that sent it: held or backed off by `OutboxRefusal`, chosen where the write is.
+    /// The one decision for the single create and the batch alike.
+    private func refuseSessionRequest(
+        _ statusCode: Int, of job: UploadJob, credentials: OutboxCredentials
+    ) async {
+        // Sent under the credential held now, so its refusal holds under a known epoch.
+        let refused = OutboxRefusal(
+            statusCode: statusCode, issuedUnder: credentials.epoch, what: "upload",
+            kind: credentials.kind
+        )
+        let disposed = await save(
+            job.applying(refused.disposition(assumingCurrent: true), at: clock()),
+            ifStillCurrent: refused.issuedUnder,
+            matching: job,
+            else: job.applying(refused.disposition(assumingCurrent: false), at: clock())
+        )
+        if disposed == nil { requestDrain() }
+    }
+
+    /// What the batch said about one file.
+    private enum SessionOpening {
+        /// The session, opened — complete already where the server matched the bytes.
+        case opened(OutboxWire.UploadSession)
+        /// This file alone was turned away, for good until a person asks again.
+        case refused(HoldReason, String)
+        /// This file alone was not taken now — no room, a busy server, no answer: it spaces
+        /// itself out, by the server's delay when it named one.
+        case spaced(String, retryAfter: TimeInterval?)
+    }
+
+    /// Opens the sessions of `files` with one `POST /api/uploads/batch` per
+    /// `UploadBudget.maxSessionsPerBatch` of them (MEMNG-958), and says per file what came of it.
+    ///
+    /// Each entry is answered as the single create would answer it alone, so each is treated as
+    /// that answer would be — but for its file only: a 413 holds that file, a 507 or another
+    /// passing refusal spaces it out, and its siblings' sessions stand. A request that failed as a
+    /// whole without a refusal spaces out every file it carried. A refusal of the whole request
+    /// is written onto `job` here, under the credential that sent it, as the single create's is,
+    /// and the answer is nil — as it is for a closed gate, which writes nothing, and for a file
+    /// already known to be too large, which holds the capture before anything is asked.
+    private func openSessions(
+        _ files: [OutboxFile], of job: UploadJob, credentials: OutboxCredentials
+    ) async -> [UUID: SessionOpening]? {
+        // The account and the size, asked as `openSession` asks them, once for the whole batch.
+        guard job.binding.matches(credentials) else {
+            requestDrain()
+            return nil
+        }
+        let checked = await withCurrentLimit(credentials)
+        if let limit = checked.uploadLimit,
+            let file = files.first(where: { OutboxPlanner.isOverLimit($0, limit: limit) })
+        {
+            let message = OutboxPlanner.tooLargeMessage(file, over: limit)
+            if await !hold(job, reason: .tooLarge, error: message) { requestDrain() }
+            return nil
+        }
+        var openings: [UUID: SessionOpening] = [:]
+        var start = 0
+        while start < files.count {
+            let end = Swift.min(start + UploadBudget.maxSessionsPerBatch, files.count)
+            let chunk = Array(files[start..<end])
+            start += chunk.count
+            let request: URLRequest
+            do {
+                request = try OutboxRequests.startUploadBatch(
+                    baseURL: credentials.serverBaseURL, token: credentials.token, files: chunk
+                )
+            } catch {
+                // Unreachable for the reason `startUpload`'s is, and written through `hold` so the
+                // refusal pins count one hold site per decision rather than one per lane.
+                if await !hold(job, reason: .serverRefused) { requestDrain() }
+                return nil
+            }
+            let sending = authority(under: credentials, for: .work)
+            let response: OutboxHTTPResponse
+            do {
+                response = try await http.perform(request, under: sending)
+            } catch {
+                if error is SendAuthorityWithdrawn, sending.withdrawal() == .scheduling {
+                    return nil
+                }
+                for file in chunk {
+                    openings[file.id] = .spaced("The server could not be reached.", retryAfter: nil)
+                }
+                continue
+            }
+            if !response.isSuccess, Self.isTransient(response.statusCode) {
+                let retryAfter =
+                    response.statusCode == 429 || response.statusCode == 503
+                    ? WholeOutcome.seconds(inRetryAfter: response.header("Retry-After")) : nil
+                for file in chunk {
+                    openings[file.id] = .spaced(
+                        "The server could not take the upload (\(response.statusCode)).",
+                        retryAfter: retryAfter
+                    )
+                }
+                continue
+            }
+            guard response.isSuccess, let answer = OutboxWire.decodeBatch(response.body),
+                answer.results.count == chunk.count
+            else {
+                await refuseSessionRequest(response.statusCode, of: job, credentials: credentials)
+                return nil
+            }
+            for (file, result) in zip(chunk, answer.results) {
+                openings[file.id] = Self.opening(of: file, from: result)
+            }
+        }
+        return openings
+    }
+
+    /// One batch entry's answer, read as the single create's answer for that file alone.
+    private static func opening(
+        of file: OutboxFile, from result: OutboxWire.UploadBatchAnswer.Result
+    ) -> SessionOpening {
+        if (200..<300).contains(result.status), let session = result.upload {
+            return .opened(session)
+        }
+        if result.status == 413 {
+            return .refused(
+                .tooLarge, "The server will not accept \(file.filename): the file is too large.")
+        }
+        if isTransient(result.status) {
+            return .spaced(
+                "The server could not take the upload (\(result.status)).", retryAfter: nil)
+        }
+        return .refused(
+            .serverRefused,
+            "The server rejected the upload of \(file.filename) (\(result.status))."
+        )
     }
 
     /// An offset HEAD that came back with no offset to resume from. A 429 or 503 is the server
@@ -2307,7 +2536,8 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
     private func replacementSettled(_ ref: WholeFileRef, sent: WholeTask?) {
         disown(ref)
         if let sent {
-            occupy(sent)
+            // A successor is the same attempt's place carried on; stamped as it is sent.
+            occupy(sent, issuedUnder: budget.generation)
             requestDrain()
         } else {
             slotsReserved -= 1
@@ -2370,6 +2600,7 @@ public actor OutboxEngine: OutboxChunkHandling, WholeAnswerHandling {
             settle()
         }
         handOffGeneration += 1
+        noteBudget(answer)
         // Whatever it says, an answer is its task's end: it carries its file no longer, and the
         // tail it was sending from — if it sent one — is sent by nothing now.
         ended[answer.taskIdentifier] = answer.identity.jobID
