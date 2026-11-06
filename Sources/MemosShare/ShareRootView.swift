@@ -23,6 +23,9 @@ struct ShareRootView: View {
     /// which queue that is. The extension has no session and no token of its own: both are licence
     /// bindings the app published (see `OutboxAccountStore`, `ShareRoute`).
     @State private var route: ShareRoute?
+    /// The account's default visibility as the app published it beside the member licence this
+    /// sheet opened under, by its wire name; nil when it published none for that licence.
+    @State private var accountDefault: String?
     @State private var isReading = true
     @State private var isPosting = false
     @State private var problem: String?
@@ -93,7 +96,8 @@ struct ShareRootView: View {
                 } else {
                     Section("Visibility") {
                         Picker("Visibility", selection: $visibility) {
-                            Text("Account default").tag(ShareVisibility?.none)
+                            Text(ShareComposition.accountDefaultLabel(published: accountDefault))
+                                .tag(ShareVisibility?.none)
                             Text(ShareVisibility.private.label).tag(ShareVisibility?.some(.private))
                             Text(ShareVisibility.protected.label)
                                 .tag(ShareVisibility?.some(.protected))
@@ -124,6 +128,11 @@ struct ShareRootView: View {
     private func read() async {
         let opened = ShareRoute.live()
         route = opened
+        // Read under the very licence the route stands on, so a default can only ever be the one
+        // published for this account and this issue.
+        if let opened, opened.kind == .member {
+            accountDefault = OutboxAccountStore.live()?.defaultVisibility(under: opened.licence)
+        }
         // The capture grant is the MEMBER's alone, so is what this says about it: a guest share
         // has no grant path at all, and the trip's own sentence covers it.
         uploadNotice =
