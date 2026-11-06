@@ -432,16 +432,12 @@ struct ContractTests {
         #expect(entries["maxItems"] as? Int == UploadBudget.maxSessionsPerBatch)
         let items = try #require(entries["items"] as? [String: Any])
         #expect(items["$ref"] as? String == "#/components/schemas/UploadCreate")
-        let sent = try #require(
-            try JSONSerialization.jsonObject(
-                with: try #require(
-                    try OutboxRequests.startUploadBatch(
-                        baseURL: Fixture.server, token: "t",
-                        files: [Fixture.file(), Fixture.file()]
-                    ).httpBody
-                )
-            ) as? [String: Any]
+        let request = try OutboxRequests.startUploadBatch(
+            baseURL: Fixture.server, token: "t", files: [Fixture.file(), Fixture.file()]
         )
+        let sentBody = try #require(request.httpBody)
+        let sentObject = try JSONSerialization.jsonObject(with: sentBody)
+        let sent = try #require(sentObject as? [String: Any])
         #expect(Set(sent.keys) == ["entries"])
         let entry = try #require((sent["entries"] as? [[String: Any]])?.first)
         let declared = try properties("UploadCreate")
