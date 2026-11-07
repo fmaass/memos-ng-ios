@@ -5,6 +5,17 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (79)
+
+- A memo created or edited on another device shows up in my timeline without a pull to refresh, and an edit I have open keeps my unsaved words.
+- Settings has a default visibility for my new memos, and the share sheet's Account default follows it.
+- Removing a pending memo also withdraws its unfinished uploads from the server, even when the app was closed in between.
+- A capture with several files opens all of their uploads in one request.
+- An upload the share sheet started carries on under my own sign-in after the app relaunches.
+- Memos a guest adds to a trip name that guest on their card.
+- A trip guest's name is kept to the 64-character limit without cutting a character in half, and falls back to the device name.
+- Uploads and visibility changes hold up better when my sign-in changes while they are under way.
+
 ## 2.4.0 (78)
 
 - Pictures a guest shared into a trip now show in that trip's Journal.

@@ -224,7 +224,7 @@ targets:
         # build number under Xcode Cloud is a ci_scripts/ci_pre_xcodebuild.sh that stamps
         # CURRENT_PROJECT_VERSION from $CI_BUILD_NUMBER, so that no hand edit is needed here.
         MARKETING_VERSION: "2.4.0"
-        CURRENT_PROJECT_VERSION: "78"
+        CURRENT_PROJECT_VERSION: "79"
         # The household DNS resolves the server to a private LAN address (split-horizon), so iOS
         # classifies API calls as Local Network access; without this declaration iOS 18+ denies
         # them silently (NSURLError -1009 with a satisfied path).
@@ -309,7 +309,7 @@ targets:
         # placeholder attributes for an app extension placeholder", which is a failure to
         # INSTALL the host app, not a warning about the extension.
         MARKETING_VERSION: "2.4.0"
-        CURRENT_PROJECT_VERSION: "78"
+        CURRENT_PROJECT_VERSION: "79"
 
   # The transfers Live Activity: lock-screen banner and Dynamic Island. A widget extension that
   # only draws — the app starts and updates the activity (`TransferActivityDriver`) — so it links
@@ -341,7 +341,7 @@ targets:
         # The same pair as the app's and the share extension's, for the same reason: an
         # extension's bundle version must match its containing app's. Move all three together.
         MARKETING_VERSION: "2.4.0"
-        CURRENT_PROJECT_VERSION: "78"
+        CURRENT_PROJECT_VERSION: "79"
 
   MemosAPITests:
     type: bundle.unit-test
