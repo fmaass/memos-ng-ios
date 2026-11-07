@@ -5,6 +5,12 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (80)
+
+- A memo a guest adds to a trip opens and edits from that trip's Journal, and stays off my Timeline.
+- A guest's memo says Guest on its card, its detail and its Info sheet.
+- An edit I save to a guest's memo stays on its detail when I go back to it.
+
 ## 2.4.0 (79)
 
 - A memo created or edited on another device shows up in my timeline without a pull to refresh, and an edit I have open keeps my unsaved words.
