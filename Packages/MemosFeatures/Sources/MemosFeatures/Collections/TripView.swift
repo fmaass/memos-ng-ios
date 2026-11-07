@@ -133,6 +133,11 @@ struct TripView: View {
     @Environment(\.timeZone) private var timeZone
     /// Where a journal card's memo is asked for; nil in a harness without the tabs.
     @Environment(MemoJump.self) private var jump: MemoJump?
+    /// The app's one timeline store, which a guest memo's detail edits through (MEMNG-1264); nil
+    /// until the Timeline tab has built it, and in a harness without the tabs.
+    @Environment(TimelineAccess.self) private var timelineAccess: TimelineAccess?
+    /// The guest memo whose detail the Journal's Edit opened, or nil.
+    @State private var editing: Memo?
     /// The picture a tile tap opened, full screen.
     @State private var viewing: MediaViewerSelection?
     /// The picture a Journal card's tap opened, full screen, over that memo's own pictures. Apart
@@ -370,6 +375,8 @@ struct TripView: View {
         case viewer(MediaViewerSelection)
         /// The memo, on the Timeline, through `MemoJump`.
         case memo(String)
+        /// A guest memo, on this trip's screen, in the detail the Journal's Edit opens.
+        case detail(String)
     }
 
     /// A card's text — `attachment` nil — opens the memo on the Timeline, whose store
@@ -377,15 +384,31 @@ struct TripView: View {
     /// pictures, at the one tapped, and each page carries the memo's uid so it offers Show Memo as
     /// a grid page does. One the viewer cannot show falls back to the memo, because a tap that does
     /// nothing reads as a broken card.
+    ///
+    /// A guest memo never goes to the Timeline (MEMNG-1263): the home list leaves guest memos out
+    /// (`MemoQuery.includeGuests`), so the jump would only ever end on "That memo is no longer
+    /// here." Its text opens the viewer on its first picture instead, and one with nothing the
+    /// viewer can show opens its detail here.
     static func journalOpening(_ attachment: MemoAttachment?, of memo: Memo) -> JournalOpening {
-        guard let attachment else { return .memo(memo.uid) }
+        let fallback: JournalOpening = memo.guest == nil ? .memo(memo.uid) : .detail(memo.uid)
+        let first = memo.attachments.first(where: MediaViewerPresentation.isViewable)
+        guard let attachment = attachment ?? (memo.guest == nil ? nil : first)
+        else { return fallback }
         let owned = memo.attachments.map { file in
             var file = file
             file.memoUID = memo.uid
             return file
         }
-        let selection = MediaViewerPresentation.viewer(for: owned, startingAt: attachment.uid)
-        return selection.map(JournalOpening.viewer) ?? .memo(memo.uid)
+        let selection = MediaViewerPresentation.viewer(
+            for: owned, startingAt: attachment.uid, showsMemo: memo.guest == nil)
+        return selection.map(JournalOpening.viewer) ?? fallback
+    }
+
+    /// Whether a Journal card offers Edit on a long press (MEMNG-1264): a guest memo's does, for
+    /// every signed-in member — a guest has no account, so `mine` is the pass issuer's alone and
+    /// cannot be the gate. A household memo is edited where it lives, on the Timeline.
+    static func journalEdits(_ memo: Memo) -> Bool {
+        memo.guest != nil
     }
 
     /// The Journal viewer's pages: the ones it opened with, each taking the copy of it the trip's
@@ -936,9 +959,10 @@ struct TripView: View {
                         MemoCard(
                             memo: memo,
                             mediaZoom: zoom,
-                            openMemo: { open(Self.journalOpening(nil, of: memo)) },
-                            openAttachment: { open(Self.journalOpening($0, of: memo)) }
+                            openMemo: { open(Self.journalOpening(nil, of: memo), of: memo) },
+                            openAttachment: { open(Self.journalOpening($0, of: memo), of: memo) }
                         )
+                        .modifier(JournalEditMenu(shown: canEdit(memo)) { editing = memo })
                         .cardRow()
                     }
                 } header: {
@@ -965,13 +989,38 @@ struct TripView: View {
             action: coverAction,
             gone: memberStore.deleted, delete: deletePicture
         ) { Self.journalViewerSource(for: $0, memos: memos) }
+        // Edit on a guest memo (MEMNG-1264): the memo's own detail, by uid, through the app's one
+        // timeline store. The Journal is read again once it closes, so a memo deleted or a picture
+        // removed there leaves the day it was listed under.
+        .background {
+            Color.clear.sheet(item: $editing, onDismiss: { Task { await loadJournal() } }) { memo in
+                if let timeline = timelineAccess?.store {
+                    NavigationStack {
+                        MemoDetailView(uid: memo.uid, initial: memo, timeline: timeline)
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("Done") { editing = nil }
+                                }
+                            }
+                    }
+                }
+            }
+        }
     }
 
-    /// Where a Journal card's tap goes: the viewer here, or the memo on the Timeline.
-    private func open(_ opening: JournalOpening) {
+    /// Whether this card's long press offers Edit: a guest memo's, while the app's timeline store
+    /// is there to edit it through.
+    private func canEdit(_ memo: Memo) -> Bool {
+        Self.journalEdits(memo) && timelineAccess?.store != nil
+    }
+
+    /// Where a Journal card's tap goes: the viewer here, the memo on the Timeline, or a guest
+    /// memo's detail here.
+    private func open(_ opening: JournalOpening, of memo: Memo) {
         switch opening {
         case .viewer(let selection): journalViewing = selection
         case .memo(let uid): jump?.request(uid)
+        case .detail: editing = memo
         }
     }
 
@@ -2068,6 +2117,26 @@ struct TripFilterMenuContent: View {
         if let showRemoved {
             // Offered before anything is known: its sheet computes the list when it opens.
             Button(TripView.removedRowButton, systemImage: "eye.slash", action: showRemoved)
+        }
+    }
+}
+
+/// A Journal card's long-press Edit (MEMNG-1264), and the same Edit as a named accessibility
+/// action, because a context menu must never be the only way to reach an action. Nothing at all when the
+/// card offers none: a long press that opens an empty menu is worse than one that does nothing.
+private struct JournalEditMenu: ViewModifier {
+    let shown: Bool
+    let edit: () -> Void
+
+    func body(content: Content) -> some View {
+        if shown {
+            content
+                .contextMenu {
+                    Button(action: edit) { Label("Edit", systemImage: "pencil") }
+                }
+                .accessibilityAction(named: "Edit", edit)
+        } else {
+            content
         }
     }
 }

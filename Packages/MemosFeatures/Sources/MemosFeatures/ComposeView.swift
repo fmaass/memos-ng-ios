@@ -189,6 +189,9 @@ public struct ComposeView: View {
     /// The destructive action, on an edit that has one. `nil` everywhere else — a new memo has
     /// nothing to delete, and neither has a memo that is not mine (see `ComposeDelete`).
     let delete: ComposeDelete?
+    /// Whether an edit offers the photos pill: false for a guest memo (MEMNG-1264), whose edit
+    /// removes pictures but never adds one.
+    let addsMedia: Bool
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -228,11 +231,12 @@ public struct ComposeView: View {
         mode: Mode,
         delete: ComposeDelete? = nil,
         pinnedTrip: ComposePinnedTrip? = nil,
+        addsMedia: Bool = true,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
         self.init(
             mode: mode, delete: delete, imports: ComposeImports(), pinnedTrip: pinnedTrip,
-            submit: submit)
+            addsMedia: addsMedia, submit: submit)
     }
 
     /// The same sheet with its import list handed in from outside.
@@ -245,10 +249,12 @@ public struct ComposeView: View {
         delete: ComposeDelete? = nil,
         imports: ComposeImports,
         pinnedTrip: ComposePinnedTrip? = nil,
+        addsMedia: Bool = true,
         submit: @escaping (ComposeSubmission) async -> ComposeOutcome
     ) {
         self.mode = mode
         self.delete = delete
+        self.addsMedia = addsMedia
         self.submit = submit
         _imports = State(initialValue: imports)
         _tripChip = State(initialValue: ComposeTripChip(mode: mode, offered: pinnedTrip))
@@ -655,6 +661,7 @@ public struct ComposeView: View {
     private func editPills(_ spelling: ComposeMetaRow.Spelling) -> some View {
         ComposeEditPills(
             spelling: spelling,
+            addsMedia: addsMedia,
             stage: $stage,
             attachmentCount: imports.attachments.count,
             isImporting: imports.isImporting,
@@ -1340,6 +1347,7 @@ struct ComposeMetaPills: View {
 /// measured rather than eyeballed.
 struct ComposeEditPills: View {
     let spelling: ComposeMetaRow.Spelling
+    var addsMedia = true
     @Binding var stage: ComposeStage
     let attachmentCount: Int
     var isImporting: Bool = false
@@ -1348,12 +1356,14 @@ struct ComposeEditPills: View {
 
     var body: some View {
         HStack(spacing: DesignTokens.Space.snug) {
-            PhotosPickerPill(
-                stage: $stage,
-                count: attachmentCount,
-                isImporting: isImporting,
-                spelling: spelling
-            )
+            if addsMedia {
+                PhotosPickerPill(
+                    stage: $stage,
+                    count: attachmentCount,
+                    isImporting: isImporting,
+                    spelling: spelling
+                )
+            }
             // Not clearable and never Auto: a memo being edited already has a date, and the
             // files already on it carry no capture instant this client has ever read. Edit Auto is
             // its own ticket.

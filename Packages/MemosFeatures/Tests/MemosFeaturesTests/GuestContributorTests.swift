@@ -14,7 +14,7 @@ import UIKit
 /// memo a guest sends in, so a card reading `owner` would put the household's name on a guest's
 /// words.
 @MainActor
-@Suite("Guest memos name their contributor")
+@Suite("Guest memos say Guest")
 struct GuestContributorTests {
     static func guestMemo(_ name: String?, uid: String = "g1") -> Memo {
         var memo = MemoFixture.memo(uid: uid, owner: "fabian", content: "From the beach")
@@ -22,35 +22,37 @@ struct GuestContributorTests {
         return memo
     }
 
-    @Test("the label: '<contributor> · guest', 'A guest' without a name, the owner otherwise")
+    /// The owner's decision of 2026-11-06 (MEMNG-1164): the plain word "Guest", never the name the
+    /// guest's device sent, until guests can type their own (MEMNG-1265).
+    @Test("the label: 'Guest' whatever name the device sent, the owner otherwise")
     func theLabel() {
-        #expect(MemoCardPresentation.displayName(for: Self.guestMemo("Anna")) == "Anna · guest")
-        #expect(MemoCardPresentation.displayName(for: Self.guestMemo(" Anna ")) == "Anna · guest")
-        #expect(MemoCardPresentation.displayName(for: Self.guestMemo(nil)) == "A guest")
-        #expect(MemoCardPresentation.displayName(for: Self.guestMemo("  ")) == "A guest")
+        for name in ["Anna", " Anna ", "iPhone", nil, "  "] {
+            #expect(MemoCardPresentation.displayName(for: Self.guestMemo(name)) == "Guest")
+            // The avatar's letter follows the word: "G", never the device's or the owner's.
+            #expect(MemoCardPresentation.avatarName(for: Self.guestMemo(name)) == "Guest")
+        }
         let own = MemoFixture.memo(owner: "fabian@example.invalid")
         #expect(MemoCardPresentation.displayName(for: own) == "fabian")
-        // The avatar's letter follows the same person.
-        #expect(MemoCardPresentation.avatarName(for: Self.guestMemo("Anna")) == "Anna")
         #expect(MemoCardPresentation.avatarName(for: own) == "fabian@example.invalid")
-        // The inbox and the cards spell a nameless guest the same way.
+        // The Guests sheet still tells devices apart by the name each sent.
         #expect(MemoCardPresentation.guestName(nil) == "A guest")
         #expect(MemoCardPresentation.guestName("Ben") == "Ben")
     }
 
-    @Test("a guest memo's card names the contributor, not the owner; an owner's card the owner")
+    @Test("a guest memo's card says Guest, not the owner or the device; an owner's card the owner")
     func theCardNamesTheContributor() {
         let guest = ScreenProbe.labels(of: MemoCard(memo: Self.guestMemo("Anna")))
-        #expect(guest.contains { $0.contains("Anna · guest") }, "no contributor: \(guest)")
+        #expect(guest.contains { $0.contains("Guest") }, "no Guest: \(guest)")
         #expect(!guest.contains { $0.contains("fabian") }, "the owner's name is on it: \(guest)")
+        #expect(!guest.contains { $0.contains("Anna") }, "the device's name is on it: \(guest)")
 
         let nameless = ScreenProbe.labels(of: MemoCard(memo: Self.guestMemo(nil)))
-        #expect(nameless.contains { $0.contains("A guest") }, "\(nameless)")
+        #expect(nameless.contains { $0.contains("Guest") }, "\(nameless)")
         #expect(!nameless.contains { $0.contains("fabian") }, "\(nameless)")
 
         let own = ScreenProbe.labels(of: MemoCard(memo: MemoFixture.memo(owner: "fabian")))
         #expect(own.contains { $0.contains("fabian") }, "control: the owner's card: \(own)")
-        #expect(!own.contains { $0.contains("guest") }, "an owner's card says guest: \(own)")
+        #expect(!own.contains { $0.contains("Guest") }, "an owner's card says Guest: \(own)")
     }
 
     @Test("a guest memo's detail names the contributor, not the owner")
@@ -58,22 +60,23 @@ struct GuestContributorTests {
         let memo = Self.guestMemo("Anna")
         let labels = ScreenProbe.labels(
             of: MemoDetailView(uid: memo.uid, initial: memo, timeline: TimelineStore()))
-        #expect(labels.contains { $0.contains("Anna · guest") }, "no contributor: \(labels)")
+        #expect(labels.contains { $0.contains("Guest") }, "no Guest: \(labels)")
         #expect(!labels.contains { $0.contains("fabian") }, "the owner's name is on it: \(labels)")
+        #expect(!labels.contains { $0.contains("Anna") }, "the device's name is on it: \(labels)")
     }
 
     @Test("the Info sheet carries a contributor row for a guest memo, and none for the owner's")
     func theInfoSheetNamesTheContributor() throws {
         let guest = try #require(
             MediaInfoRows.memoCard(.carried(Self.guestMemo("Anna")), looked: nil))
-        #expect(guest.contributor == "Anna · guest")
+        #expect(guest.contributor == "Guest")
         let nameless = try #require(
             MediaInfoRows.memoCard(.carried(Self.guestMemo(nil)), looked: nil))
-        #expect(nameless.contributor == "A guest")
+        #expect(nameless.contributor == "Guest")
         // A looked-up memo carries it the same way.
         let looked = try #require(
             MediaInfoRows.memoCard(.lookup("g1"), looked: Self.guestMemo("Anna")))
-        #expect(looked.contributor == "Anna · guest")
+        #expect(looked.contributor == "Guest")
         let own = try #require(
             MediaInfoRows.memoCard(.carried(MemoFixture.memo(owner: "fabian")), looked: nil))
         #expect(own.contributor == nil, "an owner's memo grew a contributor row")
@@ -104,7 +107,8 @@ struct GuestContributorTests {
 
         let guest = drawn(Self.guestMemo("Anna"))
         defer { guest.isHidden = true }
-        #expect(PressProbe.reads("Anna · guest", in: guest), "no contributor row")
+        #expect(PressProbe.reads("Guest", in: guest), "no contributor row")
+        #expect(!PressProbe.reads("Anna", in: guest), "the device's name is on the sheet")
         #expect(PressProbe.reads("Contributor", in: guest), "no contributor label")
         let own = drawn(MemoFixture.memo(owner: "fabian"))
         defer { own.isHidden = true }
@@ -135,7 +139,7 @@ struct GuestContributorTests {
         }
         let memo = try #require(timeline.memos.first { $0.uid == "g1" })
         let labels = ScreenProbe.labels(of: MemoCard(memo: memo))
-        #expect(labels.contains { $0.contains("Anna · guest") }, "no contributor: \(labels)")
+        #expect(labels.contains { $0.contains("Guest") }, "no Guest: \(labels)")
         #expect(!labels.contains { $0.contains("fabian") }, "the owner's name is on it: \(labels)")
     }
 }

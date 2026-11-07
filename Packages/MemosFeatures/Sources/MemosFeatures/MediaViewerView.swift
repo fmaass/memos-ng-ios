@@ -400,7 +400,9 @@ struct MediaViewerView: View {
         let page = pages.first { $0.id == currentPage }
         HStack(spacing: 0) {
             MediaViewerActions(
-                control: Self.control(for: page, in: source, albums: trips != nil),
+                control: Self.control(
+                    for: page, in: source, albums: trips != nil,
+                    showsMemo: selection.showsMemo),
                 showMemo: { uid in
                     // Out of the cover FIRST: the jump changes tabs, and a full-screen cover
                     // presented by the tab being left would be a black screen over the memo.
@@ -430,11 +432,12 @@ struct MediaViewerView: View {
     /// memo this viewer carries (MEMNG-930): a memo's pictures name none, so that Show Memo stays
     /// off.
     static func control(
-        for page: MediaPage?, in source: MediaViewerSource, albums: Bool
+        for page: MediaPage?, in source: MediaViewerSource, albums: Bool, showsMemo: Bool = true
     ) -> MediaActionControl {
         guard let page else { return .hidden }
         return MediaTileMenu.viewerControl(
-            for: page.attachment, albums: albums, inMemo: source.carries(page.attachment.uid))
+            for: page.attachment, albums: albums, inMemo: source.carries(page.attachment.uid),
+            showsMemo: showsMemo)
     }
 
     /// What a refused delete says, on the one screen with nowhere else to say it.

@@ -57,7 +57,7 @@ enum MediaInfoRows {
         /// Whether the memo is the signed-in person's: the server's own `mine`, the flag the
         /// timeline's long press reads before it offers Visibility. Never the FILE's flag.
         let mine: Bool
-        /// Who sent the memo in when a pass guest did — "Anna · guest", the card's own words
+        /// Who sent the memo in when a pass guest did — "Guest", the card's own word
         /// (`MemoCardPresentation.displayName(for:)`) — and nil for a memo its owner wrote
         /// (MEMNG-1164, MEMNG-1007).
         var contributor: String? = nil
@@ -201,7 +201,8 @@ enum MediaInfoRows {
                 return card(memo, showable: false)
             }
             return card(found, showable: false)
-        case .lookup: return found.map { card($0, showable: true) }
+        // A guest memo is not on the Timeline Show memo would jump to (MEMNG-1263).
+        case .lookup: return found.map { card($0, showable: $0.guest == nil) }
         }
     }
 
