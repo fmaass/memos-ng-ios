@@ -191,12 +191,19 @@ extension MediaTileMenu {
     /// A memo's own pictures name no memo (`MemoAttachment(_:baseURL:)`), which is what keeps Show
     /// Memo off the screen it would only lead back to; `inMemo` is the viewer saying it was opened
     /// over the memo that holds this picture, so it hangs on one all the same (MEMNG-930).
+    ///
+    /// `showsMemo` false takes Show Memo off a page that names its memo all the same: a guest
+    /// memo's, which the Timeline the jump lands on never holds (MEMNG-1263).
     static func viewerActions(
-        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false
+        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false,
+        showsMemo: Bool = true
     ) -> [MediaTileAction] {
         var rows = actions(for: attachment).filter { action in
-            if case .share = action { return false }
-            return true
+            switch action {
+            case .share: return false
+            case .showMemo: return showsMemo
+            default: return true
+            }
         }
         if albums, inMemo || attachment.memoUID != nil {
             let after = rows.firstIndex { if case .showMemo = $0 { true } else { false } }
@@ -210,9 +217,11 @@ extension MediaTileMenu {
     /// break that row's shape. The tile's direct-versus-menu rule (`control(of:)`, MEMNG-213) is
     /// the tile's and stays as it is.
     static func viewerControl(
-        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false
+        for attachment: MemoAttachment, albums: Bool = false, inMemo: Bool = false,
+        showsMemo: Bool = true
     ) -> MediaActionControl {
-        let actions = viewerActions(for: attachment, albums: albums, inMemo: inMemo)
+        let actions = viewerActions(
+            for: attachment, albums: albums, inMemo: inMemo, showsMemo: showsMemo)
         return actions.isEmpty ? .hidden : .menu(actions)
     }
 

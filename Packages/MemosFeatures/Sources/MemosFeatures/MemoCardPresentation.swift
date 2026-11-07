@@ -66,6 +66,34 @@ public enum MemoCardPresentation {
         return name.isEmpty ? "Unknown" : name
     }
 
+    /// A pass guest's name as the Guests sheet lists their device and their uploads: the name the
+    /// device gave, or "A guest" when it gave none. The trip owner tells devices apart by it there;
+    /// a memo's own surfaces never show it (`displayName(for:)`).
+    public static func guestName(_ contributorName: String?) -> String {
+        let name = contributorName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "A guest" : name
+    }
+
+    /// What a guest memo's card, detail and Info sheet call the person who sent it.
+    public static let guestLabel = "Guest"
+
+    /// Who a memo is BY, as its card, its detail and its Info sheet name it.
+    ///
+    /// A guest memo is owned by the pass's account, so the owner's name would put the household's
+    /// name on a guest's words (MEMNG-1164). It says the plain word "Guest", whatever name the
+    /// guest's device sent: that name is the device's ("iPhone"), not a person's, and guests have
+    /// no way to type their own yet (owner, 2026-11-06; MEMNG-1265). Every other memo says its
+    /// owner.
+    public static func displayName(for memo: Memo) -> String {
+        memo.guest == nil ? displayName(forOwner: memo.owner) : guestLabel
+    }
+
+    /// The name the avatar circle takes its letter from: "Guest" on a guest memo, so its circle
+    /// reads "G" beside the word, and the owner's on every other.
+    public static func avatarName(for memo: Memo) -> String {
+        memo.guest == nil ? memo.owner : guestLabel
+    }
+
     private static func localPart(of owner: String) -> String {
         let trimmed = owner.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let at = trimmed.firstIndex(of: "@") else { return trimmed }

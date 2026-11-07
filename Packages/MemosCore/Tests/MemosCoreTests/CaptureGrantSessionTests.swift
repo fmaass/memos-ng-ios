@@ -100,6 +100,8 @@ struct CaptureGrantSessionTests {
         let refusals: Refusals
         /// The credential the newest client was built with — the one a refusal is judged against.
         let presented: LockedValue<PresentedCredential?>
+        /// While set, every removal of the grant's file fails — the session's and the licence's.
+        let failClears: LockedValue<Bool>
 
         func cleanUp() { try? FileManager.default.removeItem(at: root) }
     }
@@ -113,8 +115,12 @@ struct CaptureGrantSessionTests {
     ) -> Rig {
         let root = FileManager.default.temporaryDirectory.appending(path: "grant-\(UUID())")
         let wire = Wire()
-        let account = OutboxAccountStore(root: root)
-        let grants = CaptureGrantStore(root: root)
+        let failClears = LockedValue(false)
+        let grants = CaptureGrantStore(root: root) { url in
+            if failClears.get() { throw CocoaError(.fileWriteNoPermission) }
+            try FileManager.default.removeItem(at: url)
+        }
+        let account = OutboxAccountStore(root: root, grants: grants)
         let credentials = InMemoryCredentials()
         let refusals = Refusals()
         let presented = LockedValue<PresentedCredential?>(nil)
@@ -154,7 +160,8 @@ struct CaptureGrantSessionTests {
         )
         return Rig(
             root: root, session: session, account: account, grants: grants, wire: wire,
-            credentials: credentials, refusals: refusals, presented: presented)
+            credentials: credentials, refusals: refusals, presented: presented,
+            failClears: failClears)
     }
 
     @Test("a foreground mints the grant with the device token and stamps it with the licence issue")
@@ -617,6 +624,109 @@ struct CaptureGrantSessionTests {
         #expect(grant.incarnation == rig.account.currentLicence()?.incarnation)
         // The server revoked the old grant with its token; there is nothing to ask it.
         #expect(rig.wire.calls(revokeGrantOperation).isEmpty)
+    }
+
+    // MARK: - a renewal around a foreground, and a clear that fails (MEMNG-1186)
+
+    @Test("a grant a foreground minted under the successor while the renewal read its token stays")
+    func renewalKeepsTheSuccessorGrantAForegroundMinted() async throws {
+        let renewed = LockedValue(false)
+        let readingBack = LockedValue(false)
+        let tokenReadHeld = Gate()
+        let successorMints = Counter()
+        let rig = rig(clock: LockedValue(hourOne)) { operation, request in
+            switch operation {
+            case renewOperation:
+                renewed.set(true)
+                return nil
+            case tokenReadOperation where renewed.get():
+                // The renewal's own read-back, held: the window a foreground lands in. The token
+                // has been swapped and the epoch moved by now.
+                readingBack.set(true)
+                await tokenReadHeld.wait()
+                return nil
+            case mintOperation where request.headerFields[.authorization] == "Bearer pat-next":
+                successorMints.increment()
+                return mintedGrant(id: 11 + successorMints.count, token: "memos_cap_next")
+            default:
+                return nil
+            }
+        }
+        defer { rig.cleanUp() }
+        // Never leaves the renewal parked, whichever expectation stops the test.
+        defer { tokenReadHeld.open() }
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "pat-a")
+        await rig.session.enteredForeground()
+        #expect(rig.grants.current()?.id == 9, "control: a fresh grant under the old token")
+
+        let renewal = Task { await rig.session.renewDeviceToken() }
+        for _ in 0..<1000 where !readingBack.get() { await Task.yield() }
+        try #require(readingBack.get(), "control: the renewal is reading its token back")
+        // The foreground mints under the successor and finishes while the renewal is still out.
+        await rig.session.enteredForeground()
+        let minted = try #require(rig.grants.current())
+        #expect(minted.id == 12, "control: the foreground minted under the successor")
+        tokenReadHeld.open()
+        #expect(await renewal.value == .renewed)
+
+        // One mint under the successor: a second would rotate — revoke — the grant the extension
+        // may be uploading under right now.
+        #expect(
+            rig.wire.calls(mintOperation).map(\.bearer) == ["Bearer pat-a", "Bearer pat-next"])
+        #expect(rig.grants.current() == minted)
+    }
+
+    @Test("a renewal whose clear failed: the dead grant is not kept and the clear is retried")
+    func renewalClearThatFailedIsRetried() async throws {
+        let rig = rig(clock: LockedValue(hourOne)) { operation, request in
+            // No mint under the successor lands, so nothing overwrites the dead grant's file.
+            guard operation == mintOperation,
+                request.headerFields[.authorization] == "Bearer pat-next"
+            else { return nil }
+            return Stub.empty(.internalServerError)
+        }
+        defer { rig.cleanUp() }
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "pat-a")
+        await rig.session.enteredForeground()
+        let dead = try #require(rig.grants.current())
+        #expect(dead.id == 9, "control: a fresh grant under the old token")
+
+        // The grant's removal fails while the renewal runs.
+        rig.failClears.set(true)
+        let outcome = await rig.session.renewDeviceToken()
+        rig.failClears.set(false)
+        #expect(outcome == .renewed)
+        #expect(rig.grants.current() == dead, "control: the renewal's clear failed")
+
+        await rig.session.enteredForeground()
+        // Not kept through the freshness check, though the file says it has 23 hours left.
+        #expect(
+            rig.wire.calls(mintOperation).map(\.bearer)
+                == ["Bearer pat-a", "Bearer pat-next", "Bearer pat-next"])
+        // And the clear the renewal owed is made, though no successor grant landed to replace it:
+        // the extension is not left presenting a grant the server revoked.
+        #expect(rig.grants.current() == nil)
+    }
+
+    @Test("a sign-out whose grant removal failed removes it at the next foreground")
+    func signOutClearThatFailedIsRetried() async throws {
+        let rig = rig()
+        defer { rig.cleanUp() }
+        await rig.session.signIn(serverAddress: "memos.example.invalid", token: "pat-a")
+        await rig.session.enteredForeground()
+        let dead = try #require(rig.grants.current())
+
+        // The removal fails for the retirement and for the licence's revocation alike.
+        rig.failClears.set(true)
+        _ = await rig.session.signOut()
+        rig.failClears.set(false)
+        #expect(rig.grants.current() == dead, "control: the sign-out's removals failed")
+
+        await rig.session.enteredForeground()
+        #expect(rig.wire.calls(mintOperation).count == 1, "a signed-out foreground minted")
+        // The debt is remembered, not dropped: the extension is not left presenting a grant
+        // the server revoked until some later launch reconciles the licence.
+        #expect(rig.grants.current() == nil)
     }
 
     @Test("a renewal answered after the session ended mints nothing")

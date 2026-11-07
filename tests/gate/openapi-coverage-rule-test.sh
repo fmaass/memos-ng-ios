@@ -392,7 +392,14 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8", newline="").read()
 open(path, "w", encoding="utf-8", newline="").write(text.replace("\n", "\r\n"))
 PY
-check "the config with CRLF line endings" 0 "$w" "97 operationIds named by filter.operations"
+# The count is the real tree's own, read rather than written down: a vendored contract that grows
+# the filter list must not turn this case red for a reason that has nothing to do with CRLF.
+real_named="$("$RULE" "$repo_root" 2>&1 | grep -E '^openapi-coverage: [0-9]+ operationIds named by filter\.operations$')"
+if [ -z "$real_named" ]; then
+  echo "FAIL: the real tree named no filter.operations count to compare the CRLF copy with"
+  exit 1
+fi
+check "the config with CRLF line endings" 0 "$w" "$real_named"
 
 # And the repository this suite ships in, which is the point of the whole exercise. With the copied
 # pair at the top of this file it is also the positive control on every refusal above: the real

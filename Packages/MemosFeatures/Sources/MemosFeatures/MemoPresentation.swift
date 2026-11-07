@@ -179,8 +179,11 @@ public enum MemoDetailPresentation {
     /// view that asked "may I edit?" and then built the mode itself could answer yes and open the
     /// wrong memo. It is nil-gated on `mine` for the same reason every other own-memo action is —
     /// the server would refuse the write, and an affordance that leads to a 403 is worse than none.
+    ///
+    /// A guest memo opens for every signed-in member (MEMNG-1264): the pass's issuer owns it, but a
+    /// guest has no account, so the household edits it in their stead and the server allows that.
     public static func editMode(for memo: Memo) -> ComposeView.Mode? {
-        guard memo.mine else { return nil }
+        guard memo.mine || memo.guest != nil else { return nil }
         return .edit(
             uid: memo.uid,
             content: memo.content,
@@ -249,10 +252,17 @@ public enum MemoDetailPresentation {
     ///
     /// Destructive last, always. It is the only entry today, so the ORDER is what a test can hold
     /// before there is a second one to hold it against.
+    /// A guest memo's pictures are removable by every member, as `editMode` says why.
     public static func attachmentActions(for memo: Memo) -> [AttachmentAction] {
-        guard memo.mine else { return [] }
+        guard memo.mine || memo.guest != nil else { return [] }
         return AttachmentAction.allCases.filter { !$0.isDestructive }
             + AttachmentAction.allCases.filter(\.isDestructive)
+    }
+
+    /// Whether a memo's edit offers to add pictures: never to a guest memo, whose pictures are the
+    /// guest's to send (owner, 2026-11-06, MEMNG-1264); removing them stays.
+    public static func addsMedia(to memo: Memo) -> Bool {
+        memo.guest == nil
     }
 
     /// The date an edit actually SENDS: only one the editor moved.

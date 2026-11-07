@@ -190,6 +190,9 @@ public final class SessionStore {
     /// The capture grant's file beside that licence (MEMNG-938): the upload-only credential the
     /// share extension may present. Nil unless the app composes one, for the same reason.
     private let captureGrants: CaptureGrantStore?
+    /// The Live Activity push-to-start token's registration (MEMNG-946), composed by the app. The
+    /// sign-out deletes the token while this session's credential can still present the request.
+    public var liveActivityTokens: LiveActivityTokenStore?
     /// The mint in flight, with the authority epoch and the retirement count it was asked under.
     /// A second foreground under the same pair JOINS it — one request on the wire; under another
     /// pair it is replaced, and the old answer's own fence writes nothing.
@@ -202,6 +205,11 @@ public final class SessionStore {
     /// revoked — a renewal on an older build kept the file and lost the grant — and nothing on
     /// disk says so, so the first foreground of every launch mints.
     private var captureGrantKept: (epoch: Int, id: Int)?
+    /// A removal of a dead grant's file that FAILED — a renewal's or a retirement's (MEMNG-1186).
+    /// The epoch already keeps this process from keeping that grant; the flag keeps the file from
+    /// outliving it in the extension's view: the next mint tries the removal again before
+    /// anything else, and a successor written over it settles the debt.
+    private var captureGrantClearOwed = false
     /// The session generations a sign-out is ending right now, one entry per sign-out in flight.
     /// While the current generation is listed, `mintCaptureGrant` REFUSES (it does not join): a
     /// mint started then would put a fresh grant on the server under a token that is being
@@ -244,6 +252,11 @@ public final class SessionStore {
     /// The default-visibility PATCH and the token rename on the wire, each the one a second caller
     /// joins or is refused by (`setDefaultVisibility`, `renameDeviceToken`).
     @ObservationIgnored private var visibilityWrite: InFlightWrite<MemoVisibility>?
+    /// Moved as a default-visibility write goes on the wire and again as its answer lands, on the
+    /// main actor with nothing awaited around either. A settings READ that saw it move while it
+    /// was out carries a default from before the write, so it adopts nothing: the write's answer
+    /// is the newer choice, and a GET that outlived it must not put the old one back (MEMNG-972).
+    @ObservationIgnored private var visibilityWriteTurns = 0
     @ObservationIgnored private var tokenRename: InFlightWrite<String>?
     /// The generation a client was last INSTALLED under. Moved by an establishment, and by
     /// nothing else — a withdrawal leaves it exactly where it was.
@@ -526,7 +539,8 @@ public final class SessionStore {
             serverBaseURL: configuration.baseURL,
             token: presented.token,
             epoch: epoch.current,
-            uploadLimit: uploadLimits?.maxBytes
+            uploadLimit: uploadLimits?.maxBytes,
+            uploadAdmission: uploadLimits?.bodiesPerUser
         )
     }
 
@@ -1314,13 +1328,14 @@ public final class SessionStore {
     /// The answer is judged against what ISSUED it — the authority epoch (a renewal destroys the
     /// token a grant dies with), the retirement count (a sign-out under way) and the licence on
     /// disk — synchronously, with nothing awaited between that judgement and the write.
+    ///
+    /// A renewal asks this too, and needs no flag to mint past the grant on file: the grant kept
+    /// is stamped with the epoch it was minted under, and the renewal moved the epoch, so the
+    /// grant that died with the old token never passes the check below. One a foreground minted
+    /// under the SUCCESSOR while the renewal read its token back does, and is kept: minting again
+    /// would rotate — revoke — the grant the extension may be uploading under (MEMNG-1186).
     public func mintCaptureGrant() async {
-        await mintCaptureGrant(keepingAFreshGrant: true)
-    }
-
-    /// `keepingAFreshGrant: false` is the renewal's: the grant on file died with the token it
-    /// replaced, however much time the file says it has left.
-    private func mintCaptureGrant(keepingAFreshGrant: Bool) async {
+        if captureGrantClearOwed, let captureGrants { clearCaptureGrantFile(captureGrants) }
         guard let captureGrants, let client, let configuration, let user = state.user,
             let licence = account?.currentLicence(), let issue = licence.incarnation,
             licence.binding
@@ -1330,7 +1345,7 @@ public final class SessionStore {
             MemosLog.session.info("no capture grant while this session is signing out")
             return
         }
-        if keepingAFreshGrant, let kept = captureGrantKept, kept.epoch == epoch.current,
+        if let kept = captureGrantKept, kept.epoch == epoch.current,
             let standing = captureGrants.current(), standing.id == kept.id,
             standing.incarnation == issue, standing.binding == licence.binding,
             standing.expiresAt.timeIntervalSince(now()) > PublishedCaptureGrant.remintBelow
@@ -1377,6 +1392,8 @@ public final class SessionStore {
                     id: minted.id, token: minted.token, expiresAt: minted.expiresAt,
                     binding: licence.binding, incarnation: issue))
             captureGrantKept = (issued, minted.id)
+            // Written over whatever the file held, a removal still owed among it.
+            captureGrantClearOwed = false
         } catch {
             if let refusal = StoreFailure.refusal(error) {
                 // A session that ended while the mint was out is not the one to judge it against:
@@ -1393,6 +1410,20 @@ public final class SessionStore {
         }
     }
 
+    /// Removes the grant's file, and REMEMBERS a failure to: `try?` here would leave a grant the
+    /// server has revoked on file for the extension, with nothing to try again (MEMNG-1186).
+    private func clearCaptureGrantFile(_ grants: CaptureGrantStore) {
+        do {
+            try grants.clear()
+            captureGrantClearOwed = false
+        } catch {
+            captureGrantClearOwed = true
+            let detail = String(describing: error)
+            MemosLog.session.error(
+                "the dead capture grant could not be removed: \(detail, privacy: .public)")
+        }
+    }
+
     /// Ends the capture grant with the session, synchronously: any mint in flight is fenced out
     /// and the file is gone before this returns. Hands back the grant's id for the revoke, which
     /// the caller sends with the token that minted it.
@@ -1401,9 +1432,10 @@ public final class SessionStore {
         captureGrantRetirements += 1
         captureGrantMint = nil
         let standing = captureGrants.current()
-        // A failure here is retried by the licence's own revocation, which removes the grant
-        // first and remembers when it could not (`clearAccountLicence`).
-        try? captureGrants.clear()
+        // A failure here is remembered, as a renewal's is: the next foreground's mint removes the
+        // file before anything else, so a grant whose licence revocation failed too is not left
+        // for the extension until a launch reconciles it (MEMNG-1186).
+        clearCaptureGrantFile(captureGrants)
         return standing?.id
     }
 
@@ -1535,6 +1567,9 @@ public final class SessionStore {
         }
         // The capture grant goes FIRST, while the token that minted it can still revoke it.
         if let grant = retireCaptureGrant() { await Self.revokeCaptureGrant(grant, with: client) }
+        // So does the push-to-start token, for the same reason: after the revoke below nothing
+        // this device holds can name it to the server.
+        await liveActivityTokens?.unregister(generation: issued, with: client)
         do {
             let response = try await client.nativeLogoutApiAuthNativeLogoutPost(.init())
             guard owns(issued) else {
@@ -2385,10 +2420,15 @@ public final class SessionStore {
     public func loadSettings() async {
         guard let client else { return }
         let generation = sessionGeneration
+        let turns = visibilityWriteTurns
         do {
             let settings = try await Self.settings(client)
             guard generation == sessionGeneration else {
                 MemosLog.session.info("GET /api/settings answered for a session that has ended")
+                return
+            }
+            guard turns == visibilityWriteTurns else {
+                MemosLog.session.info("GET /api/settings answered across a write; the write stands")
                 return
             }
             apply(settings)
@@ -2477,6 +2517,10 @@ public final class SessionStore {
         _ visibility: MemoVisibility, askedIn generation: Int
     ) async -> Bool {
         guard generation == sessionGeneration, let client else { return false }
+        visibilityWriteTurns += 1
+        // Every way out below lands here first, synchronously after the await: a read that
+        // overlapped any part of this write is judged stale against it.
+        defer { visibilityWriteTurns += 1 }
         do {
             let settings = try await Self.updateSettings(client, defaultVisibility: visibility)
             guard generation == sessionGeneration else {
@@ -2693,8 +2737,10 @@ public final class SessionStore {
         epoch.bump()
         // The renewal revoked the capture grant with its token on the server, so the file names a
         // dead grant: it goes in the same step, and no revoke is sent. Its successor is minted
-        // below, once the session is known to still be this one.
-        try? captureGrants?.clear()
+        // below, once the session is known to still be this one. In memory it is already dead —
+        // the epoch just moved past the one it was kept under — and a removal that fails is
+        // remembered and tried again by the next mint.
+        if let captureGrants { clearCaptureGrantFile(captureGrants) }
         // The last-known identity is bound to a credential, and the credential has just MOVED. A
         // file still naming the predecessor would fail the next launch's fingerprint check and
         // take the offline launch away from a device that did everything right — and a file
@@ -2720,7 +2766,9 @@ public final class SessionStore {
         // the screen this renewal was started from draws the row and does not draw `lastError`,
         // so the warning would land nowhere the person pressing Renew can see it.
         if storageRefused, owns(generation) { deviceTokenNotice = Self.renewalStorageWarning }
-        if owns(generation) { await mintCaptureGrant(keepingAFreshGrant: false) }
+        // Judged by the same check as a foreground's: a grant minted under the successor while
+        // the read above was out is kept, not rotated.
+        if owns(generation) { await mintCaptureGrant() }
         return .renewed
     }
 
@@ -3007,9 +3055,23 @@ public final class SessionStore {
         }
     }
 
+    /// Adopts what the server said about the account. Every caller has already checked that the
+    /// answer belongs to the session generation that asked, and nothing is awaited between that
+    /// check and this write — so the copy published beside the licence for the share sheet
+    /// (MEMNG-972) is fenced by the same check: an answer from a previous sign-in never reaches
+    /// the next account's licence file.
     private func apply(_ settings: AccountSettings) {
         defaultVisibility = settings.defaultVisibility
         avatar = settings.avatar
+        // Onto the licence of the account signed in NOW, and only that one: the store refuses a
+        // binding that is not the standing licence's, and a session that is not signed in (a
+        // provisional launch publishes no licence) publishes nothing.
+        if let configuration, let user = state.user {
+            let binding = AccountBinding(
+                serverBaseURL: configuration.baseURL, ownerSubject: user.subject
+            )
+            account?.publishDefaultVisibility(settings.defaultVisibility.rawValue, for: binding)
+        }
     }
 
     /// What `/api/settings` says about the account, in the app's own vocabulary. The server also

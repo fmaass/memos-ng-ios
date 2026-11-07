@@ -21,6 +21,11 @@ public struct OutboxCredentials: Sendable, Equatable {
     /// then nothing is refused for its size: the queue sends as it always has and the server's 413
     /// stays the backstop. Not part of what makes credentials current; `epoch` alone is that.
     public var uploadLimit: Int64?
+    /// How many upload bodies the server lets this account stream at once (`bodies_per_user` from
+    /// `GET /api/uploads/limits`), the ceiling of the adaptive in-flight budget (MEMNG-958). Nil
+    /// while it is not known, and then the budget's own rules alone apply. Not part of what makes
+    /// credentials current either.
+    public var uploadAdmission: Int?
     /// Which credential this is. It picks the wire dialect — paths, bodies, which refusals end the
     /// credential — and it is part of the binding a capture is matched against, so a guest
     /// credential can never be presented for a member capture or the other way round.
@@ -28,13 +33,14 @@ public struct OutboxCredentials: Sendable, Equatable {
 
     public init(
         serverBaseURL: URL, ownerSubject: String, token: String, epoch: Int = 0,
-        uploadLimit: Int64? = nil, kind: CredentialKind = .member
+        uploadLimit: Int64? = nil, kind: CredentialKind = .member, uploadAdmission: Int? = nil
     ) {
         self.serverBaseURL = serverBaseURL
         self.ownerSubject = ownerSubject
         self.token = token
         self.epoch = epoch
         self.uploadLimit = uploadLimit
+        self.uploadAdmission = uploadAdmission
         self.kind = kind
     }
 

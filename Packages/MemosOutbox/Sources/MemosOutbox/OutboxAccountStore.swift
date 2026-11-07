@@ -75,6 +75,12 @@ public protocol OutboxAccountPublishing: Sendable {
     /// revoked identity that can still queue captures. That must be visible to the caller and
     /// retried, never swallowed.
     func clear() throws
+    /// Writes the account's default visibility — its raw wire name, or nil for "not known" — into
+    /// the licence file, but only while `binding` is the licence standing: a default is a fact
+    /// about ONE account, and it is never written onto another one's licence or onto none at all.
+    /// Best effort, like `publish`: the share sheet then names no default, which is the honest
+    /// answer about a setting it was never told.
+    func publishDefaultVisibility(_ wire: String?, for binding: AccountBinding)
 }
 
 extension OutboxAccountPublishing {
@@ -90,9 +96,11 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
 
     /// - Parameter root: the outbox's own directory — the binding lives beside the jobs it
     ///   describes, so a container that has one has the other.
-    public init(root: URL) {
+    /// - Parameter grants: the capture grant's file in `root`; a test passes one whose removal it
+    ///   can make fail.
+    public init(root: URL, grants: CaptureGrantStore? = nil) {
         self.url = root.appending(path: "account.json")
-        self.grants = CaptureGrantStore(root: root)
+        self.grants = grants ?? CaptureGrantStore(root: root)
     }
 
     /// The capture grant beside this licence — its lifecycle is the licence's (`CaptureGrantStore`).
@@ -101,7 +109,7 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     /// The store in the app group, or nil when the container is not reachable — on a device that
     /// means the entitlement is missing, and an extension in that state cannot enqueue at all.
     public static func live(appGroup: String = OutboxDefaults.appGroup) -> OutboxAccountStore? {
-        OutboxRepository.appGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
+        OutboxRepository.appGroupRoot(appGroup: appGroup).map { OutboxAccountStore(root: $0) }
     }
 
     /// The guest licence: the same file, in the guest outbox's directory, so a share enqueues a
@@ -109,7 +117,7 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
     public static func guestLive(
         appGroup: String = OutboxDefaults.appGroup
     ) -> OutboxAccountStore? {
-        OutboxRepository.guestAppGroupRoot(appGroup: appGroup).map(OutboxAccountStore.init(root:))
+        OutboxRepository.guestAppGroupRoot(appGroup: appGroup).map { OutboxAccountStore(root: $0) }
     }
 
     /// What the app last said about who is signed in, or nil when it has said nothing or has
@@ -136,11 +144,42 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
         // capture grant beside the licence belongs to the issue it was minted under. It goes
         // first, before the new licence exists, so no instant pairs the new licence with it.
         if issue != standing?.incarnation { try? grants.clear() }
-        guard
-            let data = try? JSONEncoder().encode(
-                PublishedLicence(binding: binding, incarnation: issue)
+        // The default belongs to the issue it was published under, exactly as the grant does: a
+        // republish over the same issue keeps it, a new issue starts without one.
+        let kept = issue == standing?.incarnation ? readFile()?.defaultVisibility : nil
+        write(
+            AccountFile(
+                licence: PublishedLicence(binding: binding, incarnation: issue),
+                defaultVisibility: kept
             )
-        else { return }
+        )
+    }
+
+    /// The default rides in the licence's own file (MEMNG-972) so that the two are read in ONE
+    /// read: the share sheet can never pair one account's licence with another one's default.
+    /// Written over the standing licence unchanged — same binding, same issue — so publishing a
+    /// default refuses no share that is waiting its turn.
+    public func publishDefaultVisibility(_ wire: String?, for binding: AccountBinding) {
+        guard let standing = readFile()?.licence, standing.binding == binding else { return }
+        write(AccountFile(licence: standing, defaultVisibility: wire))
+    }
+
+    /// The account's default visibility as the app last published it, by its raw wire name — and
+    /// only while `licence` is still the licence standing. Nil when it was never published, when
+    /// the account or the issue has moved since the caller read its licence, or when the file
+    /// cannot be read.
+    public func defaultVisibility(under licence: PublishedLicence) -> String? {
+        guard let file = readFile(), file.licence == licence else { return nil }
+        return file.defaultVisibility
+    }
+
+    private func readFile() -> AccountFile? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AccountFile.self, from: data)
+    }
+
+    private func write(_ file: AccountFile) {
+        guard let data = try? JSONEncoder().encode(file) else { return }
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
@@ -161,5 +200,44 @@ public struct OutboxAccountStore: OutboxAccountPublishing, Sendable {
         } catch let error as CocoaError where error.code == .fileNoSuchFile {
             return
         }
+    }
+}
+
+/// The licence file as written: the licence's own flat keys, plus the account's default.
+///
+/// The extra key is outside `PublishedLicence` on purpose. A licence is compared — a capture is
+/// admitted only under the licence it was composed under — and a default changed in Settings is not
+/// a new grant of permission; folded into the licence it would refuse a share for nothing. A build
+/// that predates the key decodes the licence and ignores it.
+private struct AccountFile: Codable {
+    let licence: PublishedLicence
+    let defaultVisibility: String?
+
+    init(licence: PublishedLicence, defaultVisibility: String?) {
+        self.licence = licence
+        self.defaultVisibility = defaultVisibility
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case serverBaseURL
+        case ownerSubject
+        case incarnation
+        case kind
+        case defaultVisibility
+    }
+
+    init(from decoder: any Decoder) throws {
+        licence = try PublishedLicence(from: decoder)
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        defaultVisibility = try fields.decodeIfPresent(String.self, forKey: .defaultVisibility)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        try fields.encode(licence.binding.serverBaseURL, forKey: .serverBaseURL)
+        try fields.encode(licence.binding.ownerSubject, forKey: .ownerSubject)
+        try fields.encodeIfPresent(licence.incarnation, forKey: .incarnation)
+        try fields.encodeIfPresent(licence.binding.kind, forKey: .kind)
+        try fields.encodeIfPresent(defaultVisibility, forKey: .defaultVisibility)
     }
 }

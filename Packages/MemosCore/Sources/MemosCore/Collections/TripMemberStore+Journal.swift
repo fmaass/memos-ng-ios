@@ -245,10 +245,14 @@ extension TripMemberStore {
             var lanes: [(query: MemoQuery, span: TripSpan?, period: CollectionPeriod?)]
             switch lineage.rule {
             case .trip(let rule):
-                lanes = [(MemoQuery(tags: [rule.tag]), nil, nil)]
-                if let span = rule.span { lanes.append((MemoQuery(), span, nil)) }
+                lanes = [(MemoQuery(tags: [rule.tag], includeGuests: true), nil, nil)]
+                if let span = rule.span {
+                    lanes.append((MemoQuery(includeGuests: true), span, nil))
+                }
             // A tag's and a period's Journal read everyone's memos, so they read Public only:
-            // Just us lives in its trip or album alone (MEMNG-933). A trip's lanes stay unfiltered.
+            // Just us lives in its trip or album alone (MEMNG-933). A trip's lanes read every
+            // visibility, and the pass guests' memos too: the server leaves those out unless asked,
+            // and a trip is where they were shared (MEMNG-1233).
             case .tag(let name): lanes = [(MemoQuery(tags: [name], visibility: .public), nil, nil)]
             case .period(let period): lanes = [(MemoQuery(visibility: .public), nil, period)]
             }

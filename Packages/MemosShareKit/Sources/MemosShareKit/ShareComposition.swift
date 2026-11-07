@@ -54,6 +54,17 @@ public enum ShareComposition {
         return !content(note: note, items: items).isEmpty
     }
 
+    /// The visibility picker's "Account default" option, naming the default the app published
+    /// beside the licence — "Account default (Private)" — so someone sharing in two taps can see
+    /// who the memo will reach without being asked. Nothing published, or a wire name this build
+    /// does not know, names nothing: a sheet that guesses an audience is worse than a vague one.
+    public static func accountDefaultLabel(published wire: String?) -> String {
+        guard let wire, let visibility = ShareVisibility(rawValue: wire) else {
+            return "Account default"
+        }
+        return "Account default (\(visibility.label))"
+    }
+
     /// What the sheet says about what it is holding — and, when something could not be read, what
     /// it says instead. A file that failed is never dropped quietly.
     public static func summary(items: [SharedItem], failed: Int) -> String? {

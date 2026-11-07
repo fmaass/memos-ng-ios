@@ -183,7 +183,7 @@ struct Patching {
     /// The upload sessions a pass opened, which is how a picture staged into a restored draft
     /// shows that it reached the wire before the edit did.
     var uploadPosts: [URLRequest] {
-        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }
+        http.sessionAsks
     }
 
     /// Edits only: a chunk is a PATCH as well, and it goes to the upload session, not to the memo.
@@ -1572,7 +1572,10 @@ extension PatchCompletionTests {
         let minted = try #require(job.editKey, "the edit job was written without a key")
         #expect(job.memoEdit != nil)
         #expect(harness.memoPatches.isEmpty, "the PATCH went out before its file was up")
+        // One drain can return at once beside another already carrying the file, so the wait is
+        // for the task's creation itself, not for a drain.
         if session.createdTasks.isEmpty { await harness.outbox.drain() }
+        try await bounded("the file going up") { await session.untilCreated(1) }
         #expect(harness.memoPosts.isEmpty, "an edit job asked for a new memo")
         let created = try #require(session.createdTasks.last, "the file never went up")
         delegate.deliver(try wholeArrival(of: created))

@@ -26,7 +26,51 @@ final class ScriptedHTTP: OutboxHTTPPerforming, @unchecked Sendable {
         // withdrawal between two sends and see the second one refused.
         guard authority.holds() else { throw SendAuthorityWithdrawn() }
         lock.withLock { seen.append(request) }
+        if request.httpMethod == "POST", request.url?.path() == "/api/uploads/batch" {
+            return try answerBatch(request)
+        }
+        if request.httpMethod == "POST", request.url?.path() == "/api/uploads" {
+            lock.withLock { asks.append(request) }
+        }
         return try handler(request)
+    }
+
+    private var asks: [URLRequest] = []
+
+    /// Every upload session the engine asked for, one per file: a single create, or one entry of
+    /// a batch. What a test counting "how many sessions were asked for" reads; `requests` stays
+    /// what went on the wire.
+    var sessionAsks: [URLRequest] { lock.withLock { asks } }
+
+    /// The batch answered as the server answers it (MEMNG-958): each entry exactly as the single
+    /// create would answer it alone — the test's own handler, asked once per entry with a
+    /// synthetic `POST /api/uploads` carrying that entry's body. A 2xx is the entry's session, a
+    /// 413 or a 507 is that entry's refusal, and any other answer — a refusal of the credential, a
+    /// busy server — is the answer to the whole request, as no single entry can earn it.
+    private func answerBatch(_ request: URLRequest) throws -> OutboxHTTPResponse {
+        let body = request.httpBody ?? Data()
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let entries = (object?["entries"] as? [[String: Any]]) ?? []
+        var results: [[String: Any]] = []
+        // The single create's own path, exactly: `deletingLastPathComponent()` would answer
+        // `/api/uploads/`, which no handler's `/api/uploads` matches.
+        let singleURL = URL(string: "/api/uploads", relativeTo: request.url)?.absoluteURL
+        for entry in entries {
+            var single = request
+            single.url = singleURL
+            single.httpBody = try JSONSerialization.data(withJSONObject: entry)
+            lock.withLock { asks.append(single) }
+            let answer = try handler(single)
+            if (200..<300).contains(answer.statusCode) {
+                let upload = try JSONSerialization.jsonObject(with: answer.body)
+                results.append(["status": 201, "upload": upload])
+            } else if answer.statusCode == 413 || answer.statusCode == 507 {
+                results.append(["status": answer.statusCode, "detail": "refused by the script"])
+            } else {
+                return answer
+            }
+        }
+        return Self.json(["results": results])
     }
 
     private var sendHook: (@Sendable (URLRequest) -> Void)?

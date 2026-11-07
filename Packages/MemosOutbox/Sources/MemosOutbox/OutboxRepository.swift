@@ -239,6 +239,10 @@ public actor OutboxRepository {
     /// sweep's reach for the same reason (`prepare`).
     public nonisolated let withdrawals: OutboxWithdrawals
 
+    /// The upload sessions removed captures still owe a DELETE (MEMNG-953), at the root beside
+    /// the lock file for the same reason.
+    public nonisolated let sessionWithdrawals: UploadSessionWithdrawals
+
     /// Whether a member row an older build began in chunks is moved onto the whole lane where it is
     /// read (MEMNG-546, `UploadJob.retiringChunkLane`).
     ///
@@ -257,6 +261,9 @@ public actor OutboxRepository {
         self.retiresChunkLane = retiresChunkLane
         self.lock = OutboxLock(url: root.appending(path: ".lock"))
         self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
+        self.sessionWithdrawals = UploadSessionWithdrawals(
+            url: root.appending(path: "session-withdrawals.json")
+        )
         try prepare()
     }
 
@@ -274,6 +281,9 @@ public actor OutboxRepository {
         self.retiresChunkLane = false
         self.lock = OutboxLock(url: root.appending(path: ".lock"), flock: flock)
         self.withdrawals = OutboxWithdrawals(url: root.appending(path: "withdrawal.json"))
+        self.sessionWithdrawals = UploadSessionWithdrawals(
+            url: root.appending(path: "session-withdrawals.json")
+        )
         try prepare()
     }
 
@@ -533,6 +543,25 @@ public actor OutboxRepository {
         }
         delete(job)
         return true
+    }
+
+    /// Remove's removal (MEMNG-953): `delete(_:ifStillCurrent:)`, with the capture's open upload
+    /// sessions handed to `sessionWithdrawals` in the same turn of this actor — after the fence,
+    /// so a Remove that lost to a pass owes nothing, and before the manifest goes, because the
+    /// manifest is the only other record of their uids. A queue that cannot be written removes
+    /// nothing: the capture stays, and Remove answers false.
+    ///
+    /// Member captures only: the guest door has no withdraw.
+    @discardableResult
+    public func withdraw(_ job: UploadJob, ifStillCurrent snapshot: UploadJob) -> Bool {
+        guard let onDisk = self.job(snapshot.id), onDisk == snapshot else { return false }
+        if job.binding.credentialKind == .member {
+            let owed = job.files.compactMap { file in
+                file.uploadUID.map { UploadSessionWithdrawal(uploadUID: $0, binding: job.binding) }
+            }
+            guard owed.isEmpty || sessionWithdrawals.record(owed) else { return false }
+        }
+        return delete(job, ifStillCurrent: snapshot)
     }
 
     /// Throws one capture away because a PERSON said so: its manifest, whatever was set aside under

@@ -1424,11 +1424,30 @@ public final class TimelineStore {
         // Its audience as well — but not past a mutation still in line for the memo, which may yet
         // move it: that one's own answer is the word that settles the record (`patchAnswer`). Nor
         // from a read that left before a lost answer was recorded: unfenced as it is, it may have
-        // been answered before the server applied the change whose answer was lost.
+        // been answered before the server applied the change whose answer was lost. Nor from one
+        // that cannot show the lost change landed (`readSettlesLostChange`).
         guard fences[memo.uid]?.claims.isEmpty ?? true,
-            issued >= unsettledVisibility[memo.uid] ?? 0
+            issued >= unsettledVisibility[memo.uid] ?? 0,
+            readSettlesLostChange(memo)
         else { return }
         recordServerAudience(memo)
+    }
+
+    /// Whether a read's row may settle a memo whose last audience change was lost (MEMNG-1194).
+    ///
+    /// Only by its content. A read issued after the loss can still be answered with the row as it
+    /// was — a replica behind the write, or the disconnected PATCH still executing — and no stamp
+    /// on this side orders the two on the server. `updated_at` does not either: it says when the
+    /// row was last written, not whether that write was this one. So a row at or narrower than the
+    /// audience sent settles it — the change landed, or the server holds something narrower still
+    /// — and a wider row keeps the narrower record and the mark, which costs a question at worst.
+    /// The next confirmed change NAMING an audience settles it regardless (`patchAnswer`); one
+    /// that names none is judged by this, as a read is.
+    private func readSettlesLostChange(_ memo: Memo) -> Bool {
+        guard unsettledVisibility[memo.uid] != nil, let sent = sentVisibility[memo.uid] else {
+            return true
+        }
+        return VisibilityChange.narrower(memo.visibility, sent) == memo.visibility
     }
 
     /// The reads in flight to pay a debt, each one clearing its own entry, in the idiom
@@ -1698,8 +1717,9 @@ public final class TimelineStore {
 
     /// The memos whose last PATCH naming an audience went and was never answered, so the server
     /// may hold either the row's audience or the one sent (`visibilityReask`). Cleared by the next
-    /// statement of the server's about the memo (`recordServerAudience`); a refusal of a LATER
-    /// request says nothing about what became of this one, so it clears nothing.
+    /// statement of the server's about the memo (`recordServerAudience`) — from a read, only one
+    /// whose row shows the change landed (`readSettlesLostChange`); a refusal of a LATER request
+    /// says nothing about what became of this one, so it clears nothing.
     ///
     /// Each holds the sequence stamp taken the moment the loss was recorded. The fence alone cannot
     /// tell a read issued after the loss from one issued while the request was in line — both are
@@ -2637,6 +2657,138 @@ public final class TimelineStore {
     /// instead of racing it. See `refreshMemo`.
     private var reconcileJoins: [ReconcileSlot: Task<Bool, Never>] = [:]
 
+    // MARK: - memo events (MEMNG-966)
+
+    /// The insert in flight for each memo a `memo.created` named, so a second frame for the same
+    /// memo — a replay after a reconnect, or the household's `created` beside the owner's own —
+    /// JOINS it rather than issuing a second read. Keyed like `reconcileJoins`, and for its reason.
+    private var liveInserts: [ReconcileSlot: Task<Void, Never>] = [:]
+
+    /// A counter moved by every `memo.deleted` this store applies, and the value it had when each
+    /// memo was removed. An insert compares the memo's entry with the value it read BEFORE its
+    /// request: a removal stamped after that instant is newer than the read, so the read's memo is
+    /// a state the removal left and must not come back on its answer.
+    private var liveRemovalClock = 0
+    private var liveRemovals: [String: Int] = [:]
+
+    /// What one memo frame does to this list.
+    ///
+    /// The frame names a memo and nothing else (memos-ng `EventHub._publish_direct`), so every
+    /// change that needs the memo READS it, through the lanes that already judge a read against
+    /// the instant it left:
+    ///
+    /// - `updated` re-reads a memo this list holds through `refreshMemo`, which joins a read
+    ///   already in flight and keeps a row a local mutation has moved since the read left. The
+    ///   card is all it touches: an edit sheet holds its own copy of the memo, taken when it
+    ///   opened, so the draft beneath the person's fingers is never written to.
+    /// - `deleted` removes the row. It is also how a memo the person can no longer SEE leaves —
+    ///   the server sends a memo made private to the rest of the household as `deleted`.
+    /// - `created` reads the memo and inserts it where the server's order puts it, when this
+    ///   list's query would show it (`insertCreated`).
+    ///
+    /// Fenced twice, and neither fence is this function's to skip: the envelope's generation was
+    /// asked on the main actor before this was called (`MediaChannel.consume`), and every read
+    /// below is judged against the session incarnation that issued it.
+    public func apply(_ event: MemoEvent, using handle: SessionHandle, baseURL: URL) async {
+        switch event.kind {
+        case .updated:
+            guard memos.contains(where: { $0.uid == event.uid }) else { return }
+            await refreshMemo(uid: event.uid, using: handle, baseURL: baseURL)
+        case .deleted:
+            await removeLive(event.uid)
+        case .created:
+            await insertCreated(event, using: handle, baseURL: baseURL)
+        }
+    }
+
+    /// Takes a memo the server says is gone, or out of this person's sight, off the list.
+    ///
+    /// The lineage moves as it does for a delete this device made: a page read while the memo was
+    /// still there overlaps the rows around it and would put it back. The removal is recorded
+    /// whether or not a row stood for it, because an insert whose read is in the air is exactly the
+    /// lane that would otherwise introduce it a moment later.
+    private func removeLive(_ uid: String) async {
+        liveRemovalClock += 1
+        liveRemovals[uid] = liveRemovalClock
+        owedReads[uid] = nil
+        guard memos.contains(where: { $0.uid == uid }) else { return }
+        let authority = issuedAuthority()
+        timelineGeneration += 1
+        await commit(memos.filter { $0.uid != uid }, under: authority)
+    }
+
+    /// Reads a memo another device created and inserts it, if this list's query would show it.
+    ///
+    /// A guest memo is turned away BEFORE the read for the home timeline: the frame says so, and
+    /// the home timeline excludes guest memos (MEMNG-1164) — a trip's list, which asks for them,
+    /// takes it. A memo already held is left to `updated`: it is this device's own create coming
+    /// back, or a replay.
+    private func insertCreated(
+        _ event: MemoEvent,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        guard !event.isGuest || query.includeGuests else { return }
+        // A text search is answered by the server's full-text index alone, so no memo can be
+        // admitted to one from here, and reading it first would only cost a request.
+        guard query.term == nil else { return }
+        guard !memos.contains(where: { $0.uid == event.uid }) else { return }
+        let slot = ReconcileSlot(uid: event.uid, generation: handle.generation)
+        if let running = liveInserts[slot] { return await running.value }
+        let insert = Task { [self] in
+            await performInsert(event, using: handle, baseURL: baseURL)
+            self.liveInserts[slot] = nil
+        }
+        liveInserts[slot] = insert
+        await insert.value
+    }
+
+    /// `insertCreated`'s body, behind the slot that makes two frames for one memo one read.
+    private func performInsert(
+        _ event: MemoEvent,
+        using handle: SessionHandle,
+        baseURL: URL
+    ) async {
+        let removalsIssued = liveRemovalClock
+        let authority = issuedAuthority()
+        // The read that refuses a credential, reports an outage and fences a row a local mutation
+        // moved is `fetchMemo`'s; this lane adds no second copy of any of it.
+        guard let memo = await fetchMemo(uid: event.uid, using: handle, baseURL: baseURL) else {
+            return
+        }
+        guard sessionStillCurrent(handle) else { return }
+        // Removed while the read was in the air: the answer predates the removal.
+        guard (liveRemovals[memo.uid] ?? 0) <= removalsIssued else { return }
+        guard !serverConfirmedDeletion(of: memo.uid) else { return }
+        // Held by now — loaded by a page meanwhile, and `fetchMemo` has already applied its copy.
+        guard !memos.contains(where: { $0.uid == memo.uid }) else { return }
+        guard query.admitsLiveCreated(memo, isGuest: event.isGuest, in: calendar),
+            let index = Self.liveInsertionIndex(
+                for: memo, in: memos, hasNewer: hasNewer, hasMore: hasMore)
+        else { return }
+        var next = memos
+        next.insert(memo, at: index)
+        await commit(next, under: authority)
+    }
+
+    /// Where a memo created elsewhere goes in the loaded window, or nil when it belongs outside it.
+    ///
+    /// Pure, for the reason `insertionIndex` is. The window is the rule: a memo that would land
+    /// above every loaded row while newer pages exist, or below every one while older pages exist,
+    /// belongs on a page nobody has read, and putting it at the edge of what is loaded would show
+    /// it out of order — the next read of that page files it where it goes.
+    nonisolated static func liveInsertionIndex(
+        for memo: Memo,
+        in memos: [Memo],
+        hasNewer: Bool,
+        hasMore: Bool
+    ) -> Int? {
+        let index = insertionIndex(for: memo, in: memos, tie: .justCreated)
+        if index == 0 && hasNewer { return nil }
+        if index == memos.count && hasMore { return nil }
+        return index
+    }
+
     /// Ticks or unticks the Nth rendered checkbox of a memo.
     ///
     /// This one IS optimistic, and it is the only one: a checkbox that waits for a round trip
@@ -2904,7 +3056,12 @@ public final class TimelineStore {
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 let answered = Memo(try ok.body.json, baseURL: baseURL)
-                recordServerAudience(answered)
+                // A PATCH that did not name the audience says of it only what a read issued now
+                // would: answered before a lost change landed, it shows the row as it was, so
+                // only its content may settle that change (MEMNG-1194).
+                if body.visibility != nil || readSettlesLostChange(answered) {
+                    recordServerAudience(answered)
+                }
                 await apply(answered, under: authority, confirming: claim)
                 return MemoMutationAnswer(.saved, memo: answered)
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
@@ -3076,6 +3233,7 @@ public final class TimelineStore {
                     createdAfter: parameters.createdAfter,
                     tag: parameters.tag,
                     visibility: parameters.visibility?.generated,
+                    guest: parameters.includeGuests == true ? .include : nil,
                     q: parameters.q,
                     includeArchived: parameters.includeArchived,
                     archivedOnly: parameters.archivedOnly,

@@ -62,15 +62,20 @@ public struct CredentialGrant: Sendable, Equatable {
     /// The largest file this session's server accepts, once `SessionStore.loadUploadLimits` has
     /// read it; nil before, and after a failed read, which refuses nothing.
     public let uploadLimit: Int64?
+    /// How many upload bodies this session's server lets it stream at once (`bodies_per_user`),
+    /// read with `uploadLimit` and nil whenever it is: the outbox's in-flight ceiling.
+    public let uploadAdmission: Int?
 
     public init(
-        subject: String, serverBaseURL: URL, token: String, epoch: Int, uploadLimit: Int64? = nil
+        subject: String, serverBaseURL: URL, token: String, epoch: Int, uploadLimit: Int64? = nil,
+        uploadAdmission: Int? = nil
     ) {
         self.subject = subject
         self.serverBaseURL = serverBaseURL
         self.token = token
         self.epoch = epoch
         self.uploadLimit = uploadLimit
+        self.uploadAdmission = uploadAdmission
     }
 }
 

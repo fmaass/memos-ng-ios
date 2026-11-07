@@ -358,8 +358,10 @@ pin "'self.credential = ' in SessionStore.swift" 1 \
 # edit-job planner witness in MemosOutboxTests (MEMNG-954) writes one job to ask the planner and
 # the request builder about it; it drains nothing, so it takes no credential predicate. 65: the
 # one-edit-job-per-memo witness in MemosOutboxTests (MEMNG-954) enqueues twice into a repository to
-# prove the second is refused; it drains nothing, so it takes no credential predicate.
-pin "'OutboxRepository(' constructions" 65 \
+# prove the second is refused; it drains nothing, so it takes no credential predicate. 66: the
+# queued-withdraw relaunch witness in MemosOutboxTests (MEMNG-953) reopens the same root as a
+# relaunch, fed the rig's credential predicate, and drains the queued DELETEs under it.
+pin "'OutboxRepository(' constructions" 66 \
   "$(grep -rnaF 'OutboxRepository(' "$root/Packages" "$root/Sources" --include='*.swift' 2>/dev/null \
     | grep -vF 'OutboxRepository.' | grep -c .)" \
   "A new repository is credential-scoped or it is not, and only one of those may default the

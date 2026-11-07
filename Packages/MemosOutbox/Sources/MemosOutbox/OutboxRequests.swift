@@ -53,6 +53,33 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The batch upload create (`POST /api/uploads/batch`): one request opening a session per
+    /// file, each entry exactly the body `startUpload` sends for that file alone. Member only — the
+    /// guest door has no batch, and its create carries a digest this body does not.
+    public static func startUploadBatch(
+        baseURL: URL,
+        token: String,
+        files: [OutboxFile]
+    ) throws -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: "api/uploads/batch"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try OutboxWire.encode(
+            OutboxWire.UploadBatchStart(
+                entries: files.map { file in
+                    OutboxWire.UploadStart(
+                        filename: file.filename,
+                        mime: file.mime,
+                        size: file.byteSize,
+                        lastModified: file.lastModified.map(OutboxEncoding.epochMilliseconds)
+                    )
+                }
+            )
+        )
+        return request
+    }
+
     /// The chunk PATCH. The body is NOT set here: it is a file, handed to the background session
     /// as an upload task, so that a chunk in flight survives the app being suspended.
     public static func chunk(
@@ -106,6 +133,18 @@ public enum OutboxRequests {
     ) -> URLRequest {
         var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID, kind: kind))
         request.httpMethod = "HEAD"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// The withdraw (MEMNG-953): the server takes no more bytes for this session and never
+    /// finalizes it. Always 204, also for a session gone or never this caller's. Member route
+    /// only: the guest door has no withdraw.
+    public static func withdrawUpload(
+        baseURL: URL, token: String, uploadUID: String
+    ) -> URLRequest {
+        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID))
+        request.httpMethod = "DELETE"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
     }

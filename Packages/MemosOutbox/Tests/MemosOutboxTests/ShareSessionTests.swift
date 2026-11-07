@@ -373,13 +373,12 @@ struct ShareSessionTests {
     /// refresh runs in THIS process: `wake(holding:)` around adopt, reattach and start, exactly as
     /// the app's `BGAppRefreshTask` handler. Whatever it does, it starts no new upload.
     ///
-    /// The capture is NOT finalized today, and the known issue pins that: the reattached files
-    /// need the offset HEAD (`OutboxPlanner.nextWholeAction`'s `.resume`), which a closed gate
-    /// turns into a wait for the foreground. Letting it through is a new server question in the
-    /// background, a decision about the gate's meaning that MEMNG-1083 left open. Once a pass does
-    /// finalize here, the known issue stops occurring and this test fails: drop the wrapper then.
+    /// The capture is NOT finalized there, by decision (MEMNG-1185): the reattached files need the
+    /// offset HEAD (`OutboxPlanner.nextWholeAction`'s `.resume`), and a closed gate turns that
+    /// into a wait for the foreground. The gate keeps its meaning — no new server question from a
+    /// backgrounded pass — so the capture finishes at the next foreground, which opens the gate.
     @MainActor
-    @Test("a live backgrounded process: the refresh pass and a share capture whose bytes landed")
+    @Test("a live backgrounded process leaves a landed share capture to the next foreground")
     func liveBackgroundedRefreshAndAFinishedShareCapture() async throws {
         let rig = try await WholeRig.make(
             withUploads: false, attached: false,
@@ -434,9 +433,16 @@ struct ShareSessionTests {
 
         #expect(!sessions.contains(identifier: identifier), "the share session was retired")
         #expect(rig.attemptedUploadPosts == 0, "a closed gate started a new upload")
-        withKnownIssue("a closed gate holds the offset HEAD, so the memo create waits") {
-            #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
-        }
+        #expect(rig.http.requests(method: "HEAD").isEmpty, "a closed gate asked for the offset")
+        #expect(rig.completion.idempotencyKeys.isEmpty, "a closed gate finished the capture")
+        #expect(await rig.repository.job(rig.job.id) != nil, "the capture is still queued")
+
+        // The person opens the app: the gate opens, and the capture finishes from the offset.
+        await outbox.appBecameActive().value
+
+        #expect(!rig.http.requests(method: "HEAD").isEmpty, "resumed from the server's offset")
+        #expect(rig.completion.idempotencyKeys == [rig.job.idempotencyKey])
+        #expect(rig.attemptedUploadPosts == 0, "a landed capture was uploaded again")
     }
 }
 

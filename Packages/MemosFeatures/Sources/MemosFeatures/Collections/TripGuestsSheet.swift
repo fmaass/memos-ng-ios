@@ -118,16 +118,18 @@ struct TripGuestsList: View {
         .disabled(store.isWriting)
         .task { await read() }
         .refreshable { await read() }
-        .confirmationDialog(
+        // A centered alert, not a confirmation dialog (MEMNG-1232): the dialog showed as a popover
+        // whose arrow pointed above the button that asked, so the question read as detached.
+        .alert(
             ending.map { TripGuestsText.endQuestion(devices: $0.deviceCount) } ?? "",
             isPresented: Binding(get: { ending != nil }, set: { if !$0 { ending = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("End the Pass", role: .destructive) {
-                if let pass = ending { run { try await store.endPass(pass.uid, using: $0) } }
+            presenting: ending
+        ) { pass in
+            Button("Yes", role: .destructive) {
+                run { try await store.endPass(pass.uid, using: $0) }
                 ending = nil
             }
-            Button("Cancel", role: .cancel) { ending = nil }
+            Button("No", role: .cancel) { ending = nil }
         }
     }
 
@@ -471,7 +473,7 @@ struct GuestUploadRow: Equatable {
 
     init(_ row: TripContribution, picture: MemoAttachment?, filename: String?) {
         uid = row.attachmentUid
-        contributor = row.contributorName ?? "A guest"
+        contributor = MemoCardPresentation.guestName(row.contributorName)
         uploadedAt = row.createdAt
         hidden = row.hidden
         self.filename = picture == nil ? nil : filename.flatMap { $0.isEmpty ? nil : $0 }
@@ -632,7 +634,7 @@ enum TripGuestsText {
         var found: [(String, String)] = []
         for row in rows {
             guard let device = row.deviceUid, seen.insert(device).inserted else { continue }
-            found.append((device, row.contributorName ?? "A guest"))
+            found.append((device, MemoCardPresentation.guestName(row.contributorName)))
         }
         return found
     }

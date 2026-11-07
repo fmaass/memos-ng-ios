@@ -5,6 +5,32 @@
 these words: first person singular, no ticket keys, no internal host names. TestFlight shows them
 as plain text, so each point stays on one line.
 
+## 2.4.0 (80)
+
+- A memo a guest adds to a trip opens and edits from that trip's Journal, and stays off my Timeline.
+- A guest's memo says Guest on its card, its detail and its Info sheet.
+- An edit I save to a guest's memo stays on its detail when I go back to it.
+
+## 2.4.0 (79)
+
+- A memo created or edited on another device shows up in my timeline without a pull to refresh, and an edit I have open keeps my unsaved words.
+- Settings has a default visibility for my new memos, and the share sheet's Account default follows it.
+- Removing a pending memo also withdraws its unfinished uploads from the server, even when the app was closed in between.
+- A capture with several files opens all of their uploads in one request.
+- An upload the share sheet started carries on under my own sign-in after the app relaunches.
+- Memos a guest adds to a trip name that guest on their card.
+- A trip guest's name is kept to the 64-character limit without cutting a character in half, and falls back to the device name.
+- Uploads and visibility changes hold up better when my sign-in changes while they are under way.
+
+## 2.4.0 (78)
+
+- Pictures a guest shared into a trip now show in that trip's Journal.
+- Ending a trip pass asks with a centered Yes or No alert instead of a detached popover.
+- A picture a guest adds while the trip is still refreshing shows up without another refresh.
+- Two visibility questions asked close together are both asked, one after the other, instead of the second replacing the first.
+- A visibility change whose answer was lost stays marked until the server shows it landed.
+- The share sheet's upload permission is renewed cleanly when my sign-in renews.
+
 ## 2.4.0 (77)
 
 - A trip pass link opened from the Camera or Messages opens the app on that pass; without the app it falls back to the door's landing page.

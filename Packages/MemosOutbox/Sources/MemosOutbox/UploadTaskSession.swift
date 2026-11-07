@@ -40,7 +40,7 @@ public enum OutboxUploadSession {
         configuration.sessionSendsLaunchEvents = true
         // The transport's own fence under the engine's budget: however many tasks exist, no more
         // than the budget's connections reach the server at once.
-        configuration.httpMaximumConnectionsPerHost = UploadBudget.inFlightUploads
+        configuration.httpMaximumConnectionsPerHost = UploadBudget.maxInFlightUploads
         return configuration
     }
 }

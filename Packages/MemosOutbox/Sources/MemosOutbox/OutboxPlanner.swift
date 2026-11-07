@@ -292,6 +292,8 @@ extension UploadJob {
                 // A person asking again gives the lost sessions a fresh allowance too.
                 $0.files[index].freshSessions = nil
                 $0.files[index].conflictResync = nil
+                // And a file the server turned away inside a batch is asked for again.
+                $0.files[index].heldReason = nil
             }
         }
     }

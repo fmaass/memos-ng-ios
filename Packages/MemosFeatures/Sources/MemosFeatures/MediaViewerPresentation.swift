@@ -88,6 +88,11 @@ public struct MediaViewerSelection: Identifiable, Equatable, Sendable {
     }
 
     public let deletability: Deletability
+    /// Whether a page's ⋯ offers Show Memo, the jump to the memo on the Timeline. Like
+    /// `deletability`, a fact about where the pages came from: a guest memo's pictures, opened
+    /// from a trip's Journal, name their memo for the Info sheet, but the Timeline leaves guest
+    /// memos out, so the jump could only end on "no longer here" (MEMNG-1263).
+    public let showsMemo: Bool
 
     /// Whether the page showing `attachment` may be removed. A file whose owner the payload did
     /// not name is not mine: the server refuses a delete of somebody else's file.
@@ -100,10 +105,14 @@ public struct MediaViewerSelection: Identifiable, Equatable, Sendable {
 
     /// Non-empty pages and an in-range start index are the invariant; the only way to build one is
     /// `MediaViewerPresentation.viewer(for:startingAt:)`, which enforces both.
-    init(pages: [MediaPage], startIndex: Int, deletability: Deletability = .ownFiles) {
+    init(
+        pages: [MediaPage], startIndex: Int, deletability: Deletability = .ownFiles,
+        showsMemo: Bool = true
+    ) {
         self.pages = pages
         self.startIndex = min(max(0, startIndex), max(0, pages.count - 1))
         self.deletability = deletability
+        self.showsMemo = showsMemo
     }
 
     public var startPage: MediaPage { pages[startIndex] }
@@ -158,11 +167,13 @@ public enum MediaViewerPresentation {
         for attachments: [MemoAttachment],
         startingAt uid: String,
         deletability: MediaViewerSelection.Deletability = .ownFiles,
+        showsMemo: Bool = true,
         takenAt: (MemoAttachment) -> Date? = { _ in nil }
     ) -> MediaViewerSelection? {
         let pages = pages(for: attachments, takenAt: takenAt)
         guard let index = pages.firstIndex(where: { $0.id == uid }) else { return nil }
-        return MediaViewerSelection(pages: pages, startIndex: index, deletability: deletability)
+        return MediaViewerSelection(
+            pages: pages, startIndex: index, deletability: deletability, showsMemo: showsMemo)
     }
 
     /// A picture or a video with something to render.

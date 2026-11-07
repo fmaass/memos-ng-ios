@@ -204,7 +204,8 @@ public struct MemoDetailView: View {
                     // request is a task: the alert's Delete and its binding's dismissal arrive in
                     // the same turn, and two tasks have no order between them (`MemoEditFlow`).
                     send: { event in edit.sendDelete(event, delete: performDelete) }
-                )
+                ),
+                addsMedia: MemoDetailPresentation.addsMedia(to: memo)
             ) { submission in
                 await edit.submit(submission, save: save)
             }
@@ -302,8 +303,30 @@ public struct MemoDetailView: View {
     /// makes two of them one request on the wire.
     private func deletePicture(_ attachmentUID: String) async -> Bool {
         guard let handle = session?.activeHandle else { return false }
+        return await Self.deletePicture(
+            attachmentUID, of: uid, timeline: timeline, detached: detached, using: handle,
+            reading: issuing ?? IssuingSession(session)
+        ) { deleted in feedback.fire(deleted ? .deleted : .postFailed) }
+    }
+
+    /// Deletes one picture of memo `uid` through the timeline and, once the server confirms it,
+    /// makes the screen's memo (`shown`) lose it too. The timeline strips the file from the memos
+    /// it holds; a memo it does not hold — a guest memo opened from a trip's Journal (MEMNG-1264)
+    /// — is shown from the screen's own copy, which still has it until it is read again.
+    /// `answered` hears the outcome before that read, so the feedback does not wait on it.
+    static func deletePicture(
+        _ attachmentUID: String, of uid: String, timeline: TimelineStore, detached: DetachedMemo,
+        using handle: SessionHandle, reading: IssuingSession,
+        answered: (Bool) -> Void = { _ in }
+    ) async -> Bool {
         let deleted = await timeline.deleteAttachment(uid: attachmentUID, from: uid, using: handle)
-        feedback.fire(deleted ? .deleted : .postFailed)
+        answered(deleted)
+        if deleted, !timeline.memos.contains(where: { $0.uid == uid }),
+            let baseURL = reading.baseURL()
+        {
+            await detached.reread(
+                through: timeline, using: handle, baseURL: baseURL, current: reading.handle)
+        }
         return deleted
     }
 
@@ -352,35 +375,62 @@ public struct MemoDetailView: View {
         -> ComposeOutcome
     {
         guard case .edit(let uid, _, let createdAt, _, _) = mode,
-            let handle = session?.activeHandle,
-            let baseURL = session?.serverBaseURL
+            let handle = session?.activeHandle
         else { return .failed(.authorization) }
-        let outcome = await timeline.edit(
-            uid: uid,
-            content: submission.content,
-            createdAt: MemoDetailPresentation.editedDate(
-                chosen: submission.createdAt, original: createdAt
-            ),
-            attaching: submission.attachments.map(\.stagedSource),
-            listing: submission.pictures,
-            visibility: submission.visibilityChange,
+        return await Self.saveEdit(
+            submission, of: uid, createdAt: createdAt, timeline: timeline, detached: detached,
             through: outbox,
             // The account the save was made under, read beside the handle: the edit job is bound
             // to it, as a new capture is (`composed?.account`).
             composedUnder: session?.snapshotIdentity.map {
                 AccountBinding(serverBaseURL: $0.server, ownerSubject: $0.subject)
             },
+            using: handle, reading: issuing ?? IssuingSession(session)
+        ) { outcome in
+            if let act = MemoAct.of(outcome) { feedback.fire(act) }
+        }
+    }
+
+    /// Saves an edit of memo `uid` through the timeline and, once it is saved, makes the screen's
+    /// memo (`shown`) say what was saved. The timeline takes the server's answer into the memos it
+    /// holds; a memo it does not hold — a guest memo opened from a trip's Journal (MEMNG-1264) —
+    /// is shown from the screen's own copy, and the next Edit starts from that copy: left as it
+    /// was, a second save would send the first one's words back over it. The read is awaited
+    /// before this returns because the sheet closes on the answer, so no pencil can open an editor
+    /// on the old copy. `answered` hears the outcome before that read.
+    static func saveEdit(
+        _ submission: ComposeSubmission, of uid: String, createdAt original: Date,
+        timeline: TimelineStore, detached: DetachedMemo, through outbox: (any MemoEditQueue)?,
+        composedUnder account: AccountBinding?, using handle: SessionHandle,
+        reading: IssuingSession, answered: (ComposeOutcome) -> Void = { _ in }
+    ) async -> ComposeOutcome {
+        guard let baseURL = reading.baseURL() else { return .failed(.authorization) }
+        let outcome = await timeline.edit(
+            uid: uid,
+            content: submission.content,
+            createdAt: MemoDetailPresentation.editedDate(
+                chosen: submission.createdAt, original: original
+            ),
+            attaching: submission.attachments.map(\.stagedSource),
+            listing: submission.pictures,
+            visibility: submission.visibilityChange,
+            through: outbox,
+            composedUnder: account,
             using: handle,
             baseURL: baseURL
         )
-        if let act = MemoAct.of(outcome) { feedback.fire(act) }
+        answered(outcome)
+        if outcome.isSaved, !timeline.memos.contains(where: { $0.uid == uid }) {
+            await detached.reread(
+                through: timeline, using: handle, baseURL: baseURL, current: reading.handle)
+        }
         return outcome
     }
 
     @ViewBuilder
     private var header: some View {
         let identity = VStack(alignment: .leading, spacing: 0) {
-            Text(MemoCardPresentation.displayName(forOwner: memo.owner))
+            Text(MemoCardPresentation.displayName(for: memo))
                 .font(.subheadline.weight(.semibold))
             Text(memo.createdAt, format: .dateTime.day().month().year().hour().minute())
                 .font(.caption)
@@ -389,7 +439,7 @@ public struct MemoDetailView: View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: DesignTokens.Space.snug) {
                 HStack(spacing: DesignTokens.Space.snug) {
-                    OwnerAvatar(owner: memo.owner, size: avatar)
+                    OwnerAvatar(owner: MemoCardPresentation.avatarName(for: memo), size: avatar)
                     identity
                 }
                 HStack(spacing: DesignTokens.Space.snug) {
@@ -399,7 +449,7 @@ public struct MemoDetailView: View {
             }
         } else {
             HStack(spacing: DesignTokens.Space.snug) {
-                OwnerAvatar(owner: memo.owner, size: avatar)
+                OwnerAvatar(owner: MemoCardPresentation.avatarName(for: memo), size: avatar)
                 identity
                 Spacer(minLength: DesignTokens.Space.snug)
                 archived

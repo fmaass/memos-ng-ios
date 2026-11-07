@@ -22,6 +22,10 @@ private let versionBeforePictureTags = 2
 /// what the current shape holds. A literal, for the same reason.
 private let versionOfOneHalfOnly = 3
 
+/// The version a snapshot written before memos carried their guest (MEMNG-1164) was stamped
+/// with — the literal, for the same reason.
+private let versionBeforeGuests = 4
+
 private func temporaryRoot() -> URL {
     FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
 }
@@ -52,7 +56,7 @@ struct TimelineSnapshotFormatVersionTests {
         #expect(store.read(identity: identity) == nil)
         // The control, and the point: the same file under the current number is read, so what the
         // assertion above caught is the version and not a snapshot this store cannot read at all.
-        #expect(TimelineSnapshot.currentFormatVersion == 4)
+        #expect(TimelineSnapshot.currentFormatVersion == 5)
         var current = snapshot
         current.formatVersion = TimelineSnapshot.currentFormatVersion
         try JSONEncoder().encode(current).write(to: root.appending(path: identity.fileName))
@@ -105,6 +109,51 @@ struct TimelineSnapshotFormatVersionTests {
         current.formatVersion = TimelineSnapshot.currentFormatVersion
         try JSONEncoder().encode(current).write(to: root.appending(path: identity.fileName))
         #expect(store.read(identity: identity) != nil)
+    }
+
+    @Test("a snapshot written before memos carried their guest reads as absent (MEMNG-1164)")
+    func theShapeBeforeGuestsIsNotRead() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineSnapshotStore(root: root)
+        let snapshot = TimelineSnapshot(
+            formatVersion: versionBeforeGuests,
+            identity: identity,
+            query: MemoQuery(),
+            revision: 1,
+            writtenAt: Date(),
+            memos: []
+        )
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(snapshot).write(to: root.appending(path: identity.fileName))
+
+        #expect(store.read(identity: identity) == nil, "a file without guests read as current")
+        // The control: the same file under the current number is read.
+        var current = snapshot
+        current.formatVersion = TimelineSnapshot.currentFormatVersion
+        try JSONEncoder().encode(current).write(to: root.appending(path: identity.fileName))
+        #expect(store.read(identity: identity) != nil)
+    }
+
+    @Test("a snapshot written now keeps a guest memo's contributor (MEMNG-1164)")
+    func theGuestSurvivesARoundTrip() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = TimelineSnapshotStore(root: root)
+        let stamp = Date(timeIntervalSince1970: 1_800_000_000)
+        let guest = Memo(
+            uid: "g", owner: "fabian", mine: true, content: "from the beach", visibility: .private,
+            pinned: false, createdAt: stamp, updatedAt: stamp,
+            guest: MemoGuest(contributorName: "Anna", passUid: "pass-1"))
+        let own = Memo(
+            uid: "o", owner: "fabian", mine: true, content: "mine", visibility: .private,
+            pinned: false, createdAt: stamp, updatedAt: stamp)
+
+        store.write([guest, own], for: identity, revision: 1, query: MemoQuery())
+
+        let read = try #require(store.read(identity: identity))
+        #expect(read.memos[0].guest == MemoGuest(contributorName: "Anna", passUid: "pass-1"))
+        #expect(read.memos[1].guest == nil, "the owner's memo came back as a guest's")
     }
 
     @Test("a snapshot written now keeps each picture's civil clock, its source and its owner")

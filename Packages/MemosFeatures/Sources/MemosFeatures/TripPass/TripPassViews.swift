@@ -34,11 +34,14 @@ struct TripPassSheet: View {
     }
 }
 
-/// Joining a trip: the live scanner when the phone has one, and a paste field always — a link sent
-/// in a chat is a pass too. A refused redeem says why, and "Scan again" gives the scanner a fresh
-/// claim.
+/// Joining a trip: the name to join under, the live scanner when the phone has one, and a paste
+/// field always — a link sent in a chat is a pass too. A refused redeem says why, and "Scan
+/// again" gives the scanner a fresh claim.
 struct TripPassJoinView: View {
     let guest: GuestSessionStore
+    /// Starts as the name typed last time, else empty under its "Your name" placeholder; whatever
+    /// it holds when a code is scanned or Join is tapped is the name sent ("Guest" when empty).
+    @State private var name: String
     @State private var pasted = ""
     @State private var pasteRefused = false
     @State private var scan = 0
@@ -46,6 +49,11 @@ struct TripPassJoinView: View {
     /// Tall enough to aim at a code held at arm's length, short enough to leave the paste field
     /// on screen above the keyboard.
     static let scannerHeight: CGFloat = 280
+
+    init(guest: GuestSessionStore) {
+        self.guest = guest
+        _name = State(initialValue: guest.joinFieldName)
+    }
 
     private var isRedeeming: Bool { guest.state == .redeeming }
 
@@ -56,6 +64,20 @@ struct TripPassJoinView: View {
 
     var body: some View {
         Form {
+            Section {
+                TextField("Your name", text: $name)
+                    .textContentType(.name)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .onChange(of: name) { _, typed in
+                        let capped = GuestName.capped(typed)
+                        if capped != typed { name = capped }
+                    }
+            } header: {
+                Text("Your name")
+            } footer: {
+                Text("The trip shows it with everything you send.")
+            }
             if TripPassScannerView.isAvailable {
                 Section {
                     TripPassScannerView { url in join(url) }
@@ -98,7 +120,8 @@ struct TripPassJoinView: View {
 
     private func join(_ url: URL) {
         pasteRefused = false
-        Task { await guest.redeem(passLink: url) }
+        let typed = name
+        Task { await guest.redeem(passLink: url, typedName: typed) }
     }
 
     private func joinPasted() {
@@ -127,6 +150,7 @@ struct GuestModeView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                GuestNameEditor(guest: guest)
                 Text("Share photos and videos to this trip from the Photos app.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -166,5 +190,59 @@ struct GuestModeView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await guest.refreshReceipts() }
         .refreshable { await guest.refreshReceipts() }
+    }
+}
+
+/// The name the trip credits this phone's pictures to, editable after joining. Saving asks the door
+/// (`GuestSessionStore.rename`); the field is locked until the answer, then shows the name the door
+/// stored (`GuestNameDraft`). A refusal leaves the stored name as it was and says what to do; the
+/// typed text stays so it can be corrected.
+struct GuestNameEditor: View {
+    let guest: GuestSessionStore
+    @State private var draft: GuestNameDraft
+    @State private var notice: String?
+
+    init(guest: GuestSessionStore) {
+        self.guest = guest
+        _draft = State(initialValue: GuestNameDraft(stored: guest.joinedName))
+    }
+
+    var body: some View {
+        HStack {
+            TextField(
+                "Your name",
+                text: Binding(
+                    get: { draft.text },
+                    set: { typed in
+                        draft.edit(typed)
+                        notice = nil
+                    })
+            )
+            .textContentType(.name)
+            .textInputAutocapitalization(.words)
+            .autocorrectionDisabled()
+            .submitLabel(.done)
+            .onSubmit { save() }
+            .disabled(!draft.isEditable)
+            if draft.isEditable {
+                Button("Save") { save() }
+                    .disabled(!draft.canSave(stored: guest.joinedName))
+            } else {
+                ProgressView()
+            }
+        }
+        .onChange(of: guest.joinedName) { _, stored in draft.storedChanged(stored) }
+        if let notice {
+            NoticeCard(text: notice, tone: .error)
+        }
+    }
+
+    private func save() {
+        guard let typed = draft.beginSave(stored: guest.joinedName) else { return }
+        notice = nil
+        Task {
+            let outcome = await guest.rename(to: typed)
+            notice = draft.finish(outcome)
+        }
     }
 }

@@ -101,7 +101,7 @@ private enum Gated {
     }
 
     static func uploadStarts(_ http: ScriptedHTTP) -> Int {
-        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }.count
+        http.sessionAsks.count
     }
 
     static func creates(_ http: ScriptedHTTP) -> Int {
@@ -415,7 +415,8 @@ struct SchedulingSendHopTests {
         let engine = harness.engine(gate: gate)
         let before = await harness.reload()
         harness.http.beforeSend = { request in
-            if request.url?.path() == "/api/uploads" { gate.close() }
+            let path = request.url?.path()
+            if path == "/api/uploads" || path == "/api/uploads/batch" { gate.close() }
         }
 
         await engine.drain()

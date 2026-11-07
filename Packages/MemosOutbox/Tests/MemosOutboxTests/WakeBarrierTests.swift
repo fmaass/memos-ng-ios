@@ -442,7 +442,7 @@ struct OutboxCompositionTests {
             )
         )
         let uploadStarts = {
-            harness.http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }
+            harness.http.sessionAsks
         }
 
         // Launched, and not yet active: nothing new starts.

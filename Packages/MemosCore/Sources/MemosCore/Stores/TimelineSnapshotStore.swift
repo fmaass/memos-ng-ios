@@ -52,7 +52,9 @@ public struct TimelineSnapshot: Sendable, Equatable, Codable {
     /// as current here.
     ///
     /// 4: both — civil capture clock, capture source, the file owner's flag and the file's tags.
-    public static let currentFormatVersion = 4
+    ///
+    /// 5: memos carry their guest — the trip pass contributor who sent them in (MEMNG-1164).
+    public static let currentFormatVersion = 5
 
     public var formatVersion: Int
     public var identity: TimelineSnapshotIdentity

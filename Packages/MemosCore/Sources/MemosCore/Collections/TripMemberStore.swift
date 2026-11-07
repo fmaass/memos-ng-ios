@@ -91,7 +91,15 @@ public final class TripMemberStore {
     /// and the grid's filtered read are two lanes of one key: a filtered ask must not end the
     /// drain's failure, nor a drain the filtered read's.
     private var drainFailures: [String: Lineage] = [:]
-    private var flights: [String: (lineage: Lineage, token: Int, task: Task<Void, Never>)] = [:]
+    private typealias Flight = (
+        lineage: Lineage, token: Int, task: Task<Void, Never>, extraRead: ExtraRead
+    )
+    private var flights: [String: Flight] = [:]
+    /// What a joined stale drain earned (MEMNG-1176): ONE read after it, claimed by the first of
+    /// its joiners that asks, so two listings behind a clock that runs behind the server's read
+    /// once more between them, not once each — whatever order the extra read and the second
+    /// joiner come back in. Kept on the flight, which its joiners hold past the slot's end.
+    private final class ExtraRead { var claimed = false }
     private var removedResults: [String: (lineage: Lineage, state: TripRemovedState)] = [:]
     /// The grid's filtered read of a trip (MEMNG-780), one per trip: the query it answered beside
     /// the drain. Apart from `drained`, which the hero, the Journal, the Map and the Removed list
@@ -180,6 +188,9 @@ public final class TripMemberStore {
     /// Seams for tests: a journal load, or a span read, joining one already in flight.
     @ObservationIgnored var onJournalJoin: (@MainActor () -> Void)?
     @ObservationIgnored var onSpanJoin: (@MainActor () -> Void)?
+    /// Seam for tests: a Guest Uploads read back from the drain it joined, before it decides on
+    /// the extra read (MEMNG-1176).
+    @ObservationIgnored var onJoinedDrainLanded: (@MainActor () async -> Void)?
 
     public init(
         trips: TripStore,
@@ -477,7 +488,7 @@ public final class TripMemberStore {
         nextToken += 1
         let token = nextToken
         let task = Task { await self.runAutomaticDrain(lineage, token: token, handle, baseURL) }
-        flights[scope.id] = (lineage, token, task)
+        flights[scope.id] = (lineage, token, task, ExtraRead())
         await task.value
     }
 
@@ -675,15 +686,24 @@ public final class TripMemberStore {
         guard let newest = contributions.map(\.createdAt).max() else { return false }
         if let held = held(.trip(trip), under: handle), newest <= held.asked { return false }
         let lineage = Lineage(revision: trips.revision, session: handle.generation, uid: trip.uid)
-        let joined = flights[trip.uid]?.lineage == lineage
+        let joined = flights[trip.uid].flatMap { $0.lineage == lineage ? $0.extraRead : nil }
         await drain(trip, using: handle, baseURL: baseURL)
+        if joined != nil { await onJoinedDrainLanded?() }
         // A joined drain may have been answered before the picture came in: what it left is read
         // once more when it was asked for before the newest contribution — one read, no loop. Not
         // behind a failure, which the screen shows and the user retries, and not after a drain
-        // this call started itself, asked after the listing.
-        guard joined, drainFailures[trip.uid] == nil,
+        // this call started itself, asked after the listing. The read is the flight's, not each
+        // joiner's: a joiner that finds it claimed joins it while it is out and starts none.
+        guard let joined, drainFailures[trip.uid] == nil,
             let held = held(.trip(trip), under: handle), held.asked < newest
         else { return true }
+        guard !joined.claimed else {
+            if let running = flights[trip.uid], running.lineage == lineage {
+                await running.task.value
+            }
+            return true
+        }
+        joined.claimed = true
         await drain(trip, using: handle, baseURL: baseURL)
         return true
     }
@@ -698,7 +718,7 @@ public final class TripMemberStore {
         nextToken += 1
         let token = nextToken
         let task = Task { await self.runDrain(lineage, token: token, handle, baseURL) }
-        flights[uid] = (lineage, token, task)
+        flights[uid] = (lineage, token, task, ExtraRead())
         await task.value
     }
 
