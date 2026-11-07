@@ -264,7 +264,9 @@ struct UploadBudgetTests {
         let configuration = OutboxUploadSession.backgroundConfiguration(
             appGroup: "group.test.invalid"
         )
-        #expect(configuration.httpMaximumConnectionsPerHost == 2)
+        // Sized for the adaptive budget's ceiling (MEMNG-958): the engine's places are the gate.
+        #expect(configuration.httpMaximumConnectionsPerHost == 3)
+        #expect(UploadBudget.maxInFlightUploads == 3)
         #expect(UploadBudget.inFlightUploads == 2)
     }
 }

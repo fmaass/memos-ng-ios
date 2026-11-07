@@ -790,8 +790,10 @@ struct UploadInterleavingTests {
 
 @Suite("Whole lane: the scheduler fences the upload budget")
 struct UploadBudgetFenceTests {
-    @Test("the scheduler refuses a third task while two are in flight, and takes one once one ends")
-    func thirdTaskRefused() async throws {
+    /// The scheduler's fence is the adaptive budget's ceiling (MEMNG-958), never its starting
+    /// value: the engine's places keep to the budget, this fence to the most it ever allows.
+    @Test("the scheduler refuses a task past the ceiling, and takes one once one ends")
+    func taskPastCeilingRefused() async throws {
         let session = ScriptedUploadTaskSession()
         let delegate = UploadSessionDelegate()
         let scheduler = Upload.scheduler(on: session, delegate: delegate)
@@ -804,9 +806,9 @@ struct UploadBudgetFenceTests {
             )
         }
         let first = try #require(await send())
-        _ = try #require(await send())
+        for _ in 1..<UploadBudget.maxInFlightUploads { _ = try #require(await send()) }
         #expect(await send() == nil)
-        #expect(session.createdTasks.count == 2)
+        #expect(session.createdTasks.count == UploadBudget.maxInFlightUploads)
 
         let created = try #require(session.createdTasks.first)
         delegate.complete(
@@ -814,12 +816,12 @@ struct UploadBudgetFenceTests {
             statusCode: 204, errorDescription: nil
         )
         #expect(await send() != nil)
-        #expect(session.createdTasks.count == 3)
+        #expect(session.createdTasks.count == UploadBudget.maxInFlightUploads + 1)
     }
 
     @Test("a task another launch left sending counts against the fence once a listing shows it")
     func listedTaskCounts() async throws {
-        let listed = (0..<2).map { index in
+        let listed = (0..<UploadBudget.maxInFlightUploads).map { index in
             WholeTaskListing(
                 taskIdentifier: 50 + index,
                 taskDescription: Upload.identity().taskDescription,

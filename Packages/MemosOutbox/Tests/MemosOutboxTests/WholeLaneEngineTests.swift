@@ -556,7 +556,17 @@ struct WholeRig {
         let attempted = WholeBox<[String]>([])
         http.beforeSend = { request in
             attempted.mutate {
-                $0.append("\(request.httpMethod ?? "") \(request.url?.path() ?? "")")
+                // A batch is one attempt per session it asks for (MEMNG-958): counted as the
+                // single creates it stands in for, so a count of session attempts reads the same.
+                if request.url?.path() == "/api/uploads/batch" {
+                    let body = request.httpBody.flatMap {
+                        try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                    }
+                    let entries = (body?["entries"] as? [Any])?.count ?? 0
+                    $0.append(contentsOf: Array(repeating: "POST /api/uploads", count: entries))
+                } else {
+                    $0.append("\(request.httpMethod ?? "") \(request.url?.path() ?? "")")
+                }
             }
         }
         let session = ScriptedUploadTaskSession(listing: listing(job), onCancel: onCancel)
@@ -605,9 +615,8 @@ struct WholeRig {
 
     func reload() async throws -> UploadJob { try #require(await repository.job(job.id)) }
 
-    var uploadPosts: Int {
-        http.requests(method: "POST").filter { $0.url?.path() == "/api/uploads" }.count
-    }
+    /// Upload sessions asked for — one per file, whether alone or inside a batch.
+    var uploadPosts: Int { http.sessionAsks.count }
 
     var attemptedUploadPosts: Int { attempted.value.filter { $0 == "POST /api/uploads" }.count }
 
@@ -2159,10 +2168,9 @@ extension WholeRig {
     }
 
     func postsNaming(_ filename: String) -> Int {
-        http.requests(method: "POST").filter { request in
-            request.url?.path() == "/api/uploads"
-                && (request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "")
-                    .contains(filename)
+        http.sessionAsks.filter { request in
+            (request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? "")
+                .contains(filename)
         }.count
     }
 
@@ -2474,7 +2482,9 @@ struct WholeBudgetEngineTests {
         #expect(rig.session.createdTasks.count == 4)
     }
 
-    @Test("a session request answered 429 spaces its file; a sibling's success clears nothing")
+    /// Both sessions open in one batch (MEMNG-958), where a 429 can only answer the whole request;
+    /// what one file alone can be answered with is its entry's 507, which carries no delay.
+    @Test("a batch entry answered 507 spaces its file; a sibling's success clears nothing")
     func sessionBackpressureIsPerFile() async throws {
         let sleeper = ControlledSleeper()
         let busy = WholeBox(true)
@@ -2483,7 +2493,7 @@ struct WholeBudgetEngineTests {
             answerPost: { request in
                 let body = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
                 guard busy.value, body.contains("video.mov") else { return nil }
-                return OutboxHTTPResponse(statusCode: 429, headers: ["Retry-After": "2"])
+                return OutboxHTTPResponse(statusCode: 507)
             }
         )
         defer { rig.cleanUp() }
@@ -2491,7 +2501,8 @@ struct WholeBudgetEngineTests {
         await rig.engine.drain()
         try await settled(rig.engine)
         let row = try await rig.reload()
-        #expect(row.file(rig.video.id)?.nextAttemptAt == start.addingTimeInterval(2))
+        let deadline = try #require(row.file(rig.video.id)?.nextAttemptAt)
+        #expect(deadline > start)
         #expect(row.state != .held)
         let picture = try rig.task(for: rig.picture.id)
         #expect(rig.postsNaming("video.mov") == 1)
@@ -2501,8 +2512,9 @@ struct WholeBudgetEngineTests {
         await rig.engine.handle(try rig.answer(picture, status: 200, received: 1000))
         try await settled(rig.engine)
         #expect(rig.postsNaming("video.mov") == 1)
+        #expect(try await rig.reload().file(rig.video.id)?.nextAttemptAt == deadline)
 
-        rig.clock.advance(2)
+        rig.clock.advance(deadline.timeIntervalSince(rig.clock.now))
         sleeper.advance(to: rig.clock.now)
         #expect(try await rig.eventually { rig.postsNaming("video.mov") == 2 })
         #expect(try await rig.eventually { (try? rig.task(for: rig.video.id)) != nil })
