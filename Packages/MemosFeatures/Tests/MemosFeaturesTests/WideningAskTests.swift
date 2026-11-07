@@ -240,6 +240,41 @@ struct WideningAskTests {
         #expect(ask.pending == nil)
     }
 
+    @Test("one question per memo: none asked twice, a newer one takes a waiting one's place")
+    func queueHoldsOneQuestionPerMemo() throws {
+        var ask = WideningAsk()
+        #expect(ask.pick(.public, from: .private, on: "m1") == .asking)
+        let first = try #require(ask.pending)
+        // The same question for the memo on screen, heard again, is not asked a second time.
+        ask.heard(.ask(first.question), on: "m1")
+        // Two questions for another memo while the first is up: the newer one waits, alone.
+        ask.heard(.ask(try Self.question(.private, .protected)), on: "m2")
+        let newer = try Self.question(.private, .public)
+        ask.heard(.ask(newer), on: "m2")
+        #expect(ask.answer(first, confirmed: false) == nil, "control: a dismissal sends nothing")
+        let next = try #require(ask.pending, "the waiting question was lost")
+        #expect(next.uid == "m2" && next.question == newer, "the older question was asked")
+        #expect(ask.answer(next, confirmed: false) == nil)
+        #expect(ask.pending == nil, "a memo's question was asked twice")
+    }
+
+    @Test("a newer question for the memo on screen supersedes it; the old yes sends nothing")
+    func newerQuestionSupersedesTheOneOnScreen() throws {
+        var ask = WideningAsk()
+        #expect(ask.pick(.protected, from: .private, on: "m1") == .asking)
+        let first = try #require(ask.pending)
+        let newer = try Self.question(.private, .public)
+        #expect(first.question != newer, "control: two different questions for one memo")
+        ask.heard(.ask(newer), on: "m1")
+        let shown = try #require(ask.pending, "the newer question was not put up")
+        #expect(shown.uid == "m1" && shown.question == newer, "the older question stayed up")
+        #expect(shown.id != first.id, "the newer question is its own presentation")
+        #expect(ask.answer(first, confirmed: true) == nil, "the superseded alert's yes was sent")
+        let yes = ask.answer(shown, confirmed: true)
+        #expect(yes == WideningAsk.Send(uid: "m1", change: newer.confirmed()))
+        #expect(ask.pending == nil, "the superseded question was still in line")
+    }
+
     @Test("the alert's dismissal answers the presentation it showed, not the one promoted after")
     func dismissalAnswersItsOwnPresentation() throws {
         let held = Held()

@@ -1572,7 +1572,10 @@ extension PatchCompletionTests {
         let minted = try #require(job.editKey, "the edit job was written without a key")
         #expect(job.memoEdit != nil)
         #expect(harness.memoPatches.isEmpty, "the PATCH went out before its file was up")
+        // One drain can return at once beside another already carrying the file, so the wait is
+        // for the task's creation itself, not for a drain.
         if session.createdTasks.isEmpty { await harness.outbox.drain() }
+        try await bounded("the file going up") { await session.untilCreated(1) }
         #expect(harness.memoPosts.isEmpty, "an edit job asked for a new memo")
         let created = try #require(session.createdTasks.last, "the file never went up")
         delegate.deliver(try wholeArrival(of: created))

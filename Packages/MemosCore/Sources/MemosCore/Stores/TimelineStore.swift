@@ -1441,7 +1441,8 @@ public final class TimelineStore {
     /// row was last written, not whether that write was this one. So a row at or narrower than the
     /// audience sent settles it — the change landed, or the server holds something narrower still
     /// — and a wider row keeps the narrower record and the mark, which costs a question at worst.
-    /// The next confirmed change settles it regardless (`patchAnswer`).
+    /// The next confirmed change NAMING an audience settles it regardless (`patchAnswer`); one
+    /// that names none is judged by this, as a read is.
     private func readSettlesLostChange(_ memo: Memo) -> Bool {
         guard unsettledVisibility[memo.uid] != nil, let sent = sentVisibility[memo.uid] else {
             return true
@@ -3055,7 +3056,12 @@ public final class TimelineStore {
                 // Before the apply, which awaits: see `setPinned`.
                 lastError = nil
                 let answered = Memo(try ok.body.json, baseURL: baseURL)
-                recordServerAudience(answered)
+                // A PATCH that did not name the audience says of it only what a read issued now
+                // would: answered before a lost change landed, it shows the row as it was, so
+                // only its content may settle that change (MEMNG-1194).
+                if body.visibility != nil || readSettlesLostChange(answered) {
+                    recordServerAudience(answered)
+                }
                 await apply(answered, under: authority, confirming: claim)
                 return MemoMutationAnswer(.saved, memo: answered)
             // The contract documents this one now. It arrived as `.undocumented(404)` before and
