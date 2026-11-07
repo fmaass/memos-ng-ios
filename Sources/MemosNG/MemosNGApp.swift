@@ -120,8 +120,7 @@ final class MemosNGAppDelegate: NSObject, UIApplicationDelegate {
     private(set) lazy var guestSession: GuestSessionStore = {
         let guest = GuestSessionStore(
             credentials: self.guestCredentials,
-            licence: OutboxAccountStore.guestLive(),
-            deviceName: UIDevice.current.name
+            licence: OutboxAccountStore.guestLive()
         )
         guest.onActivated = { [weak self] in self?.guestModeActivated() }
         return guest

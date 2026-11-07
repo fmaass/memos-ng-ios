@@ -91,6 +91,31 @@ public enum GuestWire {
         }
     }
 
+    /// `PATCH /api/guest/device`'s body: the name the door credits this device's pictures to.
+    ///
+    /// Not yet pinned by `GuestContractTests`: the vendored `openapi-guest.json` predates the
+    /// route. The next contract sync adds it there, and `routeSet` fails until it is mirrored.
+    public struct Rename: Encodable, Sendable, Equatable {
+        public var displayName: String
+
+        public init(displayName: String) {
+            self.displayName = displayName
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case displayName = "display_name"
+        }
+    }
+
+    /// `PATCH /api/guest/device`'s answer (200): the name as the door stored it.
+    public struct Renamed: Decodable, Sendable, Equatable {
+        public var displayName: String
+
+        public enum CodingKeys: String, CodingKey {
+            case displayName = "display_name"
+        }
+    }
+
     /// `POST /api/guest/uploads`'s body. `sha256` is what lets the door answer "already received"
     /// for bytes this pass already holds, so a re-share costs no upload.
     public struct UploadStart: Encodable, Sendable, Equatable {

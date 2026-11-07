@@ -22,6 +22,11 @@ import OpenAPIRuntime
 /// against the guest epoch that issued it: an answer that outlived a leave or a newer pass
 /// publishes nothing. A redeem is judged the same way against the session generation it was sent
 /// under: a pass the door hands over after a leave is not taken.
+///
+/// Overlapping renames JOIN the same way: one `PATCH /api/guest/device` on the wire, sent under the
+/// first caller's name, and every caller gets its outcome. A rename answered after a leave, an
+/// ended pass or a newer pass writes no name back, and a rename under a newer pass never joins one
+/// the older pass left on the wire.
 @MainActor
 @Observable
 public final class GuestSessionStore {
@@ -68,6 +73,39 @@ public final class GuestSessionStore {
         }
     }
 
+    /// What a rename after joining came to, in the terms the person is shown.
+    public enum RenameRefusal: Sendable, Equatable {
+        /// Nothing but blanks was typed; nothing was sent.
+        case emptyName
+        /// The door would not take the name.
+        case invalidName
+        /// The door ended the pass this device held; guest mode is over.
+        case passEnded
+        /// No pass on this device to rename.
+        case notJoined
+        /// The door could not be reached, or answered something this app cannot read.
+        case unavailable
+
+        public var message: String {
+            switch self {
+            case .emptyName: "Type a name first."
+            case .invalidName: "The trip would not take that name. Use 1 to 64 characters."
+            case .passEnded: "This trip pass has ended."
+            case .notJoined: "Join a trip first."
+            case .unavailable: "The name could not be saved. Try again."
+            }
+        }
+    }
+
+    public enum RenameOutcome: Sendable, Equatable {
+        /// The door stored this name; it is shown and remembered.
+        case renamed(String)
+        case refused(RenameRefusal)
+        /// Guest mode ended, or another pass took over, while the request was on the wire. Nothing
+        /// was written.
+        case superseded
+    }
+
     public private(set) var state: State = .none
     /// What the door says this device has sent, newest first as the door orders them.
     public private(set) var receipts: [GuestWire.Receipt] = []
@@ -83,9 +121,12 @@ public final class GuestSessionStore {
     @ObservationIgnored private let credentials: GuestCredentialStore
     @ObservationIgnored private let licence: (any OutboxAccountPublishing)?
     @ObservationIgnored private let door: GuestDoorClient
-    @ObservationIgnored private let deviceName: String
     @ObservationIgnored private let names: UserDefaults
     @ObservationIgnored private var redeeming: Task<State, Never>?
+    /// The rename on the wire, with the generation and credential epoch it was sent under, so only
+    /// a caller under the same pass joins it.
+    @ObservationIgnored private var renaming: InFlightRename?
+    @ObservationIgnored private var renameCount = 0
     /// Moved, synchronously, by every mutation that ends guest mode: `leave`, and a refusal that
     /// ends the pass. A redeem reads it before its request is sent; once it has moved, whatever
     /// the redeem hears back is dropped — the guest credential epoch cannot say this, because a
@@ -103,7 +144,6 @@ public final class GuestSessionStore {
         // The door's own URLSession transport unless a test scripts one — a default here, so the
         // app composes the store without naming the API layer it never imports.
         transport: any ClientTransport = APIClientFactory.guestTransport(),
-        deviceName: String,
         // The app group's, so the name survives the app's own container being the one that is
         // reset; a test hands in a scratch suite.
         names: UserDefaults = UserDefaults(suiteName: DeviceCredentials.appGroup) ?? .standard
@@ -111,16 +151,18 @@ public final class GuestSessionStore {
         self.credentials = credentials
         self.licence = licence
         self.door = GuestDoorClient(transport: transport)
-        self.deviceName = deviceName
         self.names = names
     }
 
-    /// The name a redeem with nothing typed is sent under, and the one the Join screen starts with:
-    /// the name typed last time, else the device's.
+    /// The name a redeem with nothing typed is sent under: the name typed last time, else
+    /// `GuestName.lastResort`.
     public var presentedName: String {
-        GuestName.resolve(
-            typed: nil, remembered: names.string(forKey: Self.rememberedNameKey),
-            deviceName: deviceName)
+        GuestName.resolve(typed: nil, remembered: names.string(forKey: Self.rememberedNameKey))
+    }
+
+    /// What the Join screen's name field starts with: the name typed last time, else empty.
+    public var joinFieldName: String {
+        GuestName.fieldStart(remembered: names.string(forKey: Self.rememberedNameKey))
     }
 
     /// Redeems the pass a link carries, under `typedName` (see `redeem(secret:typedName:)`).
@@ -138,15 +180,18 @@ public final class GuestSessionStore {
     /// the first caller's name.
     ///
     /// `typedName` is what the person typed; trimmed and capped to the door's 64, it is sent and
-    /// remembered for next time. Blank or `nil` (a link opened from outside), the remembered name
-    /// is sent, else the device's.
+    /// remembered for next time. `nil` (a link opened from outside, with no field to read) sends
+    /// the remembered name, else `GuestName.lastResort`. A field left or cleared blank sends
+    /// `GuestName.lastResort`: the person emptied it, so a remembered name is not put back; the
+    /// remembered name itself is kept for the next Join field.
     @discardableResult
     public func redeem(secret: String, typedName: String? = nil) async -> State {
         if let redeeming { return await redeeming.value }
         if let typed = GuestName.cleaned(typedName) {
             names.set(typed, forKey: Self.rememberedNameKey)
         }
-        let name = presentedName
+        let name =
+            typedName == nil ? presentedName : GuestName.resolve(typed: typedName, remembered: nil)
         let task = Task { @MainActor in await self.performRedeem(secret: secret, name: name) }
         redeeming = task
         let outcome = await task.value
@@ -192,6 +237,35 @@ public final class GuestSessionStore {
         case .failed:
             return
         }
+    }
+
+    /// `PATCH /api/guest/device`: renames the device the pass this device holds is redeemed on,
+    /// under the guest token the other door calls present. Joins a rename already on the wire for
+    /// the same pass: one request, one outcome, under the first caller's name.
+    ///
+    /// `typed` is trimmed and capped to the door's 64; blank, nothing is sent. The door's stored
+    /// spelling is what is shown and remembered. A refusal goes to the one guest refusal rule,
+    /// which ends guest mode when it names this pass's credential; any other refusal or failure
+    /// leaves the joined name as it was.
+    @discardableResult
+    public func rename(to typed: String) async -> RenameOutcome {
+        if let renaming, renaming.generation == generation,
+            credentials.epoch.isCurrent(renaming.epoch)
+        {
+            return await renaming.task.value
+        }
+        guard let name = GuestName.cleaned(typed) else { return .refused(.emptyName) }
+        guard let grant = credentials.grant() else { return .refused(.notJoined) }
+        let issuedUnder = generation
+        renameCount += 1
+        let id = renameCount
+        let task = Task { @MainActor in
+            await self.performRename(name, grant: grant, issuedUnder: issuedUnder)
+        }
+        renaming = InFlightRename(id: id, generation: issuedUnder, epoch: grant.epoch, task: task)
+        let outcome = await task.value
+        if renaming?.id == id { renaming = nil }
+        return outcome
     }
 
     /// Leaves the trip: the pass and its licence go, so the share sheet stops offering the trip.
@@ -283,6 +357,37 @@ public final class GuestSessionStore {
         return state
     }
 
+    private func performRename(
+        _ name: String, grant: OutboxCredentials, issuedUnder: Int
+    ) async -> RenameOutcome {
+        let answer = await door.renameDevice(
+            GuestWire.Rename(displayName: name), token: grant.token
+        )
+        // A leave, an ended pass or a newer pass while the request was on the wire wins, whatever
+        // the answer. Both fences, because a leave moves the generation before its credential
+        // clear has moved the epoch, and a newer pass moves the epoch without a leave. Read with
+        // nothing awaited before the writes below.
+        guard generation == issuedUnder, credentials.epoch.isCurrent(grant.epoch) else {
+            return .superseded
+        }
+        switch answer {
+        case .success(let renamed):
+            let stored = renamed.displayName
+            names.set(stored, forKey: Self.joinedNameKey)
+            names.set(stored, forKey: Self.rememberedNameKey)
+            joinedName = stored
+            return .renamed(stored)
+        case .refused(let status):
+            switch await refused(status, issuedUnder: grant.epoch, what: "trip name") {
+            case .endedGuestMode: return .refused(.passEnded)
+            case .superseded: return .superseded
+            case .notAboutTheGuestCredential: return .refused(Self.renameRefusal(status))
+            }
+        case .failed:
+            return .refused(.unavailable)
+        }
+    }
+
     private func forgetJoinedName() {
         joinedName = nil
         names.removeObject(forKey: Self.joinedNameKey)
@@ -310,11 +415,14 @@ public final class GuestSessionStore {
         onActivated?()
     }
 
-    private func refused(_ status: Int, issuedUnder epoch: Int, what: String) async {
+    @discardableResult
+    private func refused(
+        _ status: Int, issuedUnder epoch: Int, what: String
+    ) async -> GuestRefusalOutcome {
         let refusal = OutboxRefusal(
             statusCode: status, issuedUnder: epoch, what: what, kind: .guest
         )
-        await handle(refusal)
+        return await handle(refusal)
     }
 
     /// Takes a pass back out of the guest accounts after guest mode ended under its redeem.
@@ -336,6 +444,10 @@ public final class GuestSessionStore {
         }
     }
 
+    static func renameRefusal(_ status: Int) -> RenameRefusal {
+        status == 422 ? .invalidName : .unavailable
+    }
+
     static func redeemRefusal(_ status: Int) -> RedeemRefusal {
         switch status {
         case 404: .unknownPass
@@ -344,6 +456,13 @@ public final class GuestSessionStore {
         default: .unavailable
         }
     }
+}
+
+private struct InFlightRename {
+    let id: Int
+    let generation: Int
+    let epoch: Int
+    let task: Task<GuestSessionStore.RenameOutcome, Never>
 }
 
 /// Which guest captures are held because the pass this device holds NOW was turned away.
@@ -365,7 +484,7 @@ enum GuestHeldJobs {
     }
 }
 
-/// The guest door's three routes this store reads, as raw requests over a transport.
+/// The guest door's routes this store speaks to, as raw requests over a transport.
 ///
 /// The one seam the generated guest client replaces: `operationID`s are the server's own.
 struct GuestDoorClient: Sendable {
@@ -401,8 +520,17 @@ struct GuestDoorClient: Sendable {
         )
     }
 
-    private func authorized(path: String, token: String) -> HTTPRequest {
-        var request = HTTPRequest(method: .get, scheme: nil, authority: nil, path: path)
+    func renameDevice(_ body: GuestWire.Rename, token: String) async -> Answer<GuestWire.Renamed> {
+        guard let data = try? GuestWire.encode(body) else { return .failed }
+        var request = authorized(path: "/api/guest/device", token: token, method: .patch)
+        request.headerFields[.contentType] = "application/json"
+        return await send(request, body: data, operationID: "guestRenameDevice")
+    }
+
+    private func authorized(
+        path: String, token: String, method: HTTPRequest.Method = .get
+    ) -> HTTPRequest {
+        var request = HTTPRequest(method: method, scheme: nil, authority: nil, path: path)
         request.headerFields[.authorization] = "Bearer \(token)"
         return request
     }
