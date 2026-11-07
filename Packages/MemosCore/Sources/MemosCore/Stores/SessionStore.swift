@@ -190,6 +190,9 @@ public final class SessionStore {
     /// The capture grant's file beside that licence (MEMNG-938): the upload-only credential the
     /// share extension may present. Nil unless the app composes one, for the same reason.
     private let captureGrants: CaptureGrantStore?
+    /// The Live Activity push-to-start token's registration (MEMNG-946), composed by the app. The
+    /// sign-out deletes the token while this session's credential can still present the request.
+    public var liveActivityTokens: LiveActivityTokenStore?
     /// The mint in flight, with the authority epoch and the retirement count it was asked under.
     /// A second foreground under the same pair JOINS it — one request on the wire; under another
     /// pair it is replaced, and the old answer's own fence writes nothing.
@@ -1557,6 +1560,9 @@ public final class SessionStore {
         }
         // The capture grant goes FIRST, while the token that minted it can still revoke it.
         if let grant = retireCaptureGrant() { await Self.revokeCaptureGrant(grant, with: client) }
+        // So does the push-to-start token, for the same reason: after the revoke below nothing
+        // this device holds can name it to the server.
+        await liveActivityTokens?.unregister(generation: issued, with: client)
         do {
             let response = try await client.nativeLogoutApiAuthNativeLogoutPost(.init())
             guard owns(issued) else {
