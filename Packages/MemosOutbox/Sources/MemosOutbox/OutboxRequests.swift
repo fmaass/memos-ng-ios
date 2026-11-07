@@ -110,6 +110,18 @@ public enum OutboxRequests {
         return request
     }
 
+    /// The withdraw (MEMNG-953): the server takes no more bytes for this session and never
+    /// finalizes it. Always 204, also for a session gone or never this caller's. Member route
+    /// only: the guest door has no withdraw.
+    public static func withdrawUpload(
+        baseURL: URL, token: String, uploadUID: String
+    ) -> URLRequest {
+        var request = URLRequest(url: uploadURL(baseURL: baseURL, uploadUID: uploadUID))
+        request.httpMethod = "DELETE"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
     public static func createMemo(
         baseURL: URL,
         token: String,
